@@ -99,6 +99,7 @@ check_content "config/includes.chroot/usr/local/bin/neuros-welcome" "Gtk.Window"
 echo ""
 echo "--- Core Tools ---"
 ALL_TOOLS=(
+    "neuroslib.py"
     "neuros-chat"
     "neuros-model"
     "neuros-snippets"

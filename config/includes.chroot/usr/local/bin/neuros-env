@@ -309,34 +309,76 @@ def cmd_export(args):
 
 
 # === Secrets Management ===
-def _xor_encrypt(data, key):
-    """Simple XOR encryption (not production-grade, but better than plaintext)."""
-    result = bytearray()
-    for i, b in enumerate(data.encode()):
-        result.append(b ^ ord(key[i % len(key)]))
-    return base64.b64encode(bytes(result)).decode()
-
-
-def _xor_decrypt(encrypted, key):
-    """Simple XOR decryption."""
-    try:
-        data = base64.b64decode(encrypted)
-        result = bytearray()
-        for i, b in enumerate(data):
-            result.append(b ^ ord(key[i % len(key)]))
-        return result.decode()
-    except Exception:
-        return None
-
-
 def _get_encryption_key():
-    """Derive encryption key from machine ID."""
+    """Derive a 256-bit encryption key from machine ID + user salt."""
     try:
         with open("/etc/machine-id") as f:
             machine_id = f.read().strip()
-        return hashlib.sha256(f"neuros-secrets:{machine_id}".encode()).hexdigest()[:16]
     except Exception:
-        return "neuros-default-key"
+        machine_id = "fallback-machine-id"
+    user = os.getenv("USER", "unknown")
+    home = os.path.expanduser("~")
+    salt = f"neuros-secrets-v2:{machine_id}:{user}:{home}"
+    return hashlib.pbkdf2_hmac("sha256", salt.encode(), b"neuros-secret-key", 200000, dklen=32)
+
+
+def _encrypt_value(plaintext, key):
+    """Encrypt using AES-256-GCM via cryptography library, or PBKDF2-XOR fallback."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        nonce = os.urandom(12)
+        aesgcm = AESGCM(key)
+        ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
+        return base64.b64encode(b"AES:" + nonce + ciphertext).decode()
+    except ImportError:
+        pass
+    # Fallback: PBKDF2-based XOR with random salt + format prefix
+    salt = os.urandom(16)
+    derived = hashlib.pbkdf2_hmac("sha256", key, salt, 100000, dklen=max(len(plaintext), 32))
+    encrypted = bytes(a ^ b for a, b in zip(plaintext.encode(), derived[:len(plaintext)]))
+    return base64.b64encode(b"XOR:" + salt + encrypted).decode()
+
+
+def _decrypt_value(encrypted_b64, key):
+    """Decrypt a value encrypted with _encrypt_value. Uses format prefix."""
+    try:
+        raw = base64.b64decode(encrypted_b64)
+    except Exception:
+        return None
+    # Check format prefix
+    if raw[:4] == b"AES:":
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            payload = raw[4:]
+            if len(payload) > 12:
+                nonce = payload[:12]
+                ciphertext = payload[12:]
+                aesgcm = AESGCM(key)
+                return aesgcm.decrypt(nonce, ciphertext, None).decode()
+        except ImportError:
+            return None  # Can't decrypt without cryptography
+        except Exception:
+            return None  # Corrupted or wrong key
+    elif raw[:4] == b"XOR:":
+        payload = raw[4:]
+        if len(payload) > 16:
+            salt = payload[:16]
+            encrypted = payload[16:]
+            derived = hashlib.pbkdf2_hmac("sha256", key, salt, 100000, dklen=max(len(encrypted), 32))
+            try:
+                return bytes(a ^ b for a, b in zip(encrypted, derived[:len(encrypted)])).decode()
+            except UnicodeDecodeError:
+                return None
+    else:
+        # Legacy v1 XOR ciphertexts (no prefix) — try simple XOR
+        try:
+            result = bytearray()
+            for i, b in enumerate(raw):
+                result.append(b ^ key[i % len(key)])
+            return result.decode()
+        except Exception:
+            return None
+    return None
 
 
 def load_secrets():
@@ -363,14 +405,14 @@ def cmd_secret_set(args):
 
     if "=" in args.keyvalue:
         k, v = args.keyvalue.split("=", 1)
-        secrets[k] = _xor_encrypt(v, key)
+        secrets[k] = _encrypt_value(v, key)
         save_secrets(secrets)
         print(f"✅ Secret stored: {k}")
     else:
         # Read from stdin
         k = args.keyvalue
         v = sys.stdin.read().strip()
-        secrets[k] = _xor_encrypt(v, key)
+        secrets[k] = _encrypt_value(v, key)
         save_secrets(secrets)
         print(f"✅ Secret stored: {k} (from stdin)")
 
@@ -384,7 +426,7 @@ def cmd_secret_get(args):
         print(f"❌ Secret not found: {args.key}")
         sys.exit(1)
 
-    decrypted = _xor_decrypt(secrets[args.key], key)
+    decrypted = _decrypt_value(secrets[args.key], key)
     if decrypted is None:
         print(f"❌ Failed to decrypt: {args.key}")
         sys.exit(1)
