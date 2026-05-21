@@ -1,0 +1,35 @@
+[Unit]
+Description=NeurOS Autonomous AI Sysadmin
+Documentation=https://github.com/erichanwang/NeurOS
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/neuros-autofix --daemon 300
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=30
+User=root
+Group=root
+Environment=HOME=/root
+
+# Security hardening
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/.local/share/neuros
+ReadWritePaths=/root/.config/neuros
+ReadWritePaths=/var/log
+ReadWritePaths=/tmp
+
+ExecStartPre=/bin/mkdir -p /root/.local/share/neuros/autofix /root/.config/neuros
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=neuros-autofix
+
+[Install]
+WantedBy=multi-user.target

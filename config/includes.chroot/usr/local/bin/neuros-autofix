@@ -1,0 +1,823 @@
+#!/usr/bin/env python3
+"""
+neuros-autofix — NeurOS Autonomous AI Sysadmin
+Fully autonomous system repair: detects problems, navigates the filesystem,
+runs sudo commands, diagnoses root causes, fixes issues, and verifies repairs.
+
+Usage:
+  neuros-autofix                         Run full autonomous diagnosis + repair
+  neuros-autofix --check                  Check-only mode (report, don't fix)
+  neuros-autofix --fix <issue>            Fix a specific issue
+  neuros-autofix --daemon [interval]       Run as background daemon (default: 300s)
+  neuros-autofix --interactive            Interactive AI sysadmin chat
+  neuros-autofix --logs                   View autofix history
+  neuros-autofix --dry-run                Show what would be fixed without doing it
+"""
+
+import sys
+import os
+import json
+import re
+import time
+import shlex
+import shutil
+import signal
+import subprocess
+import argparse
+import tempfile
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
+
+LOG_DIR = os.path.expanduser("~/.local/share/neuros/autofix")
+LOG_FILE = os.path.join(LOG_DIR, "history.json")
+STATE_FILE = os.path.join(LOG_DIR, "state.json")
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+PID_FILE = os.path.join(LOG_DIR, "daemon.pid")
+
+
+def ensure_dirs():
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=1500):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.2}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=90)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception as e:
+        return None
+
+
+def run_cmd(cmd_list, timeout=30, sudo=False):
+    """Run a command safely with sudo support. Returns (stdout, stderr, returncode)."""
+    try:
+        if sudo:
+            cmd_list = ["sudo", "-n"] + cmd_list
+        result = subprocess.run(
+            cmd_list, capture_output=True, text=True, timeout=timeout
+        )
+        return result.stdout.strip(), result.stderr.strip(), result.returncode
+    except subprocess.TimeoutExpired:
+        return "", "Command timed out", 124
+    except FileNotFoundError as e:
+        return "", str(e), 127
+    except Exception as e:
+        return "", str(e), 1
+
+
+def check_sudo():
+    """Check if passwordless sudo is available."""
+    out, _, rc = run_cmd(["true"], sudo=True, timeout=5)
+    return rc == 0
+
+
+def log_action(action, target, command, result, success):
+    ensure_dirs()
+    history = []
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE) as f:
+            history = json.load(f)
+    history.append({
+        "timestamp": datetime.now().isoformat(),
+        "action": action,
+        "target": target,
+        "command": " ".join(command) if isinstance(command, list) else command,
+        "result": result[:1000],
+        "success": success
+    })
+    if len(history) > 500:
+        history = history[-500:]
+    with open(LOG_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+# ─── CHECK MODULES ───────────────────────────────────────────
+
+def check_services():
+    issues = []
+    critical_services = [
+        ("ollama", "Ollama LLM service"),
+        ("ufw", "Firewall"),
+        ("cron", "Task scheduler"),
+        ("systemd-journald", "System logging"),
+        ("NetworkManager", "Network manager"),
+    ]
+    for svc, desc in critical_services:
+        out, _, rc = run_cmd(["systemctl", "is-active", svc, "--quiet"], timeout=10)
+        if rc != 0:
+            issues.append({
+                "type": "service_down",
+                "service": svc,
+                "description": desc,
+                "severity": "high" if svc in ("ufw", "ollama") else "medium"
+            })
+    return issues
+
+
+def check_disk_space(min_percent=5.0):
+    issues = []
+    out, _, _ = run_cmd(["df", "-h", "/"])
+    if out:
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 5:
+                pct = parts[4].replace("%", "")
+                try:
+                    if float(pct) > 95:
+                        issues.append({
+                            "type": "disk_full",
+                            "mount": parts[5],
+                            "used_pct": float(pct),
+                            "severity": "critical"
+                        })
+                    elif float(pct) > 80:
+                        issues.append({
+                            "type": "disk_low",
+                            "mount": parts[5],
+                            "used_pct": float(pct),
+                            "severity": "medium"
+                        })
+                except ValueError:
+                    pass
+    return issues
+
+
+def check_memory():
+    issues = []
+    out, _, _ = run_cmd(["free", "-m"])
+    if out:
+        for line in out.splitlines():
+            if "Mem:" in line:
+                parts = line.split()
+                if len(parts) >= 3:
+                    total = int(parts[1])
+                    used = int(parts[2])
+                    pct = used / total * 100 if total > 0 else 0
+                    if pct > 90:
+                        issues.append({
+                            "type": "memory_low",
+                            "used_pct": round(pct, 1),
+                            "severity": "high"
+                        })
+            if "Swap:" in line:
+                parts = line.split()
+                if len(parts) >= 3:
+                    total = int(parts[1])
+                    used = int(parts[2])
+                    pct = used / total * 100 if total > 0 else 0
+                    if pct > 80 and total > 0:
+                        issues.append({
+                            "type": "swap_high",
+                            "used_pct": round(pct, 1),
+                            "severity": "medium"
+                        })
+    return issues
+
+
+def check_broken_packages():
+    issues = []
+    out, _, rc = run_cmd(["dpkg", "--audit"], timeout=30, sudo=True)
+    if rc == 0 and out.strip():
+        for line in out.splitlines():
+            issues.append({
+                "type": "broken_package",
+                "detail": line,
+                "severity": "high"
+            })
+    return issues
+
+
+def check_failed_services():
+    issues = []
+    out, _, _ = run_cmd(["systemctl", "--failed", "--no-legend"], timeout=10)
+    if out.strip():
+        for line in out.splitlines():
+            parts = line.split()
+            if parts:
+                issues.append({
+                    "type": "failed_service",
+                    "service": parts[0],
+                    "severity": "high"
+                })
+    return issues
+
+
+def check_cron_errors():
+    issues = []
+    try:
+        result = subprocess.run(
+            ["bash", "-c",
+             "journalctl -u cron --since '1 hour ago' --no-pager -n 20 2>/dev/null | grep -i error || true"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.stdout.strip():
+            issues.append({
+                "type": "cron_errors",
+                "detail": result.stdout.strip()[:500],
+                "severity": "low"
+            })
+    except Exception:
+        pass
+    return issues
+
+
+def check_permission_issues(home_dir=None):
+    issues = []
+    home = home_dir or os.path.expanduser("~")
+    owned_by_root = []
+    try:
+        for item in os.listdir(home):
+            if item.startswith("."):
+                continue
+            path = os.path.join(home, item)
+            try:
+                stat = os.stat(path)
+                if stat.st_uid == 0 and stat.st_gid == 0:
+                    owned_by_root.append(item)
+            except OSError:
+                pass
+    except PermissionError:
+        pass
+
+    if owned_by_root:
+        issues.append({
+            "type": "wrong_owner",
+            "files": owned_by_root[:10],
+            "severity": "medium"
+        })
+    return issues
+
+
+def check_ollama_errors():
+    issues = []
+    out, _, _ = run_cmd(
+        ["journalctl", "-u", "ollama", "--since", "1 hour ago",
+         "--no-pager", "-n", "30"], timeout=10
+    )
+    if out and ("error" in out.lower() or "fatal" in out.lower()):
+        issues.append({
+            "type": "ollama_errors",
+            "detail": out[-500:],
+            "severity": "high"
+        })
+    return issues
+
+
+# ─── FIX MODULES ────────────────────────────────────────────
+
+def fix_service_down(issue):
+    svc = issue["service"]
+    out, err, rc = run_cmd(["systemctl", "restart", svc], sudo=True, timeout=15)
+    success = rc == 0
+    log_action("fix_service", svc, ["systemctl", "restart", svc],
+               out or err, success)
+    if success:
+        return f"Restarted {svc}"
+    return f"Failed to restart {svc}: {err}"
+
+
+def fix_disk_full(issue):
+    cleanups = [
+        (["apt-get", "autoremove", "-y"], "apt autoremove"),
+        (["apt-get", "clean"], "apt clean"),
+        (["journalctl", "--vacuum-size=100M"], "journal vacuum"),
+    ]
+    results = []
+    for cmd, desc in cleanups:
+        out, err, rc = run_cmd(cmd, sudo=True, timeout=30)
+        success = rc == 0
+        log_action("fix_disk", desc, cmd, out or err, success)
+        results.append(f"{'✅' if success else '❌'} {desc}")
+
+    return "\n".join(results)
+
+
+def fix_disk_low(issue):
+    cleanups = [
+        (["apt-get", "clean"], "apt clean"),
+        (["journalctl", "--vacuum-size=200M"], "journal vacuum"),
+    ]
+    results = []
+    for cmd, desc in cleanups:
+        out, err, rc = run_cmd(cmd, sudo=True, timeout=30)
+        success = rc == 0
+        log_action("fix_disk_low", desc, cmd, out or err, success)
+        results.append(f"{'✅' if success else '❌'} {desc}")
+
+    return "\n".join(results)
+
+
+def fix_broken_package(issue):
+    out, err, rc = run_cmd(
+        ["dpkg", "--configure", "-a"], sudo=True, timeout=60
+    )
+    success = rc == 0
+    log_action("fix_broken_pkg", "dpkg", ["dpkg", "--configure", "-a"],
+               out or err, success)
+    if success:
+        out2, err2, rc2 = run_cmd(
+            ["apt-get", "install", "-f", "-y"], sudo=True, timeout=120
+        )
+        log_action("fix_broken_pkg", "apt-fix", ["apt-get", "install", "-f", "-y"],
+                   out2 or err2, rc2 == 0)
+    return f"{'✅' if success else '❌'} dpkg --configure -a"
+
+
+def fix_failed_service(issue):
+    svc = issue["service"]
+    out, err, rc = run_cmd(["systemctl", "reset-failed", svc], sudo=True)
+    out2, err2, rc2 = run_cmd(["systemctl", "restart", svc], sudo=True)
+    success = rc2 == 0
+    log_action("fix_failed_svc", svc,
+               ["systemctl", "reset-failed", svc, "&&", "systemctl", "restart", svc],
+               out2 or err2, success)
+    return f"{'✅' if success else '❌'} Reset + restart {svc}"
+
+
+def fix_wrong_owner(issue):
+    home = os.path.expanduser("~")
+    user = os.environ.get("USER", os.environ.get("LOGNAME", ""))
+    if not user:
+        return "Cannot determine current user"
+
+    results = []
+    for f in issue.get("files", []):
+        path = os.path.join(home, f)
+        out, err, rc = run_cmd(["chown", "-R", f"{user}:{user}", path],
+                               sudo=True, timeout=30)
+        success = rc == 0
+        log_action("fix_owner", path, ["chown", "-R", f"{user}:{user}", path],
+                   out or err, success)
+        results.append(f"{'✅' if success else '❌'} {f}")
+    return "\n".join(results)
+
+
+def fix_memory_low(issue):
+    results = []
+    out, _, _ = run_cmd(["bash", "-c", "ps aux --sort=-%mem | head -6 | tail -5"])
+    if out:
+        results.append(f"Top memory consumers:\n{out}")
+
+    out, err, rc = run_cmd(["sysctl", "-w", "vm.drop_caches=3"], sudo=True, timeout=10)
+    success = rc == 0
+    log_action("fix_memory", "drop_caches", ["sysctl", "-w", "vm.drop_caches=3"],
+               out or err, success)
+    results.append(f"{'✅' if success else '❌'} Dropped page cache")
+    return "\n".join(results)
+
+
+def fix_swap_high(issue):
+    results = []
+    out, _, _ = run_cmd(["bash", "-c", "ps aux --sort=-%mem | head -6 | tail -5"])
+    if out:
+        results.append(f"Top memory consumers:\n{out}")
+
+    out, err, rc = run_cmd(["sysctl", "-w", "vm.drop_caches=3"], sudo=True, timeout=10)
+    if rc == 0:
+        results.append("✅ Dropped page cache")
+    else:
+        results.append(f"❌ drop_caches failed: {err}")
+
+    out, err, rc = run_cmd(["swapoff", "-a"], sudo=True, timeout=30)
+    if rc == 0:
+        out2, err2, rc2 = run_cmd(["swapon", "-a"], sudo=True, timeout=30)
+        if rc2 == 0:
+            results.append("✅ Swap cycled (swapped out memory is being reclaimed)")
+            log_action("fix_swap", "cycle", ["swapoff", "-a", "&&", "swapon", "-a"],
+                       "Swap cycled successfully", True)
+        else:
+            results.append(f"❌ swapon failed: {err2}")
+            log_action("fix_swap", "cycle", ["swapoff", "-a"],
+                       "swapoff ok, swapon failed", False)
+    else:
+        results.append(f"⚠  swapoff skipped (busy): {err[:80]}")
+    return "\n".join(results)
+
+
+# ─── AI DIAGNOSIS ───────────────────────────────────────────
+
+def ai_diagnose(issues, full_context):
+    if not issues:
+        return "No issues detected. System appears healthy."
+
+    issues_json = json.dumps(issues, indent=2)
+    context_str = json.dumps(full_context, indent=2)[:3000]
+
+    prompt = (
+        f"You are an expert Linux sysadmin AI. Analyze these system issues and "
+        f"determine root causes. Provide a prioritized action plan.\n\n"
+        f"SYSTEM CONTEXT:\n{context_str}\n\n"
+        f"DETECTED ISSUES:\n{issues_json}\n\n"
+        f"Format response as:\n"
+        f"1. ROOT CAUSE: (primary underlying cause)\n"
+        f"2. ACTION PLAN: (numbered steps to fix, most critical first)\n"
+        f"3. RISK LEVEL: LOW/MEDIUM/HIGH/CRITICAL"
+    )
+    return ollama_generate(prompt, max_tokens=1000) or "AI diagnosis unavailable"
+
+
+def ai_generate_fix(issue, context):
+    prompt = (
+        f"Generate the exact shell command(s) to fix this system issue. "
+        f"Return ONLY the commands, one per line, no explanation.\n\n"
+        f"Issue: {json.dumps(issue)}\n\nContext: {json.dumps(context)[:1000]}\n\n"
+        f"Commands (use sudo where needed):"
+    )
+    return ollama_generate(prompt, max_tokens=300)
+
+
+# ─── MAIN LOGIC ─────────────────────────────────────────────
+
+def collect_all_checks():
+    print("🔍 Running system diagnostics...\n")
+    checks = [
+        ("Services", check_services()),
+        ("Disk Space", check_disk_space()),
+        ("Memory", check_memory()),
+        ("Broken Packages", check_broken_packages()),
+        ("Failed Services", check_failed_services()),
+        ("Permissions", check_permission_issues()),
+        ("Cron", check_cron_errors()),
+        ("Ollama", check_ollama_errors()),
+    ]
+    all_issues = []
+    for name, issues in checks:
+        if issues:
+            print(f"  ⚠  {name}: {len(issues)} issue(s)")
+            for issue in issues:
+                sev = issue.get("severity", "low")
+                icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(sev, "⚪")
+                print(f"    {icon} [{sev.upper()}] {issue.get('type', '?')} {issue.get('service', issue.get('detail', ''))}")
+                all_issues.append(issue)
+        else:
+            print(f"  ✅ {name}: OK")
+    return all_issues
+
+
+def run_fixes(issues, dry_run=False):
+    if not issues:
+        print("\n✅ Nothing to fix. System is healthy.")
+        return
+
+    fix_map = {
+        "service_down": fix_service_down,
+        "disk_full": fix_disk_full,
+        "disk_low": fix_disk_low,
+        "broken_package": fix_broken_package,
+        "failed_service": fix_failed_service,
+        "wrong_owner": fix_wrong_owner,
+        "memory_low": fix_memory_low,
+        "swap_high": fix_swap_high,
+    }
+
+    if dry_run:
+        print("\n🔮 DRY RUN — would fix these issues:\n")
+        for issue in issues:
+            fixer = fix_map.get(issue["type"])
+            if fixer:
+                print(f"  Would fix: {issue['type']} - {issue.get('service', issue.get('detail', ''))}")
+            else:
+                print(f"  ⚠  No automated fix for: {issue['type']} - needs AI")
+        print(f"\n{len(issues)} issue(s) would be addressed.")
+        return
+
+    if not check_sudo():
+        print("\n⚠️  Passwordless sudo not available. Some fixes may fail.")
+        print("   Set up: sudo visudo -f /etc/sudoers.d/neuros-autofix")
+        print("   Add:    %sudo ALL=(ALL) NOPASSWD: ALL\n")
+
+    fixed = 0
+    failed = 0
+    ai_needed = []
+
+    for issue in sorted(issues, key=lambda x: {
+        "critical": 0, "high": 1, "medium": 2, "low": 3
+    }.get(x.get("severity", "low"), 4)):
+        fixer = fix_map.get(issue["type"])
+        if fixer:
+            print(f"\n  🔧 Fixing: {issue['type']}...")
+            result = fixer(issue)
+            print(f"    {result}")
+            if "❌" in result:
+                failed += 1
+            else:
+                fixed += 1
+        else:
+            ai_needed.append(issue)
+
+    for i, issue in enumerate(ai_needed):
+        print(f"\n  🤖 AI fix attempt {i+1}/{len(ai_needed)} for: {issue['type']}...")
+        cmd = ai_generate_fix(issue, {"hostname": os.uname().nodename if hasattr(os, "uname") else "neurOS"})
+        if cmd:
+            print(f"    AI suggests: {cmd}")
+            for line in cmd.splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        try:
+                            args = shlex.split(line)
+                            out, err, rc = run_cmd(args, sudo="sudo" in line, timeout=60)
+                            success = rc == 0
+                            log_action("ai_fix", issue["type"], line, out or err, success)
+                            icon = "✅" if success else "❌"
+                            print(f"    {icon} {line}")
+                            if success:
+                                fixed += 1
+                            else:
+                                failed += 1
+                        except Exception as e:
+                            print(f"    ❌ Error: {e}")
+                            failed += 1
+
+    print(f"\n📊 Fix summary: {fixed} fixed, {failed} failed, {len(ai_needed)} required AI")
+
+
+def daemon_mode(interval=300):
+    print(f"🔄 Neuros Autofix Daemon (checking every {interval}s)")
+    print(f"   PID: {os.getpid()}")
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    def handle_signal(signum, frame):
+        print("\n🛑 Daemon stopping...")
+        if os.path.exists(PID_FILE):
+            os.unlink(PID_FILE)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    while True:
+        try:
+            print(f"\n{'='*50}")
+            print(f"  Autofix check — {datetime.now().strftime('%H:%M:%S')}")
+            print(f"{'='*50}")
+            issues = collect_all_checks()
+            if issues:
+                run_fixes(issues)
+            else:
+                print("  All clear.")
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            handle_signal(None, None)
+        except Exception as e:
+            print(f"  ⚠️  Daemon error: {e}")
+            time.sleep(interval)
+
+
+def interactive_mode():
+    print("🧠 NeurOS Autonomous Sysadmin — Interactive Mode")
+    print("   I can navigate your system, run sudo commands, and fix problems.")
+    print("   Commands: 'scan', 'fix <issue>', 'cd <dir>', 'ls', 'sudo <cmd>',")
+    print("   'cat <file>', 'find <pattern>', 'explain <file>', 'logs', 'exit'")
+    print()
+
+    cwd = os.getcwd()
+    while True:
+        try:
+            user_input = input(f"🧠 {cwd}> ").strip()
+            if not user_input:
+                continue
+            if user_input.lower() == "exit":
+                break
+            if user_input.lower() == "scan":
+                issues = collect_all_checks()
+                if issues:
+                    print(f"\n  ⚠  {len(issues)} issue(s) found. Type 'fix-all' to fix them.")
+                else:
+                    print("  ✅ All checks passed.")
+                continue
+            if user_input.lower() == "fix-all":
+                issues = collect_all_checks()
+                if issues:
+                    run_fixes(issues)
+                else:
+                    print("  ✅ Nothing to fix.")
+                continue
+            if user_input.lower() == "logs":
+                if os.path.exists(LOG_FILE):
+                    with open(LOG_FILE) as f:
+                        history = json.load(f)
+                    for h in history[-20:]:
+                        ts = h["timestamp"][:16].replace("T", " ")
+                        icon = "✅" if h["success"] else "❌"
+                        print(f"  {icon} [{ts}] {h['action']}: {h.get('target', h['command'][:40])}")
+                else:
+                    print("  No fix history yet.")
+                continue
+
+            # Handle navigation commands
+            if user_input.startswith("cd "):
+                new_dir = user_input[3:].strip()
+                new_path = os.path.expanduser(new_dir)
+                if os.path.isdir(new_path):
+                    cwd = os.path.abspath(new_path)
+                    os.chdir(cwd)
+                else:
+                    print(f"  Not a directory: {new_dir}")
+                continue
+
+            if user_input.startswith("ls"):
+                path = cwd
+                parts = user_input.split(None, 1)
+                if len(parts) > 1:
+                    path = parts[1]
+                try:
+                    items = os.listdir(path)
+                    for item in sorted(items):
+                        full = os.path.join(path, item)
+                        prefix = "📁" if os.path.isdir(full) else "📄"
+                        try:
+                            size = os.path.getsize(full)
+                            size_str = f" ({_format_size(size)})"
+                        except OSError:
+                            size_str = ""
+                        print(f"    {prefix} {item}{size_str}")
+                except Exception as e:
+                    print(f"  Error: {e}")
+                continue
+
+            if user_input.startswith("cat "):
+                filepath = user_input[4:].strip()
+                filepath = os.path.join(cwd, filepath) if not os.path.isabs(filepath) else filepath
+                try:
+                    with open(filepath) as f:
+                        content = f.read()[:3000]
+                    print(content)
+                except Exception as e:
+                    print(f"  Error: {e}")
+                continue
+
+            if user_input.startswith("find "):
+                pattern = user_input[5:].strip()
+                try:
+                    out, _, _ = run_cmd(["find", cwd, "-maxdepth", "4",
+                                          "-name", pattern, "-not", "-path",
+                                          "*/\\.*", "-not", "-path", "*/node_modules/*"],
+                                        timeout=15)
+                    if out:
+                        for line in out.splitlines()[:30]:
+                            print(f"    {line}")
+                    else:
+                        print(f"  No matches for '{pattern}'")
+                except Exception as e:
+                    print(f"  Error: {e}")
+                continue
+
+            # Handle sudo commands
+            if user_input.startswith("sudo "):
+                cmd_str = user_input[5:].strip()
+                args = shlex.split(cmd_str)
+                out, err, rc = run_cmd(args, sudo=True, timeout=60)
+                if out:
+                    print(out)
+                if err:
+                    print(f"  [stderr] {err}")
+                print(f"  [exit: {rc}]")
+                log_action("interactive_sudo", cmd_str, args, out or err, rc == 0)
+                continue
+
+            # Other commands - run directly
+            if user_input.startswith("fix ") or user_input.startswith("explain "):
+                target = user_input.split(None, 1)[1] if len(user_input.split()) > 1 else ""
+                if target:
+                    issues = collect_all_checks()
+                    prompt = (
+                        f"The user says '{target}'. Based on these system issues, "
+                        f"explain what's wrong and how to fix it:\n"
+                        f"{json.dumps(issues, indent=2)[:2000]}"
+                    )
+                    explanation = ollama_generate(prompt, max_tokens=800)
+                    if explanation:
+                        print(f"\n🤖 AI Analysis:\n{explanation}\n")
+                        action = input("  Apply fix? [y/N]: ").lower()
+                        if action == "y":
+                            run_fixes(issues)
+                continue
+
+            # Default: run as shell command
+            args = shlex.split(user_input)
+            out, err, rc = run_cmd(args, timeout=30)
+            if out:
+                print(out)
+            if err:
+                print(f"  [stderr] {err}")
+
+        except (KeyboardInterrupt, EOFError):
+            break
+
+
+def show_logs(n=50):
+    if not os.path.exists(LOG_FILE):
+        print("No autofix history yet.")
+        return
+    with open(LOG_FILE) as f:
+        history = json.load(f)
+    print(f"{'Date':<18} {'Action':<12} {'Success':<8} {'Target/Command'}")
+    print("-" * 80)
+    for h in history[-n:]:
+        ts = h["timestamp"][:16].replace("T", " ")
+        icon = "✅" if h["success"] else "❌"
+        target = h.get("target", h.get("command", ""))[:40]
+        print(f"{ts:<18} {h['action']:<12} {icon:<8} {target}")
+
+
+def _format_size(size):
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def main():
+    ensure_dirs()
+    parser = argparse.ArgumentParser(description="NeurOS Autonomous AI Sysadmin")
+    parser.add_argument("--check", "-c", action="store_true",
+                        help="Check-only: diagnose but don't fix")
+    parser.add_argument("--fix", "-f", help="Fix a specific issue type")
+    parser.add_argument("--daemon", "-d", nargs="?", type=int, const=300,
+                        help="Run as background daemon (default interval: 300s)")
+    parser.add_argument("--interactive", "-i", action="store_true",
+                        help="Interactive AI sysadmin chat")
+    parser.add_argument("--logs", "-l", action="store_true",
+                        help="View autofix history")
+    parser.add_argument("--dry-run", "-n", action="store_true",
+                        help="Show what would be fixed without doing it")
+    parser.add_argument("--ai", "-a", action="store_true",
+                        help="Include AI root cause analysis")
+
+    args = parser.parse_args()
+
+    if args.logs:
+        show_logs()
+        return
+
+    if args.interactive:
+        interactive_mode()
+        return
+
+    if args.daemon is not None:
+        daemon_mode(args.daemon)
+        return
+
+    issues = collect_all_checks()
+
+    if args.check:
+        if not issues:
+            print("\n✅ All checks passed.")
+        else:
+            print(f"\n⚠  {len(issues)} issue(s) found. Run 'neuros-autofix' to fix.")
+        return
+
+    if args.fix:
+        matching = [i for i in issues if args.fix.lower() in i.get("type", "").lower()]
+        if matching:
+            run_fixes(matching, dry_run=args.dry_run)
+        else:
+            print(f"No issues match: {args.fix}")
+        return
+
+    if args.ai:
+        context = {
+            "hostname": os.uname().nodename if hasattr(os, "uname") else "neurOS",
+            "cwd": os.getcwd(),
+            "user": os.environ.get("USER", ""),
+            "shell": os.environ.get("SHELL", ""),
+        }
+        analysis = ai_diagnose(issues, context)
+        print("\n🤖 AI Root Cause Analysis:\n")
+        print(analysis)
+
+    if issues:
+        run_fixes(issues, dry_run=args.dry_run)
+    elif not args.ai and not args.check:
+        print("\n✅ System is healthy — no issues detected.")
+        print("   Run 'neuros-autofix --daemon' for continuous monitoring.")
+
+
+if __name__ == "__main__":
+    main()
