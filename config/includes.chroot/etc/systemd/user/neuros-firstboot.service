@@ -1,0 +1,12 @@
+[Unit]
+Description=NeurOS First Boot Setup
+ConditionFirstBoot=true
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/neuros-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

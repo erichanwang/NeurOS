@@ -1,0 +1,29 @@
+# NeurOS .gitattributes
+# Ensure consistent line endings across platforms
+
+# Shell scripts and Python files: LF only
+*.sh text eol=lf
+*.bash text eol=lf
+*.hook.chroot text eol=lf
+*.py text eol=lf
+
+# Config files: LF only
+*.conf text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.desktop text eol=lf
+*.list text eol=lf
+
+# systemd units: LF only
+*.service text eol=lf
+
+# Vim configs: LF only
+*.vim text eol=lf
+
+# Documentation
+*.md text eol=lf
+
+# Binary files
+*.png binary
+*.iso binary
+*.svg text eol=lf

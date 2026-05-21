@@ -1,0 +1,80 @@
+#!/bin/bash
+set -e
+# Hook: Install GNOME Shell extensions for NeurOS desktop
+# Runs in the live-build chroot environment during ISO creation
+
+echo "[NeurOS] Installing GNOME extensions..."
+
+# Install extension dependencies
+apt-get install -y \
+    gnome-shell-extensions \
+    gnome-shell-extension-manager \
+    chrome-gnome-shell 2>/dev/null || true
+
+# Install dash-to-dock (comes with gnome-shell-extensions on Ubuntu)
+# Enable it as a system-wide default
+mkdir -p /etc/dconf/db/neuros.d
+
+cat >> /etc/dconf/db/neuros.d/00-neuros-desktop << 'DCONF'
+
+[org/gnome/shell]
+enabled-extensions=['dash-to-dock@micxgx.gmail.com']
+
+[org/gnome/shell/extensions/dash-to-dock]
+dock-position='BOTTOM'
+dash-max-icon-size=48
+extend-height=false
+show-show-apps-button=false
+show-trash=false
+running-indicator-style='DOTS'
+custom-theme-shrink=true
+transparency-mode='FIXED'
+background-opacity=0.8
+DCONF
+
+# Install blur-my-shell extension (from source, for dconf-based themes)
+# Note: Installing from extensions.gnome.org requires a running GNOME session.
+# Instead, we download and place the extension manually.
+EXT_DIR="/usr/share/gnome-shell/extensions/blur-my-shell@aunetx"
+if [ ! -d "$EXT_DIR" ]; then
+    echo "[NeurOS] Downloading blur-my-shell extension..."
+    mkdir -p "$EXT_DIR"
+
+    # Download latest release from GitHub
+    BLUR_VERSION="v60"  # GNOME 46 compatible
+    BLUR_URL="https://github.com/aunetx/blur-my-shell/archive/refs/tags/${BLUR_VERSION}.tar.gz"
+
+    if wget -q "$BLUR_URL" -O /tmp/blur-my-shell.tar.gz 2>/dev/null; then
+        tar -xzf /tmp/blur-my-shell.tar.gz -C /tmp/
+        if [ -d "/tmp/blur-my-shell-${BLUR_VERSION#v}" ]; then
+            cp -r /tmp/blur-my-shell-${BLUR_VERSION#v}/* "$EXT_DIR/" 2>/dev/null || true
+            rm -rf /tmp/blur-my-shell-${BLUR_VERSION#v}
+        fi
+        rm -f /tmp/blur-my-shell.tar.gz
+        echo "[NeurOS] blur-my-shell installed."
+    else
+        echo "[NeurOS] blur-my-shell download skipped (will be available for manual install)."
+    fi
+fi
+
+# Install caffeine extension (prevents sleep during inference)
+CAFFEINE_DIR="/usr/share/gnome-shell/extensions/caffeine@patapon.info"
+if [ ! -d "$CAFFEINE_DIR" ]; then
+    echo "[NeurOS] Downloading caffeine extension..."
+    mkdir -p "$CAFFEINE_DIR"
+
+    CAFFEINE_URL="https://github.com/eonpatapon/gnome-shell-extension-caffeine/archive/refs/tags/v50.tar.gz"
+    if wget -q "$CAFFEINE_URL" -O /tmp/caffeine.tar.gz 2>/dev/null; then
+        tar -xzf /tmp/caffeine.tar.gz -C /tmp/
+        if [ -d "/tmp/gnome-shell-extension-caffeine-50" ]; then
+            cp -r /tmp/gnome-shell-extension-caffeine-50/* "$CAFFEINE_DIR/" 2>/dev/null || true
+            rm -rf /tmp/gnome-shell-extension-caffeine-50
+        fi
+        rm -f /tmp/caffeine.tar.gz
+        echo "[NeurOS] caffeine extension installed."
+    else
+        echo "[NeurOS] caffeine extension download skipped (will be available for manual install)."
+    fi
+fi
+
+echo "[NeurOS] GNOME extensions installation complete."
