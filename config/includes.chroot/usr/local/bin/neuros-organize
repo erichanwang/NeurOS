@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""
+neuros-organize — NeurOS AI File Organizer
+Organizes files by type, content, date, or AI analysis. Creates smart
+folder structures and moves files accordingly.
+
+Usage:
+  neuros-organize ~/Downloads              Organize messy directory
+  neuros-organize --by-type ~/Projects      Sort by file extension
+  neuros-organize --by-date ~/Photos        Sort by last modified date
+  neuros-organize --by-ai ~/Documents       AI-categorized organization
+  neuros-organize --dry-run ~/Downloads     Preview only
+"""
+
+import sys
+import os
+import json
+import shutil
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+ORGANIZE_LOG = os.path.expanduser("~/.local/share/neuros/organize_log.json")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=600):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.1}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+TYPE_MAP = {
+    "Images": [".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".bmp", ".ico"],
+    "Documents": [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+                  ".odt", ".ods", ".txt", ".rtf", ".md", ".csv"],
+    "Code": [".py", ".js", ".ts", ".html", ".css", ".json", ".yaml", ".yml",
+             ".xml", ".toml", ".rs", ".go", ".java", ".c", ".h", ".cpp", ".sh",
+             ".bash", ".zsh", ".fish"],
+    "Archives": [".zip", ".tar", ".gz", ".xz", ".bz2", ".7z", ".rar"],
+    "Audio": [".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a"],
+    "Video": [".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv"],
+    "Fonts": [".ttf", ".otf", ".woff", ".woff2"],
+    "Data": [".db", ".sqlite", ".sqlite3", ".sql"],
+}
+
+
+def organize_by_type(directory):
+    plan = {}
+    for f in os.listdir(directory):
+        fpath = os.path.join(directory, f)
+        if os.path.isfile(fpath) and not f.startswith("."):
+            ext = os.path.splitext(f)[1].lower()
+            category = "Other"
+            for cat, exts in TYPE_MAP.items():
+                if ext in exts:
+                    category = cat
+                    break
+            if category not in plan:
+                plan[category] = []
+            plan[category].append(f)
+    return plan
+
+
+def organize_by_date(directory):
+    plan = {}
+    for f in os.listdir(directory):
+        fpath = os.path.join(directory, f)
+        if os.path.isfile(fpath) and not f.startswith("."):
+            mtime = os.path.getmtime(fpath)
+            year_month = datetime.fromtimestamp(mtime).strftime("%Y-%m")
+            if year_month not in plan:
+                plan[year_month] = []
+            plan[year_month].append(f)
+    return plan
+
+
+def organize_by_ai(directory):
+    files = [f for f in os.listdir(directory)
+             if os.path.isfile(os.path.join(directory, f)) and not f.startswith(".")]
+    if not files:
+        return {}
+
+    file_list = "\n".join(f"{f} ({os.path.splitext(f)[1]})" for f in files[:30])
+    prompt = (
+        f"Categorize these files into 4-6 meaningful folders. "
+        f"Return as JSON: {{\"CategoryName\": [\"file1\", \"file2\"]}}. "
+        f"Be descriptive with categories (e.g., 'Tax_Documents', 'Project_Code').\n\n{file_list}"
+    )
+    response = ollama_generate(prompt, 600)
+    if response:
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def apply_plan(plan, directory, dry_run=False):
+    if not plan:
+        print("Nothing to organize.")
+        return
+
+    total = sum(len(files) for files in plan.values())
+    print(f"\n{'Preview' if dry_run else 'Organizing'} {total} file(s) into {len(plan)} folder(s):\n")
+
+    for category, files in sorted(plan.items()):
+        cat_dir = os.path.join(directory, category)
+        print(f"  📁 {category}/ ({len(files)} file(s))")
+
+        if not dry_run:
+            os.makedirs(cat_dir, exist_ok=True)
+
+        for f in files:
+            src = os.path.join(directory, f)
+            dst = os.path.join(cat_dir, f)
+            print(f"    {'📄' if dry_run else '✅'} {f}")
+
+            if not dry_run:
+                try:
+                    shutil.move(src, dst)
+                except Exception as e:
+                    print(f"      ❌ {e}")
+
+    if dry_run:
+        print(f"\n  Dry run complete. Run without --dry-run to apply.")
+    else:
+        print(f"\n  ✅ Organized {total} file(s).")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS AI File Organizer")
+    parser.add_argument("directory", nargs="?", default=".", help="Directory to organize")
+    parser.add_argument("--by-type", "-t", action="store_true", help="Sort by file type")
+    parser.add_argument("--by-date", "-d", action="store_true", help="Sort by date")
+    parser.add_argument("--by-ai", "-a", action="store_true", help="AI-categorized")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview only")
+
+    args = parser.parse_args()
+
+    directory = os.path.abspath(args.directory)
+    if not os.path.isdir(directory):
+        print(f"Not a directory: {directory}")
+        return
+
+    if args.by_ai:
+        print("🤖 AI analyzing files...")
+        plan = organize_by_ai(directory)
+    elif args.by_date:
+        plan = organize_by_date(directory)
+    else:
+        plan = organize_by_type(directory)
+
+    apply_plan(plan, directory, args.dry_run)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""
+neuros-pair — NeurOS AI Pair Programmer
+AI pair programming assistant that reviews code, suggests improvements,
+explains decisions, and helps debug in real-time.
+
+Usage:
+  neuros-pair script.py                         Pair program on a file
+  neuros-pair --review script.py                 Code review mode
+  neuros-pair --refactor script.py               Suggest refactoring
+  neuros-pair --chat                             Interactive pair programming chat
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=2000):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.4}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def review_code(filepath):
+    if not os.path.exists(filepath):
+        return f"File not found: {filepath}"
+    with open(filepath) as f:
+        code = f.read()[:6000]
+    prompt = (
+        f"Review this code as a senior developer. Identify:\n"
+        f"1. Bugs or potential issues\n"
+        f"2. Performance improvements\n"
+        f"3. Security concerns\n"
+        f"4. Style and readability suggestions\n"
+        f"5. Architecture recommendations\n\nCODE:\n{code}"
+    )
+    return ollama_generate(prompt, 2000)
+
+
+def refactor_suggest(filepath):
+    if not os.path.exists(filepath):
+        return f"File not found: {filepath}"
+    with open(filepath) as f:
+        code = f.read()[:5000]
+    prompt = (
+        f"Suggest refactoring improvements for this code. Focus on:\n"
+        f"1. Reducing complexity\n"
+        f"2. Improving readability\n"
+        f"3. Better naming\n"
+        f"4. Extracting reusable functions\n"
+        f"5. Modern patterns\n\nCODE:\n{code}"
+    )
+    return ollama_generate(prompt, 2000)
+
+
+def explain_context(filepath, context_around=None):
+    """Explain what this code does, with optional context."""
+    if not os.path.exists(filepath):
+        return f"File not found: {filepath}"
+    with open(filepath) as f:
+        code = f.read()[:4000]
+
+    lines = code.splitlines()
+    if context_around:
+        try:
+            start, end = context_around.split("-")
+            start, end = int(start)-1, int(end)
+            code = "\n".join(lines[start:end])[:4000]
+        except Exception:
+            pass
+
+    prompt = (
+        f"Explain what this code does in plain English. Include:\n"
+        f"1. Overall purpose\n"
+        f"2. Key functions and their roles\n"
+        f"3. Data flow\n"
+        f"4. Any notable patterns\n\nCODE:\n{code}"
+    )
+    return ollama_generate(prompt, 1500)
+
+
+def chat_mode():
+    print("👥 NeurOS Pair Programmer — Chat Mode")
+    print("   I can help you code, debug, and design.")
+    print("   Commands: 'review <file>', 'refactor <file>', 'explain <file>',")
+    print("   'ask <question>', 'exit'")
+    print()
+
+    while True:
+        try:
+            cmd = input("👥> ").strip()
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        if not cmd:
+            continue
+        if cmd.lower() == "exit":
+            break
+        if cmd.startswith("review "):
+            print("\n" + (review_code(cmd[7:]) or "AI unavailable") + "\n")
+        elif cmd.startswith("refactor "):
+            print("\n" + (refactor_suggest(cmd[9:]) or "AI unavailable") + "\n")
+        elif cmd.startswith("explain "):
+            filename = cmd[8:].split()[0]
+            ctx = cmd[8:].split()[1] if len(cmd[8:].split()) > 1 else None
+            print("\n" + (explain_context(filename, ctx) or "AI unavailable") + "\n")
+        elif cmd.startswith("ask "):
+            prompt = (
+                f"You are a senior developer helping a colleague. "
+                f"Answer concisely with code examples if relevant.\n\n"
+                f"QUESTION: {cmd[4:]}"
+            )
+            print("\n" + (ollama_generate(prompt, 1500) or "AI unavailable") + "\n")
+        else:
+            prompt = (
+                f"You are a pair programming partner. Help with this "
+                f"coding task. Be practical and include code.\n\nTASK: {cmd}"
+            )
+            print("\n" + (ollama_generate(prompt, 2000) or "AI unavailable") + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS AI Pair Programmer")
+    parser.add_argument("file", nargs="?", help="Code file to work with")
+    parser.add_argument("--review", "-r", action="store_true", help="Review code")
+    parser.add_argument("--refactor", "-f", action="store_true", help="Suggest refactoring")
+    parser.add_argument("--explain", "-e", action="store_true", help="Explain code")
+    parser.add_argument("--chat", "-c", action="store_true", help="Chat mode")
+
+    args = parser.parse_args()
+
+    if args.chat:
+        chat_mode()
+    elif args.review and args.file:
+        print(review_code(args.file) or "AI unavailable")
+    elif args.refactor and args.file:
+        print(refactor_suggest(args.file) or "AI unavailable")
+    elif args.explain and args.file:
+        print(explain_context(args.file) or "AI unavailable")
+    elif args.file:
+        print(review_code(args.file) or "AI unavailable")
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

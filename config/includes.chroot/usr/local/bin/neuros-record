@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""
+neuros-record — NeurOS Recorder
+AI-assisted screen, audio, and terminal session recording.
+
+Usage:
+  neuros-record screen                     Record full screen
+  neuros-record window                     Record active window
+  neuros-record region                     Select region to record
+  neuros-record audio                      Record microphone audio
+  neuros-record system                     Record system audio output
+  neuros-record terminal                   Record terminal session (script)
+  neuros-record stop                       Stop current recording
+  neuros-record list                       List saved recordings
+  neuros-record compress <file>            AI-optimize compression
+  neuros-record transcribe <file>          Transcribe audio to text
+"""
+
+import argparse
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+RECORD_DIR = os.path.expanduser("~/Videos/NeurOS")
+AUDIO_DIR = os.path.expanduser("~/Music/NeurOS")
+PID_FILE = os.path.join(CONFIG_DIR, "record-pid.json")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+recording_process = None
+
+
+def load_config():
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def check_tool(name, install_hint=""):
+    """Check if a command-line tool is available."""
+    try:
+        subprocess.run(["which", name], capture_output=True, check=True)
+        return True
+    except Exception:
+        print(f"❌ {name} not found. {install_hint}")
+        return False
+
+
+def get_recording_pid():
+    """Get the PID of the current recording."""
+    if os.path.exists(PID_FILE):
+        with open(PID_FILE) as f:
+            data = json.load(f)
+        return data
+    return None
+
+
+def save_recording_pid(pid, rtype, output):
+    """Save recording PID to file."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(PID_FILE, "w") as f:
+        json.dump({"pid": pid, "type": rtype, "output": output, "started": datetime.now().isoformat()}, f)
+
+
+def clear_recording_pid():
+    """Remove recording PID file."""
+    if os.path.exists(PID_FILE):
+        os.remove(PID_FILE)
+
+
+def start_recording(cmd, rtype, output):
+    """Start a recording process."""
+    global recording_process
+    try:
+        recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        save_recording_pid(recording_process.pid, rtype, output)
+        print(f"🔴 Recording started: {rtype}")
+        print(f"   Output: {output}")
+        print(f"   PID: {recording_process.pid}")
+        print(f"   Run 'neuros-record stop' to stop.")
+    except Exception as e:
+        print(f"❌ Failed to start recording: {e}")
+
+
+def cmd_screen(args):
+    """Record the full screen."""
+    if not check_tool("ffmpeg", "Install: sudo apt install ffmpeg"):
+        return
+
+    os.makedirs(RECORD_DIR, exist_ok=True)
+    output = os.path.join(RECORD_DIR, f"screen_{datetime.now().strftime('%Y%m%d-%H%M%S')}.mp4")
+
+    # Detect display
+    display = os.getenv("DISPLAY", ":0")
+
+    cmd = [
+        "ffmpeg", "-f", "x11grab", "-video_size", args.resolution or "1920x1080",
+        "-framerate", str(args.fps or 30),
+        "-i", f"{display}.0+0,0",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p", output,
+    ]
+
+    start_recording(cmd, "screen", output)
+
+
+def cmd_window(args):
+    """Record the active window."""
+    if not check_tool("ffmpeg", "Install: sudo apt install ffmpeg"):
+        return
+
+    os.makedirs(RECORD_DIR, exist_ok=True)
+    output = os.path.join(RECORD_DIR, f"window_{datetime.now().strftime('%Y%m%d-%H%M%S')}.mp4")
+
+    # Get window geometry
+    try:
+        result = subprocess.run(
+            ["xdotool", "getactivewindow", "getwindowgeometry"],
+            capture_output=True, text=True
+        )
+        # Parse: Window <id>\n  Position: x,y\n  Geometry: WxH
+        lines = result.stdout.strip().split("\n")
+        pos = lines[1].split(":")[1].strip()
+        size = lines[2].split(":")[1].strip()
+        x, y = pos.split(",")
+        w, h = size.split("x")
+
+        display = os.getenv("DISPLAY", ":0")
+        cmd = [
+            "ffmpeg", "-f", "x11grab",
+            "-video_size", f"{w}x{h}",
+            "-framerate", str(args.fps or 30),
+            "-i", f"{display}.0+{x},{y}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            output,
+        ]
+
+        start_recording(cmd, "window", output)
+
+    except Exception as e:
+        print(f"❌ Error detecting window: {e}")
+        print("   Install: sudo apt install xdotool")
+
+
+def cmd_region(args):
+    """Select region to record."""
+    if not check_tool("ffmpeg", "Install: sudo apt install ffmpeg"):
+        return
+    if not check_tool("slop", "Install: sudo apt install slop"):
+        return
+
+    os.makedirs(RECORD_DIR, exist_ok=True)
+    output = os.path.join(RECORD_DIR, f"region_{datetime.now().strftime('%Y%m%d-%H%M%S')}.mp4")
+
+    try:
+        # Get region from slop
+        result = subprocess.run(
+            ["slop", "-f", "%x %y %w %h"],
+            capture_output=True, text=True
+        )
+        x, y, w, h = result.stdout.strip().split()
+        w, h = int(w), int(h)
+        # Ensure even dimensions for encoding
+        w = w if w % 2 == 0 else w - 1
+        h = h if h % 2 == 0 else h - 1
+
+        display = os.getenv("DISPLAY", ":0")
+        cmd = [
+            "ffmpeg", "-f", "x11grab",
+            "-video_size", f"{w}x{h}",
+            "-framerate", str(args.fps or 30),
+            "-i", f"{display}.0+{x},{y}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            output,
+        ]
+
+        start_recording(cmd, "region", output)
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+
+def cmd_audio(args):
+    """Record audio from microphone."""
+    if not check_tool("arecord", "Install: sudo apt install alsa-utils"):
+        return
+
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+    output = os.path.join(AUDIO_DIR, f"audio_{datetime.now().strftime('%Y%m%d-%H%M%S')}.wav")
+
+    cmd = [
+        "arecord", "-f", "cd", "-t", "wav",
+        "-d", str(args.duration or 0),  # 0 = until stopped
+        output,
+    ]
+
+    start_recording(cmd, "audio", output)
+
+
+def cmd_system_audio(args):
+    """Record system audio output."""
+    if not check_tool("ffmpeg", "Install: sudo apt install ffmpeg"):
+        return
+
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+    output = os.path.join(AUDIO_DIR, f"system_{datetime.now().strftime('%Y%m%d-%H%M%S')}.mp3")
+
+    # Use pulseaudio monitor
+    cmd = [
+        "ffmpeg", "-f", "pulse", "-i", "default",
+        "-acodec", "libmp3lame", "-ab", "192k", output,
+    ]
+
+    start_recording(cmd, "system-audio", output)
+
+
+def cmd_terminal(args):
+    """Record terminal session using script."""
+    os.makedirs(RECORD_DIR, exist_ok=True)
+    output = os.path.join(RECORD_DIR, f"terminal_{datetime.now().strftime('%Y%m%d-%H%M%S')}.log")
+
+    print(f"📝 Recording terminal session to {output}")
+    print("   Type 'exit' or press Ctrl+D to stop.")
+
+    try:
+        subprocess.run(["script", "-q", output])
+        print(f"✅ Recording saved: {output}")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+
+def cmd_stop(args):
+    """Stop the current recording."""
+    data = get_recording_pid()
+    if not data:
+        print("No active recording.")
+        return
+
+    try:
+        os.kill(data["pid"], signal.SIGINT)
+        time.sleep(0.5)
+        # Check if still alive
+        try:
+            os.kill(data["pid"], signal.SIGKILL)
+        except OSError:
+            pass
+
+        clear_recording_pid()
+        print(f"✅ Stopped {data['type']} recording")
+        print(f"   Output: {data['output']}")
+        print(f"   Started: {data['started'][:19]}")
+
+        # Show file size
+        if os.path.exists(data["output"]):
+            size = os.path.getsize(data["output"])
+            for unit in ["B", "KB", "MB", "GB"]:
+                if size < 1024:
+                    print(f"   Size: {size:.1f} {unit}")
+                    break
+                size /= 1024
+
+    except Exception as e:
+        print(f"❌ Error stopping recording: {e}")
+        clear_recording_pid()
+
+
+def cmd_list(args):
+    """List saved recordings."""
+    recordings = []
+
+    for d, label in [(RECORD_DIR, "Video"), (AUDIO_DIR, "Audio")]:
+        if os.path.exists(d):
+            for f in sorted(os.listdir(d), reverse=True):
+                fpath = os.path.join(d, f)
+                size = os.path.getsize(fpath)
+                mtime = os.path.getmtime(fpath)
+                recordings.append((label, f, size, mtime, fpath))
+
+    if not recordings:
+        print("No recordings found.")
+        return
+
+    print(f"{'Type':<8} {'File':<45} {'Size':<10} {'Date'}")
+    print("-" * 90)
+    for rtype, name, size, mtime, fpath in recordings:
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size < 1024:
+                size_str = f"{size:.1f} {unit}"
+                break
+            size /= 1024
+        ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        print(f"{rtype:<8} {name:<45} {size_str:<10} {ts}")
+
+
+def cmd_compress(args):
+    """AI-optimized compression of a recording."""
+    if not os.path.exists(args.file):
+        print(f"❌ File not found: {args.file}")
+        return
+
+    if not check_tool("ffmpeg", "Install: sudo apt install ffmpeg"):
+        return
+
+    orig_size = os.path.getsize(args.file)
+    output = args.output or args.file.replace(".mp4", "_compressed.mp4").replace(".mkv", "_compressed.mp4")
+
+    print(f"Compressing: {args.file}")
+    print(f"Original size: {orig_size / (1024*1024):.1f} MB")
+
+    # Smart compression with ffmpeg
+    cmd = [
+        "ffmpeg", "-i", args.file,
+        "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+        "-c:a", "aac", "-b:a", "96k", output,
+    ]
+
+    print(f"Encoding...")
+    try:
+        subprocess.run(cmd, check=True)
+        new_size = os.path.getsize(output)
+        ratio = (1 - new_size / orig_size) * 100
+        print(f"✅ Compressed: {output}")
+        print(f"   New size: {new_size / (1024*1024):.1f} MB ({ratio:.0f}% smaller)")
+    except Exception as e:
+        print(f"❌ Compression failed: {e}")
+
+
+def cmd_transcribe(args):
+    """Transcribe audio to text using AI."""
+    if not os.path.exists(args.file):
+        print(f"❌ File not found: {args.file}")
+        return
+
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        prompt = f"Transcribe this audio. If you cannot process audio directly, note that this is a placeholder: {args.file}"
+        data = json.dumps({
+            "model": config["model"], "prompt": prompt,
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read()).get("response", "").strip()
+            print(result)
+    except Exception as e:
+        print(f"❌ Transcription failed: {e}")
+        print("   For better results, use Whisper:")
+        print("   whisper {args.file} --model small")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-record — AI-assisted recording")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    p_screen = sub.add_parser("screen", help="Record full screen")
+    p_screen.add_argument("--resolution", "-r", help="Resolution (default: 1920x1080)")
+    p_screen.add_argument("--fps", type=int, help="Frames per second (default: 30)")
+
+    p_window = sub.add_parser("window", help="Record active window")
+    p_window.add_argument("--fps", type=int, help="Frames per second")
+
+    p_region = sub.add_parser("region", help="Select region to record")
+    p_region.add_argument("--fps", type=int, help="Frames per second")
+
+    p_audio = sub.add_parser("audio", help="Record microphone audio")
+    p_audio.add_argument("--duration", "-d", type=int, help="Duration in seconds (0=until stopped)")
+
+    sub.add_parser("system", help="Record system audio output")
+    sub.add_parser("terminal", help="Record terminal session")
+    sub.add_parser("stop", help="Stop current recording")
+    sub.add_parser("list", aliases=["ls"], help="List saved recordings")
+
+    p_compress = sub.add_parser("compress", help="Compress a recording")
+    p_compress.add_argument("file", help="File to compress")
+    p_compress.add_argument("--output", "-o", help="Output file")
+
+    p_transcribe = sub.add_parser("transcribe", help="Transcribe audio to text")
+    p_transcribe.add_argument("file", help="Audio file to transcribe")
+
+    args = parser.parse_args()
+
+    if args.command == "screen":
+        cmd_screen(args)
+    elif args.command == "window":
+        cmd_window(args)
+    elif args.command == "region":
+        cmd_region(args)
+    elif args.command == "audio":
+        cmd_audio(args)
+    elif args.command == "system":
+        cmd_system_audio(args)
+    elif args.command == "terminal":
+        cmd_terminal(args)
+    elif args.command == "stop":
+        cmd_stop(args)
+    elif args.command in ("list", "ls"):
+        cmd_list(args)
+    elif args.command == "compress":
+        cmd_compress(args)
+    elif args.command == "transcribe":
+        cmd_transcribe(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+neuros-explain — NeurOS AI Explainer
+Explains anything: code, errors, concepts, configs, commands, or files.
+Uses local LLM to provide clear, contextual explanations.
+
+Usage:
+  neuros-explain "what is a race condition"          Explain a concept
+  neuros-explain --code script.py                     Explain code in a file
+  neuros-explain --error "segfault at 0x004"          Explain an error
+  neuros-explain --command "chmod 755"                Explain a shell command
+  neuros-explain --config nginx.conf                  Explain a config file
+  neuros-explain --pipe                               Explain piped input
+"""
+
+import sys
+import os
+import json
+import argparse
+import urllib.request
+import urllib.error
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=2000):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.2}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception as e:
+        return f"Error: Could not reach Ollama ({e})"
+
+
+def explain_concept(query):
+    prompt = (
+        f"Explain the following concept in clear, educational language. "
+        f"Include: 1) Simple definition, 2) How it works, 3) Common use cases, "
+        f"4) Gotchas or common mistakes. Use examples where helpful.\n\n"
+        f"Topic: {query}"
+    )
+    return ollama_generate(prompt)
+
+
+def explain_code(filepath):
+    if not os.path.exists(filepath):
+        return f"File not found: {filepath}"
+    with open(filepath) as f:
+        code = f.read()[:5000]
+
+    ext = os.path.splitext(filepath)[1]
+    prompt = (
+        f"Explain this {ext} code file. Describe: 1) Overall purpose, "
+        f"2) Key functions/classes and what they do, 3) Dependencies used, "
+        f"4) Any notable patterns or potential issues.\n\nCODE:\n{code}"
+    )
+    return ollama_generate(prompt)
+
+
+def explain_error(error_text):
+    prompt = (
+        f"Explain this error message in simple terms. What does it mean, "
+        f"what likely caused it, and how do you fix it? Be specific and practical.\n\n"
+        f"ERROR: {error_text}"
+    )
+    return ollama_generate(prompt)
+
+
+def explain_command(cmd):
+    prompt = (
+        f"Explain this Linux command in detail. Include: 1) What each flag/argument does, "
+        f"2) What the command accomplishes, 3) A practical example, "
+        f"4) Any dangerous side-effects to watch for.\n\nCOMMAND: {cmd}"
+    )
+    return ollama_generate(prompt)
+
+
+def explain_config(filepath):
+    if not os.path.exists(filepath):
+        return f"File not found: {filepath}"
+    with open(filepath) as f:
+        content = f.read()[:4000]
+
+    prompt = (
+        f"Explain this configuration file. Describe each section and key setting, "
+        f"what it controls, recommended values, and common pitfalls.\n\n"
+        f"CONFIG:\n{content}"
+    )
+    return ollama_generate(prompt)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS AI Explainer")
+    parser.add_argument("query", nargs="?", help="Concept or question to explain")
+    parser.add_argument("--code", "-c", help="Explain a code file")
+    parser.add_argument("--error", "-e", help="Explain an error message")
+    parser.add_argument("--command", "-m", help="Explain a shell command")
+    parser.add_argument("--config", "-f", help="Explain a config file")
+    parser.add_argument("--pipe", "-p", action="store_true",
+                        help="Read from stdin to explain")
+
+    args = parser.parse_args()
+
+    if args.pipe:
+        if sys.stdin.isatty():
+            print("Error: --pipe requires piped input. Example: cat error.log | neuros-explain --pipe")
+            return
+        content = sys.stdin.read()[:5000]
+        result = explain_concept(f"Explain this content:\n{content}")
+        print(result)
+        return
+
+    if args.code:
+        print(explain_code(args.code))
+    elif args.error:
+        print(explain_error(args.error))
+    elif args.command:
+        print(explain_command(args.command))
+    elif args.config:
+        print(explain_config(args.config))
+    elif args.query:
+        print(explain_concept(args.query))
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

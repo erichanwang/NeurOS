@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""
+neuros-edit — NeurOS Smart Editor
+AI-powered file editing with diff preview, undo, and batch operations.
+
+Usage:
+  neuros-edit file.txt                          Interactive AI editing
+  neuros-edit file.txt --prompt "fix typos"     One-shot AI edit
+  neuros-edit file.txt --replace "old" "new"    Find and replace
+  neuros-edit *.py --format                     Auto-format code files
+  neuros-edit file.txt --undo                    Undo last edit
+  neuros-edit file.txt --diff                    Preview changes before applying
+  neuros-edit --batch "*.md" --prompt "..."     Batch edit multiple files
+  neuros-edit file.txt --extract "emails"       Extract emails/URLs/data
+  neuros-edit file.txt --spellcheck              AI spell/grammar check
+"""
+
+import argparse
+import difflib
+import fnmatch
+import glob
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+EDIT_HISTORY = os.path.join(CONFIG_DIR, "edit-history.json")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+
+def load_config():
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def query_llm(prompt, system="You are a precise text editor. Respond only with the requested text."):
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        data = json.dumps({
+            "model": config["model"], "prompt": prompt,
+            "system": system, "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def load_history():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    if os.path.exists(EDIT_HISTORY):
+        with open(EDIT_HISTORY) as f:
+            return json.load(f)
+    return {"edits": []}
+
+
+def save_history(history):
+    with open(EDIT_HISTORY + ".tmp", "w") as f:
+        json.dump(history, f, indent=2)
+    os.replace(EDIT_HISTORY + ".tmp", EDIT_HISTORY)
+
+
+def show_diff(original, modified, filename):
+    """Show a colored diff between original and modified text."""
+    orig_lines = original.splitlines(keepends=True)
+    mod_lines = modified.splitlines(keepends=True)
+
+    diff = difflib.unified_diff(
+        orig_lines, mod_lines,
+        fromfile=f"a/{filename}", tofile=f"b/{filename}",
+    )
+    sys.stdout.writelines(diff)
+
+
+def ai_edit(content, prompt, filename=""):
+    """Use AI to edit file content."""
+    system = (
+        "You are a precise text editor. Return the COMPLETE modified file content. "
+        "Do not add explanations, markdown fences, or commentary. "
+        "Return only the edited text, exactly as it should appear in the file."
+    )
+    full_prompt = (
+        f"File: {filename}\n\n"
+        f"Instruction: {prompt}\n\n"
+        f"Current file content:\n```\n{content}\n```\n\n"
+        f"Return the COMPLETE modified file content:"
+    )
+
+    result = query_llm(full_prompt, system)
+    if not result:
+        return None
+
+    # Strip code fences if present
+    if result.startswith("```"):
+        lines = result.split("\n")
+        # Remove first and last fence lines
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        result = "\n".join(lines)
+
+    return result
+
+
+def ai_spellcheck(content):
+    """AI-powered spellcheck and grammar correction."""
+    system = "You are a grammar expert. Return the CORRECTED text only."
+    result = query_llm(
+        f"Correct all spelling, grammar, and punctuation errors in this text. "
+        f"Return the complete corrected text:\n\n{content}",
+        system
+    )
+    return result
+
+
+def ai_extract(content, pattern):
+    """Extract specific data patterns using AI."""
+    system = "Extract ONLY the requested data. Return one item per line."
+    result = query_llm(
+        f"Extract all {pattern} from this text. Return one per line:\n\n{content}",
+        system
+    )
+    return result
+
+
+def cmd_edit(args):
+    """Edit a file with AI."""
+    if not os.path.exists(args.file):
+        print(f"❌ File not found: {args.file}")
+        sys.exit(1)
+
+    with open(args.file, "r", encoding="utf-8", errors="replace") as f:
+        original = f.read()
+
+    print(f"📝 Editing: {args.file}")
+    print(f"   Size: {len(original)} bytes")
+    print()
+
+    if args.replace:
+        # Simple find and replace
+        modified = original.replace(args.replace[0], args.replace[1])
+        count = original.count(args.replace[0])
+        print(f"   {count} replacement(s): '{args.replace[0]}' → '{args.replace[1]}'")
+    elif args.spellcheck:
+        print("   Running AI spellcheck...")
+        modified = ai_spellcheck(original)
+        if modified is None:
+            print("❌ AI spellcheck failed.")
+            sys.exit(1)
+    elif args.extract:
+        print(f"   Extracting {args.extract}...")
+        extracted = ai_extract(original, args.extract)
+        if extracted:
+            print(extracted)
+        return
+    elif args.prompt:
+        print(f"   AI instruction: {args.prompt}")
+        modified = ai_edit(original, args.prompt, os.path.basename(args.file))
+        if modified is None:
+            print("❌ AI edit failed.")
+            sys.exit(1)
+    elif args.format:
+        modified = ai_edit(original, "Format this file properly with consistent indentation and spacing. Fix any formatting issues.", os.path.basename(args.file))
+        if modified is None:
+            print("❌ AI format failed.")
+            return
+    else:
+        # Interactive mode: read instruction from stdin
+        print("Enter editing instructions (Ctrl+D to finish):")
+        instruction = sys.stdin.read().strip()
+        if not instruction:
+            print("No instructions provided.")
+            return
+        modified = ai_edit(original, instruction, os.path.basename(args.file))
+        if modified is None:
+            print("❌ AI edit failed.")
+            sys.exit(1)
+
+    if modified == original:
+        print("   No changes needed.")
+        return
+
+    # Show diff
+    if not args.quiet:
+        print()
+        print("--- Changes ---")
+        show_diff(original, modified, os.path.basename(args.file))
+        print()
+
+    # Confirm
+    if not args.yes and not args.dry_run:
+        try:
+            confirm = input("Apply these changes? [y/N] ").lower()
+            if confirm != "y":
+                print("Aborted.")
+                return
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            return
+
+    if args.dry_run:
+        print("(Dry run — no changes applied)")
+        return
+
+    # Backup original
+    backup_path = args.file + ".neuros-bak"
+    shutil.copy2(args.file, backup_path)
+
+    # Write modified
+    with open(args.file, "w", encoding="utf-8") as f:
+        f.write(modified)
+
+    # Record history
+    history = load_history()
+    history["edits"].append({
+        "file": os.path.abspath(args.file),
+        "backup": backup_path,
+        "timestamp": datetime.now().isoformat(),
+        "instruction": args.prompt or "manual",
+        "original_hash": hashlib.sha256(original.encode()).hexdigest()[:12],
+        "modified_hash": hashlib.sha256(modified.encode()).hexdigest()[:12],
+        "changes": len(modified) - len(original),
+    })
+    save_history(history)
+
+    print(f"✅ Saved: {args.file}")
+    print(f"   Backup: {backup_path}")
+    print(f"   Changes: {len(modified) - len(original):+d} bytes")
+
+
+def cmd_batch(args):
+    """Batch edit multiple files."""
+    pattern = args.glob
+    files = glob.glob(pattern, recursive=True)
+    if not files:
+        print(f"No files match: {pattern}")
+        return
+
+    print(f"Found {len(files)} file(s):")
+    for f in files:
+        print(f"  {f}")
+    print()
+
+    if not args.prompt:
+        print("Batch mode requires --prompt")
+        return
+
+    for f in files:
+        if not os.path.isfile(f):
+            continue
+        print(f"\n--- {f} ---")
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            original = fh.read()
+
+        modified = ai_edit(original, args.prompt, os.path.basename(f))
+        if modified is None or modified == original:
+            print("  (skipped)")
+            continue
+
+        show_diff(original, modified, os.path.basename(f))
+
+        if not args.yes:
+            try:
+                confirm = input("Apply? [y/N/skip all/yes all] ").lower()
+                if confirm == "yes all":
+                    args.yes = True
+                elif confirm == "skip all":
+                    break
+                elif confirm != "y":
+                    print("  Skipped.")
+                    continue
+            except (KeyboardInterrupt, EOFError):
+                break
+
+        # Save
+        backup = f + ".neuros-bak"
+        shutil.copy2(f, backup)
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write(modified)
+        print(f"  ✅ Saved (backup: {backup})")
+
+
+def cmd_undo(args):
+    """Undo last edit for a file."""
+    if args.file:
+        backup = args.file + ".neuros-bak"
+        if os.path.exists(backup):
+            shutil.copy2(backup, args.file)
+            print(f"✅ Restored {args.file} from {backup}")
+        else:
+            print(f"❌ No backup found for {args.file}")
+        return
+
+    # Undo most recent edit from history
+    history = load_history()
+    if not history["edits"]:
+        print("No edit history found.")
+        return
+
+    last = history["edits"][-1]
+    if os.path.exists(last["backup"]):
+        shutil.copy2(last["backup"], last["file"])
+        os.remove(last["backup"])
+        history["edits"].pop()
+        save_history(history)
+        print(f"✅ Undid edit to {last['file']}")
+    else:
+        print(f"❌ Backup no longer exists: {last['backup']}")
+
+
+def cmd_diff(args):
+    """Show pending diff."""
+    if not args.file:
+        print("Usage: neuros-edit --diff <file>")
+        return
+
+    backup = args.file + ".neuros-bak"
+    if os.path.exists(backup):
+        with open(backup, "r", encoding="utf-8", errors="replace") as f:
+            original = f.read()
+        with open(args.file, "r", encoding="utf-8", errors="replace") as f:
+            modified = f.read()
+        show_diff(original, modified, os.path.basename(args.file))
+    else:
+        print(f"No backup for {args.file}")
+
+
+def cmd_history(args):
+    """Show edit history."""
+    history = load_history()
+    if not history["edits"]:
+        print("No edits recorded.")
+        return
+
+    print(f"{'Time':<22} {'File':<40} {'Δ bytes':<10} {'Instruction'}")
+    print("-" * 100)
+    for edit in history["edits"][-args.n:]:
+        ts = edit.get("timestamp", "")[:19]
+        fname = os.path.basename(edit["file"])[:38]
+        delta = f"{edit.get('changes', 0):+d}"
+        instr = edit.get("instruction", "")[:30]
+        print(f"{ts:<22} {fname:<40} {delta:<10} {instr}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-edit — AI-powered file editing")
+    parser.add_argument("file", nargs="?", help="File to edit")
+    parser.add_argument("--prompt", "-p", help="AI editing instruction")
+    parser.add_argument("--replace", "-r", nargs=2, metavar=("OLD", "NEW"), help="Find and replace")
+    parser.add_argument("--spellcheck", action="store_true", help="AI spell/grammar check")
+    parser.add_argument("--extract", "-e", metavar="PATTERN", help="Extract data (emails, URLs, etc.)")
+    parser.add_argument("--format", action="store_true", help="Auto-format file")
+    parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview only, no changes")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress diff output")
+    parser.add_argument("--undo", action="store_true", help="Undo last edit")
+    parser.add_argument("--diff", action="store_true", help="Show diff from backup")
+    parser.add_argument("--batch", help="Batch edit with glob pattern")
+    parser.add_argument("--history", "-H", action="store_true", help="Show edit history")
+    parser.add_argument("-n", type=int, default=10, help="Number of history entries (default: 10)")
+
+    args = parser.parse_args()
+
+    if args.undo:
+        cmd_undo(args)
+    elif args.diff:
+        cmd_diff(args)
+    elif args.history:
+        cmd_history(args)
+    elif args.batch:
+        cmd_batch(args)
+    elif args.file:
+        cmd_edit(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

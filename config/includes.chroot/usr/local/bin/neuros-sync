@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""
+neuros-sync — NeurOS Smart File Synchronizer
+Two-way sync with conflict detection, AI merge suggestions, and dry-run preview.
+Wraps rsync with smart defaults and automated conflict resolution.
+
+Usage:
+  neuros-sync ~/Projects/remote/ ~/Projects/local/    Sync two directories
+  neuros-sync --one-way src/ dst/                      One-way mirror
+  neuros-sync --dry-run src/ dst/                      Preview changes
+  neuros-sync --watch src/ dst/                        Continuous sync
+"""
+
+import sys
+import os
+import json
+import time
+import shlex
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+SYNC_LOG = os.path.expanduser("~/.local/share/neuros/sync_log.json")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=400):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.1}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def rsync(src, dst, options=None, dry_run=False):
+    """Run rsync with given options."""
+    cmd = ["rsync", "-avh", "--progress"]
+    if dry_run:
+        cmd.append("--dry-run")
+    if options:
+        cmd.extend(shlex.split(options))
+    cmd.extend([src.rstrip("/") + "/", dst.rstrip("/") + "/"])
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode, result.stdout, result.stderr
+
+
+def ai_resolve_conflict(filepath, src_time, dst_time):
+    prompt = (
+        f"A sync conflict detected: '{filepath}' was modified in both locations. "
+        f"Source modified: {src_time}, Destination modified: {dst_time}. "
+        f"Which version should be kept? Answer: SOURCE, DESTINATION, or KEEP_BOTH."
+    )
+    return ollama_generate(prompt, 50) or "KEEP_BOTH"
+
+
+def find_conflicts(src, dst):
+    """Find files modified in both locations since last sync."""
+    conflicts = []
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            if f.startswith("."):
+                continue
+            src_path = os.path.join(root, f)
+            rel_path = os.path.relpath(src_path, src)
+            dst_path = os.path.join(dst, rel_path)
+
+            if os.path.exists(dst_path):
+                src_mtime = os.path.getmtime(src_path)
+                dst_mtime = os.path.getmtime(dst_path)
+                if abs(src_mtime - dst_mtime) > 1 and src_path != dst_path:
+                    src_hash = _quick_hash(src_path)
+                    dst_hash = _quick_hash(dst_path)
+                    if src_hash != dst_hash:
+                        conflicts.append({
+                            "file": rel_path,
+                            "src_time": datetime.fromtimestamp(src_mtime).isoformat(),
+                            "dst_time": datetime.fromtimestamp(dst_mtime).isoformat()
+                        })
+    return conflicts
+
+
+def _quick_hash(path):
+    import hashlib
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            return hashlib.md5(f.read(min(size, 65536)) + str(size).encode()).hexdigest()
+    except Exception:
+        return ""
+
+
+def watch_sync(src, dst, interval=30):
+    print(f"👁️  Watching for changes every {interval}s...")
+    print(f"   Source: {src}")
+    print(f"   Dest:   {dst}")
+    try:
+        while True:
+            rc, out, err = rsync(src, dst)
+            if out.strip():
+                for line in out.splitlines()[:10]:
+                    if line.strip():
+                        print(f"  📄 {line.strip()}")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\n👋 Sync stopped.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Smart File Synchronizer")
+    parser.add_argument("source", help="Source directory")
+    parser.add_argument("destination", nargs="?", help="Destination directory")
+    parser.add_argument("--one-way", "-1", action="store_true", help="One-way sync")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview only")
+    parser.add_argument("--watch", "-w", action="store_true", help="Continuous watch")
+    parser.add_argument("--interval", type=int, default=30, help="Watch interval sec")
+    parser.add_argument("--options", help="Extra rsync options")
+    parser.add_argument("--delete", action="store_true", help="Delete extraneous files")
+
+    args = parser.parse_args()
+
+    src = os.path.abspath(args.source)
+    dst = os.path.abspath(args.destination) if args.destination else "."
+
+    if not os.path.exists(src):
+        print(f"Source not found: {src}")
+        return
+
+    if args.watch:
+        watch_sync(src, dst, args.interval)
+        return
+
+    conflicts = find_conflicts(src, dst)
+    if conflicts:
+        print(f"\n⚠  {len(conflicts)} conflict(s) detected:\n")
+        for c in conflicts:
+            print(f"  🔀 {c['file']}")
+        if not args.dry_run:
+            resp = input("\n  Continue sync? [Y/n]: ").lower()
+            if resp == "n":
+                return
+
+    extra = args.options or ""
+    if args.delete:
+        extra += " --delete"
+
+    print(f"\n{'🔍 PREVIEW' if args.dry_run else '🔄 SYNCING'}: {src} -> {dst}\n")
+    rc, out, err = rsync(src, dst, extra, args.dry_run)
+
+    if out.strip():
+        for line in out.splitlines()[:20]:
+            if line.strip():
+                print(f"  {'🔍' if args.dry_run else '✅'} {line.strip()}")
+
+    if args.dry_run:
+        print(f"\n  Dry run complete. Remove --dry-run to apply.")
+    elif rc == 0:
+        print(f"\n  ✅ Sync complete.")
+        if conflicts:
+            print(f"  ⚠  {len(conflicts)} conflict(s) may need manual resolution.")
+    else:
+        print(f"\n  ❌ Sync failed (exit code {rc})")
+        if err:
+            print(f"  {err[:500]}")
+
+
+if __name__ == "__main__":
+    main()

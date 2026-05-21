@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""
+neuros-alert — NeurOS Multi-Channel Alert System
+Sends alerts via desktop notifications, webhooks, email, or custom scripts.
+Triggered by other tools or used standalone.
+
+Usage:
+  neuros-alert "Disk is at 95%!"                     Send desktop notification
+  neuros-alert --webhook "https://..." "Server down"  Send to webhook
+  neuros-alert --email admin@x.com "Backup failed"    Email alert
+  neuros-alert --script /path/to/alert.sh "Event"     Run custom alert script
+  neuros-alert --listen                               Listen for stdin alerts
+"""
+
+import sys
+import os
+import json
+import shlex
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+ALERT_LOG = os.path.expanduser("~/.local/share/neuros/alerts.json")
+
+
+def ensure_dirs():
+    os.makedirs(os.path.dirname(ALERT_LOG), exist_ok=True)
+
+
+def log_alert(channel, message, success):
+    history = []
+    if os.path.exists(ALERT_LOG):
+        with open(ALERT_LOG) as f:
+            history = json.load(f)
+    history.append({
+        "timestamp": datetime.now().isoformat(),
+        "channel": channel,
+        "message": message[:500],
+        "success": success
+    })
+    if len(history) > 200:
+        history = history[-200:]
+    with open(ALERT_LOG, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+def send_desktop(title, body, urgency="normal"):
+    try:
+        subprocess.run(
+            ["notify-send", "-u", urgency, title, body],
+            timeout=5, capture_output=True
+        )
+        return True
+    except Exception:
+        return False
+
+
+def send_webhook(url, message):
+    try:
+        data = json.dumps({"text": message, "timestamp": datetime.now().isoformat()}).encode()
+        req = urllib.request.Request(url, data=data,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception:
+        return False
+
+
+def send_email(to, subject, body):
+    try:
+        proc = subprocess.run(
+            ["mail", "-s", subject, to],
+            input=body, text=True, capture_output=True, timeout=10
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def run_script(script_path, message):
+    try:
+        result = subprocess.run(
+            [script_path, message],
+            capture_output=True, text=True, timeout=30
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def listen_stdin():
+    print("👂 Alert listener active (Ctrl+C to stop)")
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            send_desktop("NeurOS Alert", line)
+            print(f"  🔔 {line}")
+    except KeyboardInterrupt:
+        pass
+
+
+def main():
+    ensure_dirs()
+    parser = argparse.ArgumentParser(description="NeurOS Alert System")
+    parser.add_argument("message", nargs="?", help="Alert message")
+    parser.add_argument("--webhook", "-w", help="Webhook URL")
+    parser.add_argument("--email", "-e", help="Email recipient")
+    parser.add_argument("--script", "-s", help="Custom alert script")
+    parser.add_argument("--urgency", "-u", default="normal",
+                        choices=["low", "normal", "critical"])
+    parser.add_argument("--title", "-t", default="NeurOS Alert")
+    parser.add_argument("--listen", "-l", action="store_true",
+                        help="Listen for stdin alerts")
+
+    args = parser.parse_args()
+
+    if args.listen:
+        listen_stdin()
+        return
+
+    if not args.message:
+        parser.print_help()
+        return
+
+    results = []
+
+    if args.webhook:
+        ok = send_webhook(args.webhook, args.message)
+        log_alert("webhook", args.message, ok)
+        results.append(f"{'✅' if ok else '❌'} webhook")
+
+    if args.email:
+        ok = send_email(args.email, args.title, args.message)
+        log_alert("email", args.message, ok)
+        results.append(f"{'✅' if ok else '❌'} email")
+
+    if args.script:
+        ok = run_script(args.script, args.message)
+        log_alert("script", args.message, ok)
+        results.append(f"{'✅' if ok else '❌'} script")
+
+    if not (args.webhook or args.email or args.script):
+        ok = send_desktop(args.title, args.message, args.urgency)
+        log_alert("desktop", args.message, ok)
+        results.append(f"{'✅' if ok else '❌'} desktop")
+
+    if results:
+        print(f"  Alert: {' '.join(results)}")
+
+
+if __name__ == "__main__":
+    main()

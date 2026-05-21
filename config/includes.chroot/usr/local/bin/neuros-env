@@ -1,0 +1,656 @@
+#!/usr/bin/env python3
+"""
+neuros-env — NeurOS Environment Manager
+Manage development environments, dotfiles, secrets, and project configurations.
+
+Usage:
+  neuros-env save <name>              Save current environment snapshot
+  neuros-env load <name>              Restore a saved environment
+  neuros-env list                     List saved environments
+  neuros-env diff <name>              Show what changed since save
+  neuros-env export <name> > env.sh   Export as shell script
+  neuros-env secret set KEY=VALUE     Store encrypted secret
+  neuros-env secret get KEY           Retrieve a secret
+  neuros-env secret list              List secret keys
+  neuros-env doctor                   Diagnose environment issues
+  neuros-env clone <repo>             Clone and auto-setup project env
+"""
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+ENV_DIR = os.path.join(CONFIG_DIR, "environments")
+SECRETS_FILE = os.path.join(CONFIG_DIR, "secrets.json")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+
+def load_config():
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def query_llm(prompt, system="You are a helpful DevOps expert."):
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        data = json.dumps({
+            "model": config["model"], "prompt": prompt,
+            "system": system, "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def capture_env():
+    """Capture current environment state."""
+    env = {
+        "timestamp": datetime.now().isoformat(),
+        "hostname": os.uname().nodename,
+        "user": os.getenv("USER", ""),
+        "shell": os.getenv("SHELL", ""),
+        "pwd": os.getcwd(),
+        "env_vars": {},
+        "path": [],
+        "git_branches": {},
+        "python_version": "",
+        "node_version": "",
+    }
+
+    # Environment variables (filtered)
+    for key, val in os.environ.items():
+        if key.startswith(("PATH", "HOME", "USER", "SHELL", "PYTHON", "NODE",
+                          "JAVA", "GOPATH", "RUST", "CARGO", "CUDA", "NEUROS")):
+            env["env_vars"][key] = val
+
+    # PATH components
+    path = os.getenv("PATH", "")
+    env["path"] = path.split(":")
+
+    # Git branches
+    try:
+        result = subprocess.run(
+            ["bash", "-c", "find . -name .git -maxdepth 3 -type d 2>/dev/null | "
+             "while read d; do echo \"$(dirname $d):$(cd $(dirname $d) && git branch --show-current 2>/dev/null)\"; done"],
+            capture_output=True, text=True, timeout=10
+        )
+        for line in result.stdout.strip().split("\n"):
+            if ":" in line:
+                repo, branch = line.split(":", 1)
+                if branch.strip():
+                    env["git_branches"][os.path.abspath(repo)] = branch.strip()
+    except Exception:
+        pass
+
+    # Python version
+    try:
+        result = subprocess.run(
+            ["python3", "--version"], capture_output=True, text=True
+        )
+        env["python_version"] = result.stdout.strip()
+    except Exception:
+        pass
+
+    # Node version
+    try:
+        result = subprocess.run(
+            ["node", "--version"], capture_output=True, text=True
+        )
+        env["node_version"] = result.stdout.strip()
+    except Exception:
+        pass
+
+    return env
+
+
+def cmd_save(args):
+    """Save current environment."""
+    os.makedirs(ENV_DIR, exist_ok=True)
+    env = capture_env()
+    env["name"] = args.name
+    env["description"] = args.desc or ""
+
+    fpath = os.path.join(ENV_DIR, f"{args.name}.json")
+    with open(fpath, "w") as f:
+        json.dump(env, f, indent=2)
+
+    print(f"✅ Environment saved: {args.name}")
+    print(f"   File: {fpath}")
+    print(f"   PWD: {env['pwd']}")
+    if env["git_branches"]:
+        print(f"   Git repos: {len(env['git_branches'])}")
+    print(f"   Python: {env['python_version'] or 'N/A'}")
+    print(f"   Node: {env['node_version'] or 'N/A'}")
+
+
+def cmd_load(args):
+    """Restore a saved environment."""
+    fpath = os.path.join(ENV_DIR, f"{args.name}.json")
+    if not os.path.exists(fpath):
+        print(f"❌ Environment not found: {args.name}")
+        print(f"   Available: {', '.join(list_environments())}")
+        sys.exit(1)
+
+    with open(fpath) as f:
+        env = json.load(f)
+
+    print(f"Environment: {env['name']}")
+    print(f"Saved: {env['timestamp'][:19]}")
+    print()
+
+    # Generate shell commands
+    commands = []
+
+    # CD to saved directory
+    if env.get("pwd") and os.path.exists(env["pwd"]):
+        commands.append(f"cd {shlex.quote(env['pwd'])}")
+        print(f"  cd {env['pwd']}")
+
+    # Set env vars
+    for key, val in env.get("env_vars", {}).items():
+        if key not in ("HOME", "USER", "SHELL", "PWD", "_"):
+            current = os.getenv(key, "")
+            if current != val:
+                commands.append(f"export {key}={shlex.quote(val)}")
+                print(f"  export {key}={val}")
+
+    # Git branch checkout
+    for repo, branch in env.get("git_branches", {}).items():
+        if os.path.exists(repo):
+            commands.append(f"# cd {shlex.quote(repo)} && git checkout {branch}")
+            print(f"  # cd {repo} && git checkout {branch}")
+
+    if args.execute:
+        # Write temp script and source it
+        script = "\n".join(commands)
+        print(f"\nExecuting {len(commands)} commands...")
+        try:
+            subprocess.run(["bash", "-c", script])
+            print("✅ Environment loaded.")
+        except Exception as e:
+            print(f"❌ Error: {e}")
+    else:
+        print(f"\nRun with --execute to apply these changes, or source:")
+        print(f"  eval \"$(neuros-env load {args.name} --shell)\"")
+
+
+def cmd_load_shell(args):
+    """Output shell commands for eval."""
+    fpath = os.path.join(ENV_DIR, f"{args.name}.json")
+    if not os.path.exists(fpath):
+        print(f"echo 'Environment not found: {args.name}'", file=sys.stderr)
+        sys.exit(1)
+
+    with open(fpath) as f:
+        env = json.load(f)
+
+    if env.get("pwd") and os.path.exists(env["pwd"]):
+        print(f"cd {shlex.quote(env['pwd'])}")
+    for key, val in env.get("env_vars", {}).items():
+        if key not in ("HOME", "USER", "SHELL", "PWD", "_"):
+            current = os.getenv(key, "")
+            if current != val:
+                print(f"export {key}={shlex.quote(val)}")
+
+
+def list_environments():
+    """List saved environment names."""
+    if not os.path.exists(ENV_DIR):
+        return []
+    return sorted([
+        f.replace(".json", "")
+        for f in os.listdir(ENV_DIR)
+        if f.endswith(".json")
+    ])
+
+
+def cmd_list(args):
+    """List saved environments."""
+    envs = list_environments()
+    if not envs:
+        print("No saved environments.")
+        return
+
+    print(f"{'Name':<20} {'Saved':<22} {'PWD'}")
+    print("-" * 80)
+    for name in envs:
+        fpath = os.path.join(ENV_DIR, f"{name}.json")
+        with open(fpath) as f:
+            env = json.load(f)
+        ts = env.get("timestamp", "")[:19]
+        pwd = env.get("pwd", "")[:45]
+        print(f"{name:<20} {ts:<22} {pwd}")
+
+
+def cmd_diff(args):
+    """Show differences between saved and current environment."""
+    fpath = os.path.join(ENV_DIR, f"{args.name}.json")
+    if not os.path.exists(fpath):
+        print(f"❌ Environment not found: {args.name}")
+        sys.exit(1)
+
+    with open(fpath) as f:
+        saved = json.load(f)
+
+    current = capture_env()
+    changes = []
+
+    # Check PWD
+    if saved.get("pwd") != current["pwd"]:
+        changes.append(f"PWD: {saved.get('pwd')} → {current['pwd']}")
+
+    # Check env vars
+    for key in set(list(saved.get("env_vars", {}).keys()) + list(current["env_vars"].keys())):
+        old = saved["env_vars"].get(key, "(unset)")
+        new = current["env_vars"].get(key, "(unset)")
+        if old != new:
+            changes.append(f"${key}: {old} → {new}")
+
+    # Check git branches
+    for repo in set(list(saved.get("git_branches", {}).keys()) + list(current["git_branches"].keys())):
+        old_b = saved["git_branches"].get(repo, "?")
+        new_b = current["git_branches"].get(repo, "?")
+        if old_b != new_b:
+            changes.append(f"Git {repo}: {old_b} → {new_b}")
+
+    if changes:
+        print(f"Changes since {saved['timestamp'][:19]}:")
+        for change in changes:
+            print(f"  {change}")
+    else:
+        print("✅ No changes detected.")
+
+
+def cmd_export(args):
+    """Export environment as shell script."""
+    fpath = os.path.join(ENV_DIR, f"{args.name}.json")
+    if not os.path.exists(fpath):
+        print(f"# Environment not found: {args.name}")
+        sys.exit(1)
+
+    with open(fpath) as f:
+        env = json.load(f)
+
+    print(f"# Environment: {env['name']}")
+    print(f"# Saved: {env['timestamp']}")
+    print(f"# Generated: {datetime.now().isoformat()}")
+    print()
+    if env.get("pwd"):
+        print(f"cd {shlex.quote(env['pwd'])}")
+    for key, val in env.get("env_vars", {}).items():
+        if key not in ("HOME", "USER", "SHELL", "PWD", "_"):
+            print(f"export {key}={shlex.quote(val)}")
+    print()
+    for repo, branch in env.get("git_branches", {}).items():
+        print(f"# cd {shlex.quote(repo)} && git checkout {branch}")
+
+
+# === Secrets Management ===
+def _xor_encrypt(data, key):
+    """Simple XOR encryption (not production-grade, but better than plaintext)."""
+    result = bytearray()
+    for i, b in enumerate(data.encode()):
+        result.append(b ^ ord(key[i % len(key)]))
+    return base64.b64encode(bytes(result)).decode()
+
+
+def _xor_decrypt(encrypted, key):
+    """Simple XOR decryption."""
+    try:
+        data = base64.b64decode(encrypted)
+        result = bytearray()
+        for i, b in enumerate(data):
+            result.append(b ^ ord(key[i % len(key)]))
+        return result.decode()
+    except Exception:
+        return None
+
+
+def _get_encryption_key():
+    """Derive encryption key from machine ID."""
+    try:
+        with open("/etc/machine-id") as f:
+            machine_id = f.read().strip()
+        return hashlib.sha256(f"neuros-secrets:{machine_id}".encode()).hexdigest()[:16]
+    except Exception:
+        return "neuros-default-key"
+
+
+def load_secrets():
+    """Load secrets file."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    if os.path.exists(SECRETS_FILE):
+        with open(SECRETS_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_secrets(secrets):
+    """Save secrets file."""
+    with open(SECRETS_FILE + ".tmp", "w") as f:
+        json.dump(secrets, f, indent=2)
+    os.replace(SECRETS_FILE + ".tmp", SECRETS_FILE)
+    os.chmod(SECRETS_FILE, 0o600)
+
+
+def cmd_secret_set(args):
+    """Store an encrypted secret."""
+    secrets = load_secrets()
+    key = _get_encryption_key()
+
+    if "=" in args.keyvalue:
+        k, v = args.keyvalue.split("=", 1)
+        secrets[k] = _xor_encrypt(v, key)
+        save_secrets(secrets)
+        print(f"✅ Secret stored: {k}")
+    else:
+        # Read from stdin
+        k = args.keyvalue
+        v = sys.stdin.read().strip()
+        secrets[k] = _xor_encrypt(v, key)
+        save_secrets(secrets)
+        print(f"✅ Secret stored: {k} (from stdin)")
+
+
+def cmd_secret_get(args):
+    """Retrieve a secret."""
+    secrets = load_secrets()
+    key = _get_encryption_key()
+
+    if args.key not in secrets:
+        print(f"❌ Secret not found: {args.key}")
+        sys.exit(1)
+
+    decrypted = _xor_decrypt(secrets[args.key], key)
+    if decrypted is None:
+        print(f"❌ Failed to decrypt: {args.key}")
+        sys.exit(1)
+
+    print(decrypted, end="" if args.no_newline else "\n")
+
+
+def cmd_secret_list(args):
+    """List secret keys."""
+    secrets = load_secrets()
+    if not secrets:
+        print("No stored secrets.")
+        return
+    for k in sorted(secrets.keys()):
+        print(f"  🔒 {k}")
+
+
+def cmd_secret_remove(args):
+    """Remove a secret."""
+    secrets = load_secrets()
+    if args.key in secrets:
+        del secrets[args.key]
+        save_secrets(secrets)
+        print(f"✅ Removed: {args.key}")
+    else:
+        print(f"❌ Not found: {args.key}")
+
+
+# === Doctor ===
+def cmd_doctor(args):
+    """Diagnose environment issues."""
+    print("🔍 NeurOS Environment Doctor")
+    print("=" * 40)
+    issues = []
+
+    # Check PATH
+    path = os.getenv("PATH", "")
+    home_bin = os.path.expanduser("~/.local/bin")
+    if home_bin not in path:
+        issues.append(f"~/.local/bin not in PATH")
+        print(f"  ⚠️  ~/.local/bin not in PATH")
+
+    # Check shell
+    shell = os.getenv("SHELL", "")
+    print(f"  Shell: {shell}")
+    if "zsh" not in shell and "bash" not in shell:
+        issues.append("Unusual shell detected")
+
+    # Check git
+    try:
+        subprocess.run(["git", "--version"], capture_output=True, check=True)
+    except Exception:
+        issues.append("git not found")
+        print("  ⚠️  git not found")
+
+    # Check Python
+    try:
+        result = subprocess.run(["python3", "--version"], capture_output=True, text=True)
+        print(f"  Python: {result.stdout.strip()}")
+    except Exception:
+        issues.append("python3 not found")
+        print("  ⚠️  python3 not found")
+
+    # Check Ollama
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/tags"
+        urllib.request.urlopen(url, timeout=5)
+        print(f"  Ollama: ✅ running on {config['host']}:{config['port']}")
+    except Exception:
+        issues.append("Ollama not reachable")
+        print(f"  ⚠️  Ollama not reachable on {config['host']}:{config['port']}")
+
+    # Check disk
+    try:
+        stat = os.statvfs(os.path.expanduser("~"))
+        free_gb = (stat.f_frsize * stat.f_bavail) / (1024 ** 3)
+        print(f"  Disk free: {free_gb:.1f}GB")
+        if free_gb < 1:
+            issues.append("Low disk space")
+    except Exception:
+        pass
+
+    # Check permissions
+    config_dir = CONFIG_DIR
+    if os.path.exists(config_dir):
+        mode = oct(os.stat(config_dir).st_mode)[-3:]
+        print(f"  Config dir: {config_dir} (mode: {mode})")
+
+    print()
+    if issues:
+        print(f"{len(issues)} issue(s) found.")
+        # AI suggestions
+        prompt = "Diagnose these dev environment issues and suggest fixes:\n" + "\n".join(issues)
+        diagnosis = query_llm(prompt)
+        if diagnosis:
+            print(f"\n🧠 Suggestions:\n{diagnosis}")
+    else:
+        print("✅ Environment looks healthy!")
+
+
+def cmd_clone(args):
+    """Clone a repo and auto-setup environment."""
+    repo = args.repo
+
+    # Determine target directory
+    if args.dir:
+        target = args.dir
+    else:
+        name = repo.rstrip("/").split("/")[-1].replace(".git", "")
+        target = os.path.join(os.getcwd(), name)
+
+    print(f"Cloning {repo} → {target}")
+
+    try:
+        subprocess.run(["git", "clone", repo, target], check=True)
+        print(f"✅ Cloned to {target}")
+
+        # Auto-detect project type and suggest setup
+        os.chdir(target)
+
+        setup_hints = []
+        if os.path.exists("package.json"):
+            setup_hints.append("npm install")
+        if os.path.exists("requirements.txt"):
+            setup_hints.append("pip install -r requirements.txt")
+        if os.path.exists("Cargo.toml"):
+            setup_hints.append("cargo build")
+        if os.path.exists("go.mod"):
+            setup_hints.append("go mod download")
+        if os.path.exists("Makefile"):
+            setup_hints.append("make")
+        if os.path.exists("docker-compose.yml"):
+            setup_hints.append("docker-compose up -d")
+
+        if setup_hints:
+            print("\nSuggested setup commands:")
+            for hint in setup_hints:
+                print(f"  $ {hint}")
+
+            if args.setup:
+                print("\nRunning setup...")
+                for hint in setup_hints:
+                    print(f"  Running: {hint}")
+                    try:
+                        subprocess.run(shlex.split(hint), cwd=target)
+                    except Exception as e:
+                        print(f"  ⚠️  Failed: {e}")
+
+        # Save the environment
+        env_name = os.path.basename(target)
+        os.makedirs(ENV_DIR, exist_ok=True)
+        env = capture_env()
+        env["name"] = env_name
+        env["repo"] = repo
+        fpath = os.path.join(ENV_DIR, f"{env_name}.json")
+        with open(fpath, "w") as f:
+            json.dump(env, f, indent=2)
+        print(f"\n✅ Environment saved: {env_name}")
+
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Clone failed: {e}")
+        sys.exit(1)
+
+
+def cmd_remove(args):
+    """Remove a saved environment."""
+    fpath = os.path.join(ENV_DIR, f"{args.name}.json")
+    if os.path.exists(fpath):
+        os.remove(fpath)
+        print(f"✅ Removed: {args.name}")
+    else:
+        print(f"❌ Not found: {args.name}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-env — environment manager")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    # save
+    p_save = sub.add_parser("save", help="Save current environment")
+    p_save.add_argument("name", help="Environment name")
+    p_save.add_argument("--desc", "-d", help="Description")
+
+    # load
+    p_load = sub.add_parser("load", help="Restore an environment")
+    p_load.add_argument("name", help="Environment name")
+    p_load.add_argument("--execute", "-x", action="store_true", help="Execute commands")
+    p_load.add_argument("--shell", action="store_true", help="Output shell commands for eval")
+
+    # list
+    sub.add_parser("list", aliases=["ls"], help="List saved environments")
+
+    # diff
+    p_diff = sub.add_parser("diff", help="Show changes since save")
+    p_diff.add_argument("name", help="Environment name")
+
+    # export
+    p_export = sub.add_parser("export", help="Export as shell script")
+    p_export.add_argument("name", help="Environment name")
+
+    # remove
+    p_remove = sub.add_parser("remove", aliases=["rm"], help="Remove saved environment")
+    p_remove.add_argument("name", help="Environment name")
+
+    # doctor
+    sub.add_parser("doctor", help="Diagnose environment issues")
+
+    # clone
+    p_clone = sub.add_parser("clone", help="Clone repo and auto-setup")
+    p_clone.add_argument("repo", help="Git repository URL")
+    p_clone.add_argument("--dir", "-d", help="Target directory")
+    p_clone.add_argument("--setup", "-s", action="store_true", help="Auto-run setup")
+
+    # secret
+    p_secret = sub.add_parser("secret", help="Secret management")
+    p_secret_sub = p_secret.add_subparsers(dest="secret_cmd")
+
+    p_set = p_secret_sub.add_parser("set", help="Store a secret")
+    p_set.add_argument("keyvalue", help="KEY=VALUE or KEY (reads from stdin)")
+
+    p_get = p_secret_sub.add_parser("get", help="Retrieve a secret")
+    p_get.add_argument("key", help="Secret key")
+    p_get.add_argument("--no-newline", "-n", action="store_true", help="Omit trailing newline")
+
+    p_secret_sub.add_parser("list", aliases=["ls"], help="List secret keys")
+
+    p_srm = p_secret_sub.add_parser("remove", aliases=["rm"], help="Remove a secret")
+    p_srm.add_argument("key", help="Secret key")
+
+    args = parser.parse_args()
+
+    if args.command == "save":
+        cmd_save(args)
+    elif args.command == "load":
+        if args.shell:
+            cmd_load_shell(args)
+        else:
+            cmd_load(args)
+    elif args.command in ("list", "ls"):
+        cmd_list(args)
+    elif args.command == "diff":
+        cmd_diff(args)
+    elif args.command == "export":
+        cmd_export(args)
+    elif args.command in ("remove", "rm"):
+        cmd_remove(args)
+    elif args.command == "doctor":
+        cmd_doctor(args)
+    elif args.command == "clone":
+        cmd_clone(args)
+    elif args.command == "secret":
+        if args.secret_cmd == "set":
+            cmd_secret_set(args)
+        elif args.secret_cmd == "get":
+            cmd_secret_get(args)
+        elif args.secret_cmd in ("list", "ls"):
+            cmd_secret_list(args)
+        elif args.secret_cmd in ("remove", "rm"):
+            cmd_secret_remove(args)
+        else:
+            parser.parse_args(["secret", "--help"])
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

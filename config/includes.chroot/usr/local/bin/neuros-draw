@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""
+neuros-draw — NeurOS Drawing Tool
+AI-powered image generation, diagram creation, and vector graphics.
+
+Usage:
+  neuros-draw "a sunset over mountains"            Generate image from prompt
+  neuros-draw --diagram "login flow"               Create a diagram/flowchart
+  neuros-draw --svg "neural network"               Generate SVG graphic
+  neuros-draw --style cyberpunk "city skyline"     Style-preset generation
+  neuros-draw --size 1024x768 "forest"             Custom dimensions
+  neuros-draw --output sunset.png "sunset"         Specify output file
+  neuros-draw gallery                               Browse generated images
+"""
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+DRAW_DIR = os.path.expanduser("~/Pictures/NeurOS")
+GALLERY_DB = os.path.join(CONFIG_DIR, "drawings.json")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+STYLES = {
+    "photorealistic": "hyper-realistic, detailed, 8K, professional photography",
+    "cyberpunk": "cyberpunk, neon lights, dark atmosphere, synthwave",
+    "anime": "anime style, studio ghibli, vibrant colors, cel shaded",
+    "sketch": "pencil sketch, hand-drawn, artistic, black and white",
+    "watercolor": "watercolor painting, soft edges, artistic wash",
+    "oil": "oil painting, thick brush strokes, rich textures, classical",
+    "pixel": "pixel art, 8-bit, retro game style, chunky pixels",
+    "minimalist": "minimalist, clean lines, simple shapes, flat design",
+    "3d": "3D render, octane render, cinema 4D, highly detailed",
+    "fantasy": "fantasy art, magical, epic, mythical, detailed illustration",
+}
+
+
+def load_config():
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def query_llm(prompt, system="You are a creative image prompt engineer."):
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        data = json.dumps({
+            "model": config["model"], "prompt": prompt,
+            "system": system, "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def load_gallery():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    if os.path.exists(GALLERY_DB):
+        with open(GALLERY_DB) as f:
+            return json.load(f)
+    return {"images": []}
+
+
+def save_gallery(gallery):
+    with open(GALLERY_DB + ".tmp", "w") as f:
+        json.dump(gallery, f, indent=2)
+    os.replace(GALLERY_DB + ".tmp", GALLERY_DB)
+
+
+def enhance_prompt(prompt, style=None, diagram=False):
+    """Use AI to enhance the image prompt for better results."""
+    if diagram:
+        system = "You create detailed diagram descriptions."
+        base = f"Create a detailed description for a technical diagram of: {prompt}. Keep it clean and simple."
+    else:
+        system = "You are a master prompt engineer for image generation."
+        base = f"Enhance this image prompt to be more detailed and evocative. Add lighting, composition, and mood details. Keep it under 100 words.\n\nPrompt: {prompt}"
+
+    if style and style in STYLES:
+        base += f"\nStyle: {STYLES[style]}"
+
+    enhanced = query_llm(base, system)
+    return enhanced if enhanced else prompt
+
+
+def generate_svg(prompt, output_path, width=800, height=600):
+    """Generate an SVG diagram using AI-generated SVG code."""
+    system = "You generate valid SVG code. Return ONLY raw SVG code, no markdown, no explanations."
+    prompt_full = f"Create a simple SVG diagram ({width}x{height}) for: {prompt}. Use clean geometric shapes, good colors, and labels."
+
+    svg = query_llm(prompt_full, system)
+    if not svg:
+        print("❌ AI generation failed.")
+        return False
+
+    # Extract SVG if wrapped in code blocks
+    if "```svg" in svg:
+        svg = svg.split("```svg")[1].split("```")[0].strip()
+    elif "```" in svg:
+        # Try to find svg content
+        for block in svg.split("```"):
+            if "<svg" in block.lower():
+                svg = block.strip()
+                break
+
+    if not svg.startswith("<svg"):
+        svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">\n{svg}\n</svg>'
+
+    with open(output_path, "w") as f:
+        f.write(svg)
+
+    return True
+
+
+def generate_ascii(prompt):
+    """Generate ASCII art (works offline, no image model needed)."""
+    system = "You create ASCII art. Use only characters to draw. Be creative."
+    ascii_art = query_llm(
+        f"Create a small ASCII art (max 40 chars wide, max 15 lines) of: {prompt}",
+        system
+    )
+    return ascii_art
+
+
+def generate_diagram(prompt, output_path):
+    """Generate a diagram using mermaid.js or plantuml syntax."""
+    system = "You generate Mermaid.js diagram syntax. Return ONLY the diagram code, no markdown wrappers."
+    full_prompt = f"Create a Mermaid.js diagram showing: {prompt}. Use appropriate diagram type (flowchart, sequence, class, etc.)."
+
+    diagram = query_llm(full_prompt, system)
+    if not diagram:
+        print("❌ AI diagram generation failed.")
+        return False
+
+    # Clean up code blocks
+    if "```mermaid" in diagram:
+        diagram = diagram.split("```mermaid")[1].split("```")[0].strip()
+    elif "```" in diagram:
+        diagram = diagram.split("```")[1].split("```")[0].strip()
+
+    # Write .mmd file
+    mmd_path = output_path.replace(".svg", ".mmd").replace(".png", ".mmd")
+    with open(mmd_path, "w") as f:
+        f.write(diagram)
+
+    print(f"   Mermaid source: {mmd_path}")
+
+    # Try to render with mermaid-cli if available
+    try:
+        subprocess.run(["which", "mmdc"], capture_output=True, check=True)
+        subprocess.run(["mmdc", "-i", mmd_path, "-o", output_path], check=True)
+        return True
+    except Exception:
+        # Mermaid-cli not available, save the .mmd file
+        print("   (Install mermaid-cli for PNG/SVG rendering: npm i -g @mermaid-js/mermaid-cli)")
+        return False
+
+
+def cmd_draw(args):
+    """Generate an image from text prompt."""
+    os.makedirs(DRAW_DIR, exist_ok=True)
+
+    prompt = args.prompt
+    style = args.style
+    output = args.output
+
+    if not output:
+        safe_name = prompt[:30].replace(" ", "_").replace("/", "_").replace("\\", "_")
+        ext = ".png"
+        if args.svg:
+            ext = ".svg"
+        output = os.path.join(DRAW_DIR, f"{safe_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}{ext}")
+
+    print(f"🎨 Generating: '{prompt}'")
+
+    # Enhance the prompt
+    enhanced = enhance_prompt(prompt, style, args.diagram)
+    if enhanced != prompt:
+        print(f"   Enhanced: '{enhanced[:80]}...'")
+    print()
+
+    success = False
+    method = ""
+
+    if args.diagram:
+        success = generate_diagram(prompt, output)
+        method = "diagram"
+    elif args.svg:
+        success = generate_svg(enhanced, output, args.width, args.height)
+        method = "SVG"
+    elif args.ascii:
+        art = generate_ascii(prompt)
+        if art:
+            print(art)
+            # Also save
+            with open(output.replace(".png", ".txt"), "w") as f:
+                f.write(art)
+            success = True
+            method = "ASCII"
+    else:
+        # For image generation, we can try to use available tools
+        # Check for common image generation backends
+        backends = []
+
+        # Check for stable-diffusion-webui API
+        try:
+            import urllib.request
+            req = urllib.request.Request("http://localhost:7860/sdapi/v1/sd-models")
+            urllib.request.urlopen(req, timeout=3)
+            backends.append("sd-webui")
+        except Exception:
+            pass
+
+        # Check for ComfyUI
+        try:
+            import urllib.request
+            urllib.request.urlopen("http://localhost:8188/prompt", timeout=3)
+            backends.append("comfyui")
+        except Exception:
+            pass
+
+        if backends:
+            # Use SD WebUI
+            if "sd-webui" in backends:
+                try:
+                    import urllib.request
+                    payload = json.dumps({
+                        "prompt": enhanced,
+                        "negative_prompt": "ugly, blurry, low quality",
+                        "steps": 20, "width": args.width, "height": args.height,
+                    }).encode()
+                    req = urllib.request.Request(
+                        "http://localhost:7860/sdapi/v1/txt2img",
+                        data=payload, headers={"Content-Type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        result = json.loads(resp.read())
+                        img_data = base64.b64decode(result["images"][0])
+                        with open(output, "wb") as f:
+                            f.write(img_data)
+                        success = True
+                        method = "Stable Diffusion"
+                except Exception as e:
+                    print(f"⚠️  SD WebUI error: {e}")
+
+        if not success:
+            # Fallback: generate as ASCII art + save enhanced prompt
+            print("⚠️  No image generation backend found.")
+            print("   Install: Stable Diffusion WebUI or ComfyUI")
+            print()
+            print("   Generating ASCII art instead...")
+            print()
+            art = generate_ascii(prompt)
+            if art:
+                print(art)
+            print()
+
+            # Save the enhanced prompt for later
+            prompt_file = output.replace(".png", ".prompt.txt")
+            with open(prompt_file, "w") as f:
+                f.write(f"Original: {prompt}\n")
+                f.write(f"Enhanced: {enhanced}\n")
+                if style:
+                    f.write(f"Style: {style}\n")
+            print(f"   Prompt saved: {prompt_file}")
+            return
+
+    if success:
+        print(f"✅ Saved: {output}")
+
+        # Add to gallery
+        gallery = load_gallery()
+        gallery["images"].append({
+            "prompt": prompt,
+            "enhanced": enhanced,
+            "style": style,
+            "method": method,
+            "output": output,
+            "created": datetime.now().isoformat(),
+        })
+        save_gallery(gallery)
+
+
+def cmd_gallery(args):
+    """Browse generated images."""
+    gallery = load_gallery()
+    if not gallery["images"]:
+        print("No images generated yet. Try: neuros-draw 'your prompt'")
+        return
+
+    print(f"🖼️  Gallery ({len(gallery['images'])} images)")
+    print("-" * 60)
+    for i, img in enumerate(gallery["images"]):
+        ts = img.get("created", "")[:19]
+        exists = "✅" if os.path.exists(img["output"]) else "❌"
+        print(f"{i+1}. {exists} {ts} | {img.get('method', '?')}")
+        print(f"   '{img['prompt'][:50]}'")
+        path = img["output"].replace(os.path.expanduser("~"), "~")
+        print(f"   {path}")
+        print()
+
+    if args.open and len(gallery["images"]) > 0:
+        latest = gallery["images"][-1]
+        try:
+            subprocess.run(["xdg-open", latest["output"]])
+        except Exception:
+            pass
+
+
+def cmd_styles(args):
+    """List available styles."""
+    print("Available styles:")
+    for name, desc in STYLES.items():
+        print(f"  {name:<15} {desc[:60]}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-draw — AI drawing and image generation")
+    parser.add_argument("prompt", nargs="?", help="Image description")
+    parser.add_argument("--style", "-s", choices=list(STYLES.keys()), help="Art style")
+    parser.add_argument("--output", "-o", help="Output file path")
+    parser.add_argument("--size", help="Size as WxH (e.g., 1024x768)")
+    parser.add_argument("--width", type=int, default=1024, help="Image width")
+    parser.add_argument("--height", type=int, default=768, help="Image height")
+    parser.add_argument("--diagram", action="store_true", help="Generate a diagram/flowchart")
+    parser.add_argument("--svg", action="store_true", help="Generate SVG graphic")
+    parser.add_argument("--ascii", action="store_true", help="Generate ASCII art")
+
+    sub = parser.add_subparsers(dest="subcommand", help="Subcommands")
+
+    sub.add_parser("gallery", aliases=["list", "ls"], help="Browse generated images")
+    p_gal = sub.add_parser("gallery", aliases=["list", "ls"], help="Browse generated images")
+    p_gal.add_argument("--open", "-o", action="store_true", help="Open latest image")
+
+    sub.add_parser("styles", help="List available styles")
+
+    args = parser.parse_args()
+
+    # Handle size parsing
+    if args.size:
+        parts = args.size.split("x")
+        if len(parts) == 2:
+            args.width = int(parts[0])
+            args.height = int(parts[1])
+
+    if args.subcommand in ("gallery", "list", "ls"):
+        cmd_gallery(args)
+    elif args.subcommand == "styles":
+        cmd_styles(args)
+    elif args.prompt:
+        cmd_draw(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

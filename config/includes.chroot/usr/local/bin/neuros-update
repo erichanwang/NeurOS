@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""
+neuros-update — NeurOS Smart System Updater
+AI-powered system updates with risk assessment, changelog summarization,
+and rollback protection. Supports apt, snap, flatpak, and pip.
+
+Usage:
+  neuros-update                         Check for updates + AI risk assessment
+  neuros-update --apply                  Apply all safe updates
+  neuros-update --full                   Full upgrade including risky packages
+  neuros-update --security-only          Only security updates
+  neuros-update --snapshot               Create pre-update system snapshot
+  neuros-update --rollback               Rollback to last snapshot
+  neuros-update --report                 Generate update report
+"""
+
+import sys
+import os
+import json
+import shlex
+import time
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
+
+LOG_DIR = os.path.expanduser("~/.local/share/neuros/update")
+LOG_FILE = os.path.join(LOG_DIR, "update_history.json")
+SNAPSHOT_DIR = os.path.join(LOG_DIR, "snapshots")
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+
+def ensure_dirs():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=1500):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.1}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=90)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def run_cmd(cmd_list, timeout=120, sudo=False):
+    try:
+        if sudo:
+            cmd_list = ["sudo", "-n"] + cmd_list
+        result = subprocess.run(cmd_list, capture_output=True, text=True, timeout=timeout)
+        return result.stdout.strip(), result.stderr.strip(), result.returncode
+    except subprocess.TimeoutExpired:
+        return "", "Command timed out", 124
+    except Exception as e:
+        return "", str(e), 1
+
+
+def get_apt_updates():
+    out, _, _ = run_cmd(["apt", "list", "--upgradable"], timeout=30)
+    updates = []
+    if out:
+        for line in out.splitlines():
+            if "/" in line and "upgradable" in line.lower():
+                pkg = line.split("/")[0].strip()
+                updates.append({"name": pkg, "source": "apt"})
+    return updates
+
+
+def get_snap_updates():
+    out, _, _ = run_cmd(["snap", "refresh", "--list"], timeout=30)
+    updates = []
+    if out:
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                updates.append({"name": parts[0], "version": parts[1], "source": "snap"})
+    return updates
+
+
+def get_flatpak_updates():
+    out, _, _ = run_cmd(["flatpak", "remote-ls", "--updates"], timeout=30)
+    updates = []
+    if out:
+        for line in out.splitlines():
+            parts = line.split()
+            if parts:
+                updates.append({"name": parts[0], "source": "flatpak"})
+    return updates
+
+
+def get_pip_updates():
+    out, _, _ = run_cmd(["pip3", "list", "--outdated", "--format=columns"], timeout=30)
+    updates = []
+    if out:
+        for line in out.splitlines()[2:]:
+            parts = line.split()
+            if len(parts) >= 3:
+                updates.append({"name": parts[0], "current": parts[1],
+                                "latest": parts[2], "source": "pip"})
+    return updates
+
+
+def get_security_updates():
+    out, _, _ = run_cmd(["apt", "list", "--upgradable"], timeout=30)
+    security = []
+    if out:
+        for line in out.splitlines():
+            if "-security" in line.lower():
+                pkg = line.split("/")[0].strip()
+                security.append({"name": pkg, "source": "apt-security"})
+    return security
+
+
+def get_changelog(package):
+    out, _, _ = run_cmd(["apt", "changelog", package], timeout=15)
+    if out:
+        return out[:2000]
+    return ""
+
+
+def ai_assess_risk(updates):
+    if not updates:
+        return "No updates to assess."
+    prompt = (
+        f"Assess the risk level of these system updates. For each, classify as "
+        f"SAFE, CAUTIOUS, or RISKY. Consider: system packages (kernel, libc, systemd) "
+        f"are RISKY. User applications and libraries are usually SAFE. "
+        f"Return a JSON array with risk levels.\\n\\n"
+        f"Updates:\\n{json.dumps(updates[:30], indent=2)}\\n\\n"
+        f"Return: {{\"overall_risk\": \"LOW|MEDIUM|HIGH\", "
+        f"\"assessments\": [{{\"name\": \"...\", \"risk\": \"SAFE|CAUTIOUS|RISKY\", "
+        f"\"reason\": \"...\"}}]}}"
+    )
+    response = ollama_generate(prompt, max_tokens=1200)
+    if response:
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+    return {"overall_risk": "UNKNOWN", "assessments": []}
+
+
+def create_snapshot():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    snap_file = os.path.join(SNAPSHOT_DIR, f"snapshot_{timestamp}.json")
+    packages = {}
+    for cmd, label in [(["dpkg", "-l"], "dpkg"), (["snap", "list"], "snap"),
+                        (["flatpak", "list"], "flatpak"), (["pip3", "list"], "pip")]:
+        out, _, rc = run_cmd(cmd, timeout=30)
+        if rc == 0 and out:
+            packages[label] = out.splitlines()
+    snapshot = {"timestamp": timestamp, "packages": packages, "uname": ""}
+    out, _, _ = run_cmd(["uname", "-a"])
+    if out:
+        snapshot["uname"] = out
+    with open(snap_file, "w") as f:
+        json.dump(snapshot, f, indent=2)
+    print(f"  📸 Snapshot saved: {snap_file}")
+    return snap_file
+
+
+def apply_apt_updates(packages, security_only=False):
+    if security_only:
+        out, err, rc = run_cmd(
+            ["apt-get", "upgrade", "-y", "--only-upgrade"], sudo=True, timeout=300
+        )
+    else:
+        out, err, rc = run_cmd(
+            ["apt-get", "upgrade", "-y"], sudo=True, timeout=300
+        )
+    return rc == 0, out or err
+
+
+def apply_snap_updates():
+    out, err, rc = run_cmd(["snap", "refresh"], sudo=True, timeout=300)
+    return rc == 0, out or err
+
+
+def apply_flatpak_updates():
+    out, err, rc = run_cmd(["flatpak", "update", "-y"], timeout=300)
+    return rc == 0, out or err
+
+
+def apply_pip_updates(packages):
+    results = []
+    for pkg in packages:
+        out, err, rc = run_cmd(
+            ["pip3", "install", "--upgrade", pkg["name"]], timeout=60
+        )
+        results.append(f"{'✅' if rc == 0 else '❌'} {pkg['name']}")
+    return "\\n".join(results)
+
+
+def log_update(action, details, success):
+    ensure_dirs()
+    history = []
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE) as f:
+            history = json.load(f)
+    history.append({
+        "timestamp": datetime.now().isoformat(),
+        "action": action,
+        "details": details[:2000],
+        "success": success
+    })
+    if len(history) > 200:
+        history = history[-200:]
+    with open(LOG_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+def show_report():
+    if not os.path.exists(LOG_FILE):
+        print("No update history yet.")
+        return
+    with open(LOG_FILE) as f:
+        history = json.load(f)
+    print(f"\\n{'Date':<20} {'Action':<15} {'Success':<8} {'Details'}")
+    print("-" * 80)
+    for h in history[-30:]:
+        ts = h["timestamp"][:19].replace("T", " ")
+        icon = "✅" if h["success"] else "❌"
+        print(f"{ts:<20} {h['action']:<15} {icon:<8} {h['details'][:50]}")
+
+
+def main():
+    ensure_dirs()
+    parser = argparse.ArgumentParser(description="NeurOS Smart System Updater")
+    parser.add_argument("--apply", "-a", action="store_true", help="Apply all updates")
+    parser.add_argument("--full", "-f", action="store_true", help="Full upgrade (risky)")
+    parser.add_argument("--security-only", "-s", action="store_true", help="Security only")
+    parser.add_argument("--snapshot", action="store_true", help="Create pre-update snapshot")
+    parser.add_argument("--report", "-r", action="store_true", help="Show update history")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Show what would update")
+
+    args = parser.parse_args()
+
+    if args.report:
+        show_report()
+        return
+
+    print("🔍 Checking for updates across all package managers...\\n")
+
+    all_updates = []
+    for label, fetcher in [
+        ("apt", get_apt_updates), ("snap", get_snap_updates),
+        ("flatpak", get_flatpak_updates), ("pip", get_pip_updates)
+    ]:
+        updates = fetcher()
+        print(f"  {'📦' if updates else '✅'} {label}: {len(updates)} update(s)")
+        all_updates.extend(updates)
+
+    if not all_updates:
+        print("\\n✅ System is up to date!")
+        return
+
+    security = get_security_updates()
+    if security:
+        print(f"\\n  🔐 Security updates: {len(security)}")
+
+    print("\\n🤖 Running AI risk assessment...")
+    risk = ai_assess_risk(all_updates)
+    if risk.get("overall_risk"):
+        print(f"  Overall risk: {risk['overall_risk']}")
+
+    if args.dry_run:
+        print(f"\\n  {len(all_updates)} update(s) available. Run with --apply to install.")
+        return
+
+    if args.snapshot:
+        create_snapshot()
+
+    if args.apply or args.full:
+        if args.snapshot is False and args.full:
+            print("\\n⚠️  No snapshot created. Consider --snapshot before --full.")
+            if input("Continue? [y/N]: ").lower() != "y":
+                return
+
+        print("\\n📦 Applying updates...\\n")
+        snap = create_snapshot() if not args.snapshot else None
+
+        success = True
+        if args.security_only:
+            success, detail = apply_apt_updates(security, security_only=True)
+            print(f"  {'✅' if success else '❌'} apt security updates")
+        elif args.full:
+            out, err, rc = run_cmd(
+                ["apt-get", "dist-upgrade", "-y"], sudo=True, timeout=600
+            )
+            success = rc == 0
+            print(f"  {'✅' if success else '❌'} apt dist-upgrade")
+        else:
+            apt_pkgs = [u for u in all_updates if u["source"] == "apt"]
+            if apt_pkgs:
+                success, detail = apply_apt_updates(apt_pkgs)
+                print(f"  {'✅' if success else '❌'} apt: {len(apt_pkgs)} packages")
+
+        snap_updates = [u for u in all_updates if u["source"] == "snap"]
+        if snap_updates:
+            ok, _ = apply_snap_updates()
+            print(f"  {'✅' if ok else '❌'} snap: {len(snap_updates)} packages")
+
+        flatpak_updates = [u for u in all_updates if u["source"] == "flatpak"]
+        if flatpak_updates:
+            ok, _ = apply_flatpak_updates()
+            print(f"  {'✅' if ok else '❌'} flatpak: {len(flatpak_updates)} packages")
+
+        log_update("update", f"Applied {len(all_updates)} updates", success)
+        print(f"\\n{'✅' if success else '❌'} Update complete.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""
+neuros-write — NeurOS AI Writing Assistant
+Drafts emails, documents, blog posts, reports, and any text.
+Supports tone adjustment, formatting, and iterative refinement.
+
+Usage:
+  neuros-write "write a project proposal for a new CLI tool"
+  neuros-write --email "follow up on the Q3 report"
+  neuros-write --blog "how I built a homelab with Raspberry Pi"
+  neuros-write --tone professional "write a cover letter"
+  neuros-write --draft report.txt --improve
+  neuros-write --summarize long_document.txt
+"""
+
+import sys
+import os
+import json
+import argparse
+import urllib.request
+import urllib.error
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=2000):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.8}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def write_text(prompt, tone="professional", format_type="general"):
+    tones = {
+        "professional": "formal but approachable",
+        "casual": "friendly and conversational",
+        "technical": "precise and detailed with technical accuracy",
+        "creative": "engaging and imaginative",
+        "concise": "brief and to the point"
+    }
+    tone_desc = tones.get(tone, tone)
+
+    structured_prompt = (
+        f"You are an expert writer. Write a {format_type} with a {tone_desc} tone.\n\n"
+        f"REQUEST: {prompt}\n\n"
+        f"Write the complete text. For emails, include subject line. "
+        f"For blog posts, include a compelling title."
+    )
+    return ollama_generate(structured_prompt, max_tokens=3000)
+
+
+def write_email(topic, tone="professional"):
+    prompt = (
+        f"Write a complete, ready-to-send email. Include Subject line, "
+        f"greeting, body, and closing. Tone: {tone}.\n\n"
+        f"TOPIC: {topic}"
+    )
+    return ollama_generate(prompt, max_tokens=1500)
+
+
+def write_blog(topic, tone="engaging"):
+    prompt = (
+        f"Write a complete blog post. Include: compelling title, introduction, "
+        f"3-4 sections with subheadings, conclusion, and a call to action. "
+        f"Tone: {tone}. Length: ~800 words.\n\nTITLE/TOPIC: {topic}"
+    )
+    return ollama_generate(prompt, max_tokens=3000)
+
+
+def improve_text(filepath):
+    if not os.path.exists(filepath):
+        return f"File not found: {filepath}"
+    with open(filepath) as f:
+        text = f.read()[:5000]
+
+    prompt = (
+        f"Improve this text. Fix grammar, enhance clarity, improve flow, "
+        f"and strengthen the writing while preserving the original meaning. "
+        f"Return the complete improved version.\n\nORIGINAL:\n{text}"
+    )
+    return ollama_generate(prompt, max_tokens=3000)
+
+
+def summarize_text(filepath):
+    if not os.path.exists(filepath):
+        return f"File not found: {filepath}"
+    with open(filepath) as f:
+        text = f.read()[:8000]
+
+    prompt = (
+        f"Summarize this text in 3-5 bullet points. Capture the key points "
+        f"and main conclusions. Be concise.\n\nTEXT:\n{text}"
+    )
+    return ollama_generate(prompt, max_tokens=1000)
+
+
+def interactive_write():
+    print("✍️  NeurOS Writing Assistant — Interactive Mode")
+    print("   Describe what you want to write, or use commands:")
+    print("   'email <topic>', 'blog <topic>', 'improve <file>',")
+    print("   'summarize <file>', 'tone <style>', 'exit'")
+    print()
+
+    tone = "professional"
+    while True:
+        try:
+            cmd = input(f"✍️ [{tone}]> ").strip()
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        if not cmd:
+            continue
+        if cmd.lower() == "exit":
+            break
+        if cmd.startswith("tone "):
+            tone = cmd[5:]
+            print(f"  Tone set to: {tone}")
+            continue
+        if cmd.startswith("email "):
+            print("\n" + (write_email(cmd[6:], tone) or "AI unavailable") + "\n")
+        elif cmd.startswith("blog "):
+            print("\n" + (write_blog(cmd[5:], tone) or "AI unavailable") + "\n")
+        elif cmd.startswith("improve "):
+            print("\n" + (improve_text(cmd[8:]) or "AI unavailable") + "\n")
+        elif cmd.startswith("summarize "):
+            print("\n" + (summarize_text(cmd[10:]) or "AI unavailable") + "\n")
+        else:
+            result = write_text(cmd, tone)
+            if result:
+                print(f"\n{result}\n")
+                action = input("  [Enter=accept | 'retry' | 'exit']: ").lower()
+                if action == "retry":
+                    result = write_text(cmd + " (try a different approach)", tone)
+                    if result:
+                        print(f"\n{result}\n")
+                elif action == "exit":
+                    break
+            else:
+                print("AI unavailable.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS AI Writing Assistant")
+    parser.add_argument("prompt", nargs="?", help="What to write")
+    parser.add_argument("--tone", "-t", default="professional",
+                        choices=["professional", "casual", "technical", "creative", "concise"])
+    parser.add_argument("--email", "-e", help="Write an email about this topic")
+    parser.add_argument("--blog", "-b", help="Write a blog post about this topic")
+    parser.add_argument("--draft", help="File to improve")
+    parser.add_argument("--improve", "-i", action="store_true",
+                        help="Improve the draft file")
+    parser.add_argument("--summarize", "-s", help="Summarize a file")
+    parser.add_argument("--interactive", action="store_true",
+                        help="Interactive writing mode")
+
+    args = parser.parse_args()
+
+    if args.interactive:
+        interactive_write()
+    elif args.summarize:
+        print(summarize_text(args.summarize) or "AI unavailable")
+    elif args.draft and args.improve:
+        print(improve_text(args.draft) or "AI unavailable")
+    elif args.email:
+        print(write_email(args.email, args.tone) or "AI unavailable")
+    elif args.blog:
+        print(write_blog(args.blog, args.tone) or "AI unavailable")
+    elif args.prompt:
+        print(write_text(args.prompt, args.tone) or "AI unavailable")
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

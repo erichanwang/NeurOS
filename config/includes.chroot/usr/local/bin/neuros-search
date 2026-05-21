@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""
+neuros-search — NeurOS Universal AI Search
+Searches across files, web, documentation, and personal knowledge base
+with AI-powered results ranking and summarization.
+
+Usage:
+  neuros-search "how to configure nginx"            Search everything
+  neuros-search --files "TODO" /path/to/project      Search code/files
+  neuros-search --web "latest python 3.13 features"   Web search via AI
+  neuros-search --docs "react useEffect"              Technical docs search
+  neuros-search --knowledge "meeting notes"           Search personal KB
+"""
+
+import sys
+import os
+import json
+import shlex
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+KNOWLEDGE_DIR = os.path.expanduser("~/.local/share/neuros/knowledge")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=1500):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.3}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def search_files(pattern, directory="."):
+    results = []
+    try:
+        out = subprocess.check_output(
+            ["grep", "-rn", "--include=*.py", "--include=*.js", "--include=*.ts",
+             "--include=*.html", "--include=*.css", "--include=*.md",
+             "--include=*.json", "--include=*.yaml", "--include=*.yml",
+             "--include=*.sh", "--include=*.toml", "--include=*.rs",
+             "--include=*.go", "--include=*.java", "--include=*.c", "--include=*.h",
+             "-l", pattern, directory],
+            text=True, timeout=15
+        ).strip()
+        for line in out.splitlines()[:20]:
+            results.append(line)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+
+    try:
+        out = subprocess.check_output(
+            ["grep", "-rn", "--include=*.txt", "--include=*.conf",
+             "--include=*.ini", "--include=*.cfg", "-l", pattern, directory],
+            text=True, timeout=10
+        ).strip()
+        for line in out.splitlines()[:10]:
+            if line not in results:
+                results.append(line)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+
+    return results
+
+
+def search_web(query):
+    prompt = (
+        f"Act as a research assistant. Search your knowledge for information about "
+        f"this topic. Provide a comprehensive answer with key facts, "
+        f"dates if relevant, and cite what you know.\n\nQUERY: {query}"
+    )
+    return ollama_generate(prompt, max_tokens=2000)
+
+
+def search_docs(query):
+    prompt = (
+        f"Act as a technical documentation expert. Answer this technical question "
+        f"with precise API information, syntax, examples, and best practices. "
+        f"Include code snippets where helpful.\n\nQUESTION: {query}"
+    )
+    return ollama_generate(prompt, max_tokens=2000)
+
+
+def search_knowledge(query):
+    if not os.path.exists(KNOWLEDGE_DIR):
+        return "No knowledge base found. Use neuros-knowledge to add entries."
+
+    results = []
+    for root, dirs, files in os.walk(KNOWLEDGE_DIR):
+        for file in files:
+            if file.endswith((".txt", ".md", ".json")):
+                filepath = os.path.join(root, file)
+                try:
+                    out = subprocess.check_output(
+                        ["grep", "-il", query, filepath], text=True, timeout=5
+                    ).strip()
+                    if out:
+                        with open(filepath) as f:
+                            content = f.read()[:800]
+                        results.append({
+                            "file": file, "snippet": content[:200]
+                        })
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    pass
+
+    if not results:
+        return f"No knowledge base matches for: {query}"
+
+    kb_context = "\n".join(
+        f"[{r['file']}] {r['snippet']}" for r in results[:10]
+    )
+
+    prompt = (
+        f"Based on this personal knowledge base content, answer the query. "
+        f"Synthesize relevant information from all entries.\n\n"
+        f"KNOWLEDGE BASE:\n{kb_context}\n\nQUERY: {query}"
+    )
+    return ollama_generate(prompt, max_tokens=1500)
+
+
+def ai_rank_results(query, files):
+    if not files:
+        return "No matching files found."
+
+    context = "\n".join(files[:15])
+    prompt = (
+        f"Rank these files by relevance to the query. Return the top 10 most "
+        f"relevant, each with a 1-sentence explanation of why it's relevant.\n\n"
+        f"QUERY: {query}\n\nFILES:\n{context}"
+    )
+    return ollama_generate(prompt, max_tokens=1000)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Universal AI Search")
+    parser.add_argument("query", nargs="?", help="Search query")
+    parser.add_argument("--files", "-f", action="store_true",
+                        help="Search local files")
+    parser.add_argument("--web", "-w", action="store_true",
+                        help="AI-assisted web knowledge search")
+    parser.add_argument("--docs", "-d", action="store_true",
+                        help="Technical documentation search")
+    parser.add_argument("--knowledge", "-k", action="store_true",
+                        help="Search personal knowledge base")
+    parser.add_argument("--directory", "-C", default=".",
+                        help="Directory for file search")
+    parser.add_argument("--rank", "-r", action="store_true",
+                        help="AI-rank file results")
+
+    args = parser.parse_args()
+
+    if not args.query:
+        parser.print_help()
+        return
+
+    if args.files:
+        files = search_files(args.query, args.directory)
+        if args.rank and files:
+            ranked = ai_rank_results(args.query, files)
+            print(ranked)
+        else:
+            if files:
+                print(f"Found {len(files)} matching file(s):\n")
+                for f in files[:30]:
+                    print(f"  📄 {f}")
+            else:
+                print(f"No files match: {args.query}")
+    elif args.web:
+        print(search_web(args.query))
+    elif args.docs:
+        print(search_docs(args.query))
+    elif args.knowledge:
+        print(search_knowledge(args.query))
+    else:
+        print("🔍 Searching across all sources...\n")
+        print("📂 Files:")
+        files = search_files(args.query, args.directory)
+        if files:
+            for f in files[:5]:
+                print(f"  📄 {f}")
+        else:
+            print("  No matches")
+
+        print("\n🌐 AI Knowledge:")
+        web_result = search_web(args.query)
+        if web_result:
+            print(f"  {web_result[:500]}...")
+        else:
+            print("  AI unavailable")
+
+        kb = search_knowledge(args.query)
+        if kb and "No knowledge base" not in kb:
+            print(f"\n📚 Knowledge Base:\n  {kb[:300]}...")
+
+
+if __name__ == "__main__":
+    main()

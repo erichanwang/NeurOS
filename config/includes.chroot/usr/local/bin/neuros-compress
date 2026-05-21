@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""
+neuros-compress — NeurOS Smart Compression
+Compresses files/directories with AI-suggested optimal format and level.
+Supports tar.gz, zip, xz, zstd, and 7z.
+
+Usage:
+  neuros-compress my_project/              Smart compress (AI picks best format)
+  neuros-compress --zip my_project/         Force zip format
+  neuros-compress --level 9 my_project/     Max compression
+  neuros-compress --decompress archive.tar.gz
+"""
+
+import sys
+import os
+import json
+import shutil
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=400):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.1}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def analyze_target(path):
+    """Analyze what we're compressing."""
+    info = {"path": path, "is_dir": os.path.isdir(path)}
+    if info["is_dir"]:
+        total_size = 0
+        file_count = 0
+        ext_counts = {}
+        for root, dirs, files in os.walk(path):
+            for f in files:
+                fpath = os.path.join(root, f)
+                try:
+                    total_size += os.path.getsize(fpath)
+                    file_count += 1
+                    ext = os.path.splitext(f)[1].lower()
+                    ext_counts[ext] = ext_counts.get(ext, 0) + 1
+                except OSError:
+                    pass
+        info["size"] = total_size
+        info["files"] = file_count
+        info["top_exts"] = sorted(ext_counts.items(), key=lambda x: -x[1])[:5]
+    else:
+        info["size"] = os.path.getsize(path)
+        info["ext"] = os.path.splitext(path)[1]
+    return info
+
+
+def ai_suggest_format(info):
+    info_str = json.dumps(info)
+    prompt = (
+        f"Suggest the best compression format for this data. Choose from: "
+        f"tar.gz, zip, tar.xz, tar.zst, 7z. Consider: file types, size, "
+        f"and whether speed or ratio matters more. Reply with JUST the format name.\n\n"
+        f"{info_str}"
+    )
+    return ollama_generate(prompt, 100) or "tar.gz"
+
+
+def compress(path, fmt="tar.gz", level=6, output=None):
+    """Compress using the given format."""
+    name = os.path.basename(path.rstrip("/\\"))
+    if not output:
+        ext_map = {"tar.gz": ".tar.gz", "zip": ".zip", "tar.xz": ".tar.xz",
+                   "tar.zst": ".tar.zst", "7z": ".7z"}
+        ext = ext_map.get(fmt, ".tar.gz")
+        output = f"{name}{ext}"
+
+    if os.path.isdir(path):
+        if fmt == "tar.gz":
+            cmd = ["tar", "-czf", output, "-C", os.path.dirname(path), name]
+        elif fmt == "tar.xz":
+            cmd = ["tar", "-cJf", output, "-C", os.path.dirname(path), name]
+        elif fmt == "tar.zst":
+            cmd = ["tar", "--zstd", "-cf", output, "-C", os.path.dirname(path), name]
+        elif fmt == "zip":
+            cmd = ["zip", "-r", f"-{level}", output, name]
+            cwd = os.path.dirname(path)
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+            return result.returncode == 0, result.stdout or result.stderr, output
+        elif fmt == "7z":
+            cmd = ["7z", "a", f"-mx={level}", output, path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            return result.returncode == 0, result.stdout or result.stderr, output
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.returncode == 0, result.stdout or result.stderr, output
+    else:
+        if fmt == "tar.gz":
+            cmd = ["tar", "-czf", output, path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            return result.returncode == 0, result.stdout or result.stderr, output
+        elif fmt == "zip":
+            result = subprocess.run(["zip", f"-{level}", output, path],
+                                    capture_output=True, text=True)
+            return result.returncode == 0, result.stdout or result.stderr, output
+        elif fmt == "7z":
+            result = subprocess.run(["7z", "a", f"-mx={level}", output, path],
+                                    capture_output=True, text=True)
+            return result.returncode == 0, result.stdout or result.stderr, output
+
+    return False, f"Unsupported format: {fmt}", ""
+
+
+def decompress(archive):
+    """Decompress based on extension."""
+    ext = archive.lower()
+    try:
+        if ext.endswith(".tar.gz") or ext.endswith(".tgz"):
+            subprocess.run(["tar", "-xzf", archive], check=True)
+        elif ext.endswith(".tar.xz"):
+            subprocess.run(["tar", "-xJf", archive], check=True)
+        elif ext.endswith(".tar.zst"):
+            subprocess.run(["tar", "--zstd", "-xf", archive], check=True)
+        elif ext.endswith(".zip"):
+            subprocess.run(["unzip", archive], check=True)
+        elif ext.endswith(".7z"):
+            subprocess.run(["7z", "x", archive], check=True)
+        elif ext.endswith(".tar"):
+            subprocess.run(["tar", "-xf", archive], check=True)
+        elif ext.endswith(".gz"):
+            subprocess.run(["gunzip", archive], check=True)
+        else:
+            return False, f"Unknown archive format: {ext}"
+        return True, f"Decompressed: {archive}"
+    except Exception as e:
+        return False, str(e)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Smart Compression")
+    parser.add_argument("target", help="File or directory to compress")
+    parser.add_argument("--format", "-f", choices=["tar.gz", "zip", "tar.xz", "tar.zst", "7z"],
+                        help="Compression format")
+    parser.add_argument("--level", "-l", type=int, default=6,
+                        help="Compression level (1-9)")
+    parser.add_argument("--output", "-o", help="Output filename")
+    parser.add_argument("--decompress", "-d", action="store_true",
+                        help="Decompress instead")
+
+    args = parser.parse_args()
+
+    if args.decompress:
+        ok, msg = decompress(args.target)
+        print(f"{'✅' if ok else '❌'} {msg}")
+        return
+
+    info = analyze_target(args.target)
+    fmt = args.format or ai_suggest_format(info)
+    orig_size = info["size"]
+
+    print(f"📦 Compressing: {args.target}")
+    print(f"   Format: {fmt}, Level: {args.level}")
+    print(f"   Original size: {_format_size(orig_size)}")
+
+    ok, msg, output = compress(args.target, fmt, args.level, args.output)
+
+    if ok and os.path.exists(output):
+        new_size = os.path.getsize(output)
+        ratio = (1 - new_size / orig_size) * 100 if orig_size > 0 else 0
+        print(f"   ✅ {output} ({_format_size(new_size)}, {ratio:.1f}% saved)")
+    else:
+        print(f"   ❌ Compression failed: {msg}")
+
+
+def _format_size(size):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PB"
+
+
+if __name__ == "__main__":
+    main()

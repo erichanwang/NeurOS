@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""
+neuros-monitor — NeurOS System Monitor
+Real-time terminal dashboard for system resources, services, and AI metrics.
+
+Usage:
+  neuros-monitor                        Interactive dashboard
+  neuros-monitor --once                 One-shot snapshot
+  neuros-monitor --json                 JSON output for scripts
+  neuros-monitor --watch <service>      Watch a specific service
+  neuros-monitor --export <file>        Export monitoring data to CSV
+  neuros-monitor --interval 2           Refresh interval in seconds (default: 1)
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+
+def get_cpu_usage():
+    """Get CPU usage percentage."""
+    try:
+        result = subprocess.run(
+            ["bash", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2}'"],
+            capture_output=True, text=True, timeout=5
+        )
+        return float(result.stdout.strip().replace(",", "."))
+    except Exception:
+        return 0.0
+
+
+def get_memory():
+    """Get memory stats."""
+    try:
+        result = subprocess.run(
+            ["free", "-b"], capture_output=True, text=True, timeout=5
+        )
+        lines = result.stdout.strip().split("\n")
+        mem = lines[1].split()
+        swap = lines[2].split() if len(lines) > 2 else ["", "0", "0", "0"]
+        return {
+            "total": int(mem[1]),
+            "used": int(mem[2]),
+            "free": int(mem[3]),
+            "available": int(mem[6]) if len(mem) > 6 else int(mem[3]),
+            "percent": round((int(mem[2]) / int(mem[1])) * 100, 1),
+            "swap_total": int(swap[1]),
+            "swap_used": int(swap[2]),
+            "swap_percent": round((int(swap[2]) / max(int(swap[1]), 1)) * 100, 1),
+        }
+    except Exception:
+        return {"total": 0, "used": 0, "free": 0, "percent": 0, "swap_used": 0, "swap_percent": 0}
+
+
+def get_disk():
+    """Get disk usage."""
+    try:
+        result = subprocess.run(
+            ["df", "-h", "/"], capture_output=True, text=True, timeout=5
+        )
+        lines = result.stdout.strip().split("\n")
+        parts = lines[1].split()
+        return {
+            "size": parts[1],
+            "used": parts[2],
+            "available": parts[3],
+            "percent": int(parts[4].replace("%", "")),
+        }
+    except Exception:
+        return {"size": "?", "used": "?", "available": "?", "percent": 0}
+
+
+def get_load():
+    """Get load average."""
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().strip().split()
+        return {"1min": float(parts[0]), "5min": float(parts[1]), "15min": float(parts[2])}
+    except Exception:
+        return {"1min": 0, "5min": 0, "15min": 0}
+
+
+def get_network():
+    """Get network stats."""
+    try:
+        result = subprocess.run(
+            ["bash", "-c", "cat /proc/net/dev | grep -v 'lo\\|face' | awk '{rx+=$2; tx+=$10} END {print rx, tx}'"],
+            capture_output=True, text=True, timeout=5
+        )
+        rx, tx = result.stdout.strip().split()
+        return {"rx_bytes": int(rx), "tx_bytes": int(tx)}
+    except Exception:
+        return {"rx_bytes": 0, "tx_bytes": 0}
+
+
+def get_processes(count=10):
+    """Get top processes by CPU."""
+    try:
+        result = subprocess.run(
+            ["bash", "-c", f"ps aux --sort=-%cpu | head -{count + 1} | tail -{count}"],
+            capture_output=True, text=True, timeout=5
+        )
+        procs = []
+        for line in result.stdout.strip().split("\n"):
+            if line.strip():
+                parts = line.split()
+                if len(parts) >= 11:
+                    procs.append({
+                        "user": parts[0],
+                        "pid": parts[1],
+                        "cpu": parts[2],
+                        "mem": parts[3],
+                        "command": " ".join(parts[10:])[:40],
+                    })
+        return procs
+    except Exception:
+        return []
+
+
+def get_services():
+    """Get status of key services."""
+    services = ["ollama", "docker", "ssh", "ufw", "cron"]
+    statuses = {}
+    for svc in services:
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", svc],
+                capture_output=True, text=True, timeout=3
+            )
+            statuses[svc] = result.stdout.strip()
+        except Exception:
+            statuses[svc] = "unknown"
+    return statuses
+
+
+def get_gpu():
+    """Get GPU info if available."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        parts = result.stdout.strip().split(", ")
+        if len(parts) >= 4:
+            return {
+                "utilization": float(parts[0]),
+                "mem_used": int(parts[1]),
+                "mem_total": int(parts[2]),
+                "temperature": int(parts[3]),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def get_temperature():
+    """Get CPU temperature."""
+    try:
+        # Try common paths
+        for path in [
+            "/sys/class/thermal/thermal_zone0/temp",
+            "/sys/class/hwmon/hwmon0/temp1_input",
+        ]:
+            if os.path.exists(path):
+                with open(path) as f:
+                    return int(f.read().strip()) / 1000.0
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(["sensors"], capture_output=True, text=True, timeout=3)
+        for line in result.stdout.splitlines():
+            if "Package id 0" in line or "CPU" in line or "Core 0" in line:
+                parts = line.split()
+                for p in parts:
+                    if p.startswith("+") and "°C" in p:
+                        return float(p.strip("+").strip("°C"))
+    except Exception:
+        pass
+    return None
+
+
+def get_uptime():
+    """Get system uptime."""
+    try:
+        with open("/proc/uptime") as f:
+            seconds = float(f.read().split()[0])
+        days = int(seconds // 86400)
+        hours = int((seconds % 86400) // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{days}d {hours}h {minutes}m"
+    except Exception:
+        return "?"
+
+
+def format_bytes(b):
+    """Format bytes to human readable."""
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if b < 1024:
+            return f"{b:.1f}{unit}"
+        b /= 1024
+    return f"{b:.1f}PB"
+
+
+def bar(value, width=20, danger=90, warn=70):
+    """Draw a colored progress bar (uses ANSI)."""
+    filled = int((value / 100) * width)
+    if value >= danger:
+        color = "\033[31m"  # Red
+    elif value >= warn:
+        color = "\033[33m"  # Yellow
+    else:
+        color = "\033[32m"  # Green
+    reset = "\033[0m"
+    return f"{color}{'█' * filled}{'░' * (width - filled)}{reset}"
+
+
+def snapshot():
+    """Take a full system snapshot."""
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "uptime": get_uptime(),
+        "cpu": get_cpu_usage(),
+        "load": get_load(),
+        "memory": get_memory(),
+        "disk": get_disk(),
+        "network": get_network(),
+        "temperature": get_temperature(),
+        "gpu": get_gpu(),
+        "services": get_services(),
+        "top_processes": get_processes(5),
+    }
+
+
+def render_dashboard(snap, prev_snap=None):
+    """Render the terminal dashboard."""
+    # Calculate network delta
+    rx_rate = tx_rate = 0
+    if prev_snap:
+        dt = max((datetime.fromisoformat(snap["timestamp"]) -
+                  datetime.fromisoformat(prev_snap["timestamp"])).total_seconds(), 0.1)
+        rx_rate = (snap["network"]["rx_bytes"] - prev_snap["network"]["rx_bytes"]) / dt
+        tx_rate = (snap["network"]["tx_bytes"] - prev_snap["network"]["tx_bytes"]) / dt
+
+    # Clear screen
+    sys.stdout.write("\033[2J\033[H")
+
+    # Header
+    cols = shutil.get_terminal_size().columns
+    print("╔" + "═" * (cols - 2) + "╗")
+    print(f"║  🧠 NeurOS Monitor{' ' * (cols - 20)}║")
+    print(f"║  {snap['timestamp'][:19]}  |  Uptime: {snap['uptime']}{' ' * (cols - 48)}║")
+    print("╠" + "═" * (cols - 2) + "╣")
+
+    # CPU
+    cpu = snap["cpu"]
+    temp = snap["temperature"]
+    temp_str = f" | Temp: {temp:.0f}°C" if temp else ""
+    print(f"║ CPU:  {cpu:5.1f}% {bar(cpu, 30)}{temp_str}{' ' * max(cols - 63 - len(temp_str), 0)}║")
+    load = snap["load"]
+    print(f"║ Load: {load['1min']:.2f} / {load['5min']:.2f} / {load['15min']:.2f}{' ' * (cols - 32)}║")
+    print("╟" + "─" * (cols - 2) + "╢")
+
+    # Memory
+    mem = snap["memory"]
+    mem_total = format_bytes(mem["total"])
+    mem_used = format_bytes(mem["used"])
+    print(f"║ RAM:    {mem_used:>8s} / {mem_total:>8s}  {bar(mem['percent'], 25)}{' ' * (cols - 55)}║")
+    if mem["swap_used"] > 0:
+        swap_info = f"Swap: {format_bytes(mem['swap_used'])} ({mem['swap_percent']:.0f}%)"
+        print(f"║ {swap_info}{' ' * (cols - len(swap_info) - 2)}║")
+    print("╟" + "─" * (cols - 2) + "╢")
+
+    # Disk
+    disk = snap["disk"]
+    print(f"║ Disk:   {disk['used']:>6s} / {disk['size']:>6s}  {bar(disk['percent'], 25)}{' ' * (cols - 51)}║")
+    print("╟" + "─" * (cols - 2) + "╢")
+
+    # Network
+    print(f"║ Net: ↓{format_bytes(rx_rate)}/s  ↑{format_bytes(tx_rate)}/s{' ' * (cols - 40)}║")
+    print("╟" + "─" * (cols - 2) + "╢")
+
+    # GPU
+    gpu = snap["gpu"]
+    if gpu:
+        print(f"║ GPU:  {gpu['utilization']:5.1f}% {bar(gpu['utilization'], 25)} | Temp: {gpu['temperature']}°C{' ' * (cols - 58)}║")
+        gpu_mem = f"{gpu['mem_used']}MB / {gpu['mem_total']}MB"
+        print(f"║ GPU Memory: {gpu_mem}{' ' * (cols - len(gpu_mem) - 15)}║")
+        print("╟" + "─" * (cols - 2) + "╢")
+
+    # Services
+    svc_line = "║ Services: "
+    for svc, status in snap["services"].items():
+        icon = "✅" if status == "active" else "❌" if status in ("inactive", "failed") else "❓"
+        svc_line += f"{icon}{svc}  "
+    print(f"{svc_line}{' ' * max(cols - len(svc_line) - 1, 0)}║")
+    print("╟" + "─" * (cols - 2) + "╢")
+
+    # Top Processes
+    print(f"║ Top Processes:{' ' * (cols - 16)}║")
+    for i, proc in enumerate(snap["top_processes"][:8]):
+        proc_line = f"║   {proc['cpu']:>5s}% {proc['mem']:>5s}%  {proc['command'][:cols-20]}"
+        print(f"{proc_line}{' ' * max(cols - len(proc_line) - 1, 0)}║")
+
+    print("╚" + "═" * (cols - 2) + "╝")
+    print(f"\nPress 'q' to quit | 's' for snapshot | Refresh: 1s")
+
+
+def interactive_mode(interval=1):
+    """Run interactive dashboard."""
+    prev_snap = None
+
+    # Try to set up non-blocking input
+    try:
+        import termios
+        import tty
+        import select
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        has_raw_input = True
+    except Exception:
+        has_raw_input = False
+
+    try:
+        while True:
+            snap = snapshot()
+            render_dashboard(snap, prev_snap)
+            prev_snap = snap
+
+            # Wait with non-blocking key check
+            if has_raw_input:
+                for _ in range(int(interval * 10)):
+                    time.sleep(0.1)
+                    r, _, _ = select.select([sys.stdin], [], [], 0)
+                    if r:
+                        ch = sys.stdin.read(1)
+                        if ch.lower() == 'q':
+                            return
+                        elif ch.lower() == 's':
+                            # Save snapshot
+                            os.makedirs(os.path.expanduser("~/.config/neuros"), exist_ok=True)
+                            fpath = os.path.expanduser(f"~/.config/neuros/monitor-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
+                            with open(fpath, "w") as f:
+                                json.dump(snap, f, indent=2)
+                            print(f"\nSnapshot saved: {fpath}")
+            else:
+                time.sleep(interval)
+    finally:
+        if has_raw_input:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-monitor — system monitoring dashboard")
+    parser.add_argument("--once", action="store_true", help="One-shot snapshot")
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--watch", help="Watch specific service")
+    parser.add_argument("--export", help="Export to CSV file")
+    parser.add_argument("--interval", type=float, default=1.0, help="Refresh interval (seconds)")
+    args = parser.parse_args()
+
+    if args.once:
+        snap = snapshot()
+        if args.json:
+            print(json.dumps(snap, indent=2))
+        else:
+            print(f"CPU: {snap['cpu']:.1f}%")
+            print(f"RAM: {snap['memory']['percent']:.1f}% ({format_bytes(snap['memory']['used'])}/{format_bytes(snap['memory']['total'])})")
+            print(f"Disk: {snap['disk']['percent']}%")
+            print(f"Load: {snap['load']['1min']:.2f} / {snap['load']['5min']:.2f} / {snap['load']['15min']:.2f}")
+            print(f"Uptime: {snap['uptime']}")
+            temp = snap["temperature"]
+            if temp:
+                print(f"Temp: {temp:.1f}°C")
+            print(f"Services: {', '.join(f'{k}={v}' for k, v in snap['services'].items())}")
+        return
+
+    if args.watch:
+        service = args.watch
+        print(f"Watching service: {service}")
+        print(f"{'Time':<22} {'Status':<10}")
+        try:
+            last = None
+            while True:
+                try:
+                    result = subprocess.run(
+                        ["systemctl", "is-active", service],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    status = result.stdout.strip()
+                    if status != last:
+                        print(f"{datetime.now().isoformat()[:19]:<22} {status}")
+                        last = status
+                except Exception:
+                    pass
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nDone.")
+        return
+
+    if args.export:
+        print(f"Exporting to {args.export}...")
+        with open(args.export, "w") as f:
+            f.write("timestamp,cpu,ram_percent,disk_percent,load_1min,load_5min,load_15min\n")
+            snap = snapshot()
+            f.write(f"{snap['timestamp']},{snap['cpu']},{snap['memory']['percent']},"
+                    f"{snap['disk']['percent']},{snap['load']['1min']},"
+                    f"{snap['load']['5min']},{snap['load']['15min']}\n")
+        print(f"Exported 1 snapshot to {args.export}")
+        return
+
+    if args.json:
+        print(json.dumps(snapshot(), indent=2))
+        return
+
+    # Interactive dashboard
+    try:
+        interactive_mode(args.interval)
+    except KeyboardInterrupt:
+        print("\nMonitor stopped.")
+
+
+if __name__ == "__main__":
+    main()

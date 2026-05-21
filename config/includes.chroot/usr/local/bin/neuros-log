@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""
+neuros-log — NeurOS AI Log Analyzer
+Analyzes system, application, and custom log files with AI pattern
+detection, anomaly spotting, and summarization.
+
+Usage:
+  neuros-log /var/log/syslog                      Analyze a log file
+  neuros-log --tail /var/log/syslog                Tail and analyze in real-time
+  neuros-log --errors /var/log/nginx/error.log     Focus on errors
+  neuros-log --patterns /var/log/auth.log          Find unusual patterns
+  neuros-log --journal nginx                       Analyze systemd journal
+"""
+
+import sys
+import os
+import json
+import time
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=1500):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.2}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def read_log(filepath, tail=500):
+    if not os.path.exists(filepath):
+        return None
+    with open(filepath, errors="replace") as f:
+        lines = f.readlines()
+    return "".join(lines[-tail:])
+
+
+def read_journal(unit, tail=500):
+    try:
+        return subprocess.check_output(
+            ["journalctl", "-u", unit, "--no-pager", "-n", str(tail)],
+            text=True, timeout=15
+        )
+    except Exception:
+        return None
+
+
+def extract_errors(content):
+    lines = []
+    for line in content.splitlines():
+        lower = line.lower()
+        if any(kw in lower for kw in ["error", "fail", "fatal", "critical",
+                                        "panic", "segfault", "oops", "traceback"]):
+            lines.append(line)
+    return "\n".join(lines[-100:])
+
+
+def ai_analyze(content, focus="general"):
+    if not content or len(content) < 10:
+        return "No log content to analyze."
+
+    prompt = (
+        f"Analyze this log output{f' focusing on {focus}' if focus != 'general' else ''}. "
+        f"Provide:\n"
+        f"1. SUMMARY: 2-3 sentence overview\n"
+        f"2. KEY FINDINGS: bullet points of notable events\n"
+        f"3. ANOMALIES: any unusual patterns or spikes\n"
+        f"4. RECOMMENDATIONS: if issues found, suggest fixes\n\n"
+        f"LOG:\n{content[:4000]}"
+    )
+    return ollama_generate(prompt, max_tokens=1500)
+
+
+def ai_patterns(content):
+    if not content or len(content) < 10:
+        return None
+    prompt = (
+        f"Analyze these log entries for unusual patterns, anomalies, "
+        f"or suspicious activity. Flag anything that looks like a security "
+        f"concern, performance issue, or misconfiguration.\n\n{content[:3000]}"
+    )
+    return ollama_generate(prompt, 1000)
+
+
+def tail_analyze(filepath, interval=5):
+    print(f"📡 Tailing: {filepath}\n")
+    try:
+        proc = subprocess.Popen(
+            ["tail", "-f", "-n", "50", filepath],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        buffer = []
+        last_check = time.time()
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                time.sleep(1)
+                continue
+            buffer.append(line)
+            print(f"  {line.rstrip()}")
+            if len(buffer) > 50 and time.time() - last_check > interval:
+                analysis = ai_analyze("".join(buffer[-50:]))
+                if analysis:
+                    print(f"\n🤖 AI Analysis:\n{analysis}\n")
+                buffer = buffer[-20:]
+                last_check = time.time()
+    except KeyboardInterrupt:
+        proc.terminate()
+        print("\nStopped.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS AI Log Analyzer")
+    parser.add_argument("source", nargs="?", help="Log file path")
+    parser.add_argument("--tail", "-t", action="store_true", help="Tail and analyze")
+    parser.add_argument("--errors", "-e", action="store_true", help="Focus on errors")
+    parser.add_argument("--patterns", "-p", action="store_true", help="Find patterns")
+    parser.add_argument("--journal", "-j", help="Analyze systemd journal unit")
+    parser.add_argument("--lines", "-n", type=int, default=500, help="Lines to read")
+    parser.add_argument("--interval", "-i", type=int, default=10,
+                        help="Tail analysis interval")
+
+    args = parser.parse_args()
+
+    if args.journal:
+        content = read_journal(args.journal, args.lines)
+        if not content:
+            print(f"No journal entries for: {args.journal}")
+            return
+        print(f"📋 Journal: {args.journal} ({len(content.splitlines())} lines)\n")
+
+        if args.tail:
+            print("Analyzing...")
+            analysis = ai_analyze(content)
+            if analysis:
+                print(analysis)
+        elif args.errors:
+            errors = extract_errors(content)
+            if errors:
+                print(f"🔴 Errors ({len(errors.splitlines())}):\n")
+                print(errors[:3000])
+            else:
+                print("No errors found.")
+        elif args.patterns:
+            patterns = ai_patterns(content)
+            print(patterns or "No unusual patterns detected.")
+        else:
+            print(ai_analyze(content) or content[:2000])
+        return
+
+    if not args.source:
+        parser.print_help()
+        return
+
+    if args.tail and os.path.exists(args.source):
+        tail_analyze(args.source, args.interval)
+        return
+
+    content = read_log(args.source, args.lines)
+    if content is None:
+        print(f"Log not found: {args.source}")
+        return
+
+    print(f"📋 {args.source} ({len(content.splitlines())} lines)\n")
+
+    if args.errors:
+        errors = extract_errors(content)
+        if errors:
+            print(f"🔴 Errors ({len(errors.splitlines())}):\n{errors[:3000]}")
+            analysis = ai_analyze(errors, "errors")
+            if analysis:
+                print(f"\n🤖 Analysis:\n{analysis}")
+        else:
+            print("No errors found.")
+    elif args.patterns:
+        patterns = ai_patterns(content)
+        print(patterns or "No unusual patterns detected.")
+    else:
+        analysis = ai_analyze(content)
+        if analysis:
+            print(analysis)
+        else:
+            print(content[:3000])
+
+
+if __name__ == "__main__":
+    main()

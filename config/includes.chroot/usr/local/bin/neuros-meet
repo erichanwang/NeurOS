@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""
+neuros-meet — NeurOS Meeting Assistant
+AI-powered meeting scheduling, notes, transcription, and action items.
+
+Usage:
+  neuros-meet schedule "team sync" --attendees alice,bob
+  neuros-meet notes                           Start taking meeting notes
+  neuros-meet summarize notes.md              Summarize meeting notes
+  neuros-meet action-items notes.md           Extract action items
+  neuros-meet transcribe audio.mp3            Transcribe meeting recording
+  neuros-meet schedule-find "next week"       Find available time slots
+  neuros-meet agenda "project review"          AI-generate meeting agenda
+  neuros-meet followup notes.md               Generate follow-up email
+"""
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+MEET_DIR = os.path.join(CONFIG_DIR, "meetings")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+
+def load_config():
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def query_llm(prompt, system="You are a helpful meeting assistant."):
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        data = json.dumps({
+            "model": config["model"], "prompt": prompt,
+            "system": system, "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def cmd_schedule(args):
+    """Schedule a meeting and generate calendar invite."""
+    title = args.title
+    attendees = args.attendees.split(",") if args.attendees else []
+    duration = args.duration or 60
+    when = args.when or ""
+
+    os.makedirs(MEET_DIR, exist_ok=True)
+
+    # AI-enhanced meeting description
+    if args.agenda:
+        agenda = args.agenda
+    else:
+        agenda_prompt = f"Create a brief agenda for a meeting titled '{title}' with attendees: {', '.join(attendees)}"
+        agenda = query_llm(agenda_prompt) or "No agenda specified."
+
+    # Generate ICS calendar invite
+    ics = f"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//NeurOS//Meeting Scheduler//EN
+BEGIN:VEVENT
+DTSTART:{datetime.now().strftime('%Y%m%dT%H%M%S')}
+DTEND:{(datetime.now() + timedelta(minutes=duration)).strftime('%Y%m%dT%H%M%S')}
+SUMMARY:{title}
+DESCRIPTION:{agenda[:500]}
+ATTENDEE:{','.join(f'MAILTO:{a}' for a in attendees)}
+END:VEVENT
+END:VCALENDAR"""
+
+    fname = title.replace(" ", "_")[:40]
+    ics_path = os.path.join(MEET_DIR, f"{fname}_{datetime.now().strftime('%Y%m%d-%H%M%S')}.ics")
+    with open(ics_path, "w") as f:
+        f.write(ics)
+
+    print(f"📅 Meeting Scheduled: {title}")
+    print(f"   Duration: {duration} min")
+    print(f"   Attendees: {', '.join(attendees) if attendees else 'None specified'}")
+    print(f"   Calendar: {ics_path}")
+    print()
+    if agenda:
+        print(f"   Agenda:")
+        for line in agenda.strip().split("\n"):
+            print(f"     {line}")
+    print()
+
+    # Also save as markdown notes template
+    md_path = ics_path.replace(".ics", ".md")
+    md = f"""# {title}
+
+**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
+**Duration:** {duration} min
+**Attendees:** {', '.join(attendees) if attendees else 'TBD'}
+
+## Agenda
+{agenda}
+
+## Notes
+
+## Action Items
+- [ ] 
+"""
+    with open(md_path, "w") as f:
+        f.write(md)
+    print(f"   Notes template: {md_path}")
+
+
+def cmd_notes(args):
+    """Start taking meeting notes interactively."""
+    title = args.title or f"Meeting_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    os.makedirs(MEET_DIR, exist_ok=True)
+
+    fname = title.replace(" ", "_")[:40]
+    fpath = os.path.join(MEET_DIR, f"{fname}{'_resume' if args.resume else ''}.md")
+
+    if args.resume and os.path.exists(fpath + ".md"):
+        fpath = fpath + ".md"
+    elif args.resume:
+        # Find latest notes
+        files = sorted(
+            [f for f in os.listdir(MEET_DIR) if f.endswith(".md")],
+            key=lambda f: os.path.getmtime(os.path.join(MEET_DIR, f)),
+            reverse=True
+        )
+        if files:
+            fpath = os.path.join(MEET_DIR, files[0])
+            print(f"Resuming: {fpath}")
+        else:
+            print("No existing notes to resume.")
+            return
+
+    print(f"📝 Meeting Notes: {title}")
+    print(f"   Saving to: {fpath}")
+    print("   Type your notes. Press Ctrl+D on a new line to finish.")
+    print("   Commands: /ai <question>  /action <item>  /decision <text>")
+    print("-" * 60)
+
+    notes = []
+    if os.path.exists(fpath) and args.resume:
+        with open(fpath) as f:
+            existing = f.read()
+        notes = existing.split("\n")
+
+    print(f"\n# {title} — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+
+    try:
+        while True:
+            line = input()
+            if line.startswith("/ai "):
+                question = line[4:]
+                answer = query_llm(question, "You are a helpful meeting assistant. Be concise.")
+                if answer:
+                    print(f"🤖 {answer}")
+                    notes.append(f"> **AI:** {answer}")
+            elif line.startswith("/action "):
+                item = line[8:]
+                notes.append(f"- [ ] **ACTION:** {item}")
+                print(f"✅ Action added: {item}")
+            elif line.startswith("/decision "):
+                d = line[10:]
+                notes.append(f"**Decision:** {d}")
+                print(f"🔨 Decision recorded: {d}")
+            else:
+                notes.append(line)
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    print("\nSaving...")
+    content = "\n".join(notes)
+    with open(fpath, "w") as f:
+        f.write(content)
+
+    print(f"✅ Notes saved: {fpath}")
+
+    # Offer to summarize
+    print("\nRun 'neuros-meet summarize' to generate meeting summary.")
+
+
+def cmd_summarize(args):
+    """Summarize meeting notes."""
+    if not os.path.exists(args.notes):
+        print(f"❌ Notes file not found: {args.notes}")
+        return
+
+    with open(args.notes, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    prompt = (
+        f"Summarize these meeting notes in a structured format:\n"
+        f"1. Key discussion points (3-5 bullets)\n"
+        f"2. Decisions made\n"
+        f"3. Next steps\n"
+        f"\n---\n{content[:4000]}"
+    )
+
+    summary = query_llm(prompt, "You create structured meeting summaries.")
+    if summary:
+        print(f"📋 Meeting Summary")
+        print("═" * 40)
+        print(summary)
+
+        # Save summary
+        summary_path = args.notes.replace(".md", "_summary.md")
+        with open(summary_path, "w") as f:
+            f.write(f"# Meeting Summary\n\n")
+            f.write(f"**Original notes:** {args.notes}\n")
+            f.write(f"**Generated:** {datetime.now().isoformat()}\n\n")
+            f.write(summary)
+        print(f"\n✅ Summary saved: {summary_path}")
+    else:
+        print("❌ Summarization failed.")
+
+
+def cmd_action_items(args):
+    """Extract action items from meeting notes."""
+    if not os.path.exists(args.notes):
+        print(f"❌ Notes file not found: {args.notes}")
+        return
+
+    with open(args.notes, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    # First, try regex
+    actions = re.findall(r'\[ \] \*\*ACTION:\*\* (.+)', content)
+    if actions:
+        print("Action Items (from notes):")
+        for i, action in enumerate(actions, 1):
+            print(f"  {i}. {action}")
+        return
+
+    # AI extraction fallback
+    prompt = f"Extract all action items and tasks from these meeting notes. Return one per line.\n\n{content[:3000]}"
+    extracted = query_llm(prompt)
+
+    if extracted:
+        print("Action Items:")
+        for line in extracted.strip().split("\n"):
+            if line.strip():
+                print(f"  • {line.strip()}")
+    else:
+        print("No action items found.")
+
+
+def cmd_agenda(args):
+    """AI-generate a meeting agenda."""
+    title = args.title
+
+    prompt = f"Create a detailed meeting agenda for: '{title}'. Include: Objective, Discussion Points (5-7 items), Time allocations, Expected outcomes."
+
+    agenda = query_llm(prompt, "You create professional meeting agendas.")
+    if agenda:
+        print(f"📋 Agenda: {title}")
+        print("═" * 40)
+        print(agenda)
+
+        # Save
+        os.makedirs(MEET_DIR, exist_ok=True)
+        fname = title.replace(" ", "_")[:40]
+        fpath = os.path.join(MEET_DIR, f"agenda_{fname}_{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
+        with open(fpath, "w") as f:
+            f.write(f"# Agenda: {title}\n\n")
+            f.write(f"Generated: {datetime.now().isoformat()}\n\n")
+            f.write(agenda)
+        print(f"\n✅ Saved: {fpath}")
+    else:
+        print("❌ Agenda generation failed.")
+
+
+def cmd_followup(args):
+    """Generate follow-up email from meeting notes."""
+    if not os.path.exists(args.notes):
+        print(f"❌ Notes file not found: {args.notes}")
+        return
+
+    with open(args.notes, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    prompt = f"Draft a professional follow-up email based on these meeting notes. Include a summary of key points and action items.\n\n{content[:3000]}"
+
+    followup = query_llm(prompt, "You write professional follow-up emails.")
+    if followup:
+        print("📧 Follow-up Email Draft")
+        print("─" * 40)
+        print(followup)
+
+        fpath = args.notes.replace(".md", "_followup.txt")
+        with open(fpath, "w") as f:
+            f.write(followup)
+        print(f"\n✅ Saved: {fpath}")
+    else:
+        print("❌ Follow-up generation failed.")
+
+
+def cmd_schedule_find(args):
+    """Find available time slots using AI reasoning."""
+    when = args.when
+
+    prompt = (
+        f"I need to find available meeting times for: '{when}'. "
+        f"Suggest 3 good time slots during a typical business week. "
+        f"Consider avoiding common conflicts like Monday mornings and Friday afternoons."
+    )
+
+    slots = query_llm(prompt, "You help with scheduling. Be specific about times.")
+    if slots:
+        print(f"🕐 Available slots for: {when}")
+        print("─" * 40)
+        print(slots)
+    else:
+        print("❌ Scheduling failed.")
+
+
+def cmd_transcribe(args):
+    """Transcribe meeting audio recording."""
+    if not args.audio or not os.path.exists(args.audio):
+        print(f"❌ Audio file not found: {args.audio}")
+        print("Usage: neuros-meet transcribe <audio.mp3>")
+        return
+
+    print(f"🎙️ Transcribing: {args.audio}")
+
+    # Try whisper first
+    try:
+        subprocess.run(["which", "whisper"], capture_output=True, check=True)
+        output_dir = os.path.join(MEET_DIR, "transcripts")
+        os.makedirs(output_dir, exist_ok=True)
+        subprocess.run(["whisper", args.audio, "--model", "small", "--output_dir", output_dir])
+        print(f"✅ Transcript saved to {output_dir}")
+        return
+    except Exception:
+        pass
+
+    # Fallback: use AI for text-based summary
+    config = load_config()
+    print("   Whisper not installed. Install: pip install openai-whisper")
+    print("   Using AI fallback: please paste transcript text below")
+    print("   (Press Enter on empty line to finish)")
+    lines = []
+    while True:
+        line = input()
+        if not line:
+            break
+        lines.append(line)
+
+    if lines:
+        transcript = "\n".join(lines)
+        summary = query_llm(
+            f"Summarize this meeting transcript and extract action items:\n\n{transcript[:3000]}"
+        )
+        if summary:
+            print()
+            print(summary)
+
+
+def cmd_list(args):
+    """List saved meetings and notes."""
+    if not os.path.exists(MEET_DIR):
+        print("No meetings recorded yet.")
+        return
+
+    files = sorted(os.listdir(MEET_DIR), reverse=True)
+    if not files:
+        print("No meeting files found.")
+        return
+
+    print(f"{'File':<50} {'Type':<12} {'Size'}")
+    print("-" * 80)
+    for f in files[:30]:
+        fpath = os.path.join(MEET_DIR, f)
+        size = os.path.getsize(fpath)
+        for unit in ["B", "KB", "MB"]:
+            if size < 1024:
+                break
+            size /= 1024
+        ftype = "Notes" if f.endswith(".md") else "Calendar" if f.endswith(".ics") else "Other"
+        print(f"{f:<50} {ftype:<12} {size:.0f}{unit}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-meet — AI meeting assistant")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    p_sched = sub.add_parser("schedule", help="Schedule a meeting")
+    p_sched.add_argument("title", help="Meeting title")
+    p_sched.add_argument("--attendees", "-a", help="Comma-separated attendee list")
+    p_sched.add_argument("--duration", "-d", type=int, default=60, help="Duration in minutes")
+    p_sched.add_argument("--when", "-w", help="When (e.g., 'next Monday 2pm')")
+    p_sched.add_argument("--agenda", help="Meeting agenda or description")
+
+    p_notes = sub.add_parser("notes", help="Start taking meeting notes")
+    p_notes.add_argument("--title", "-t", help="Meeting title")
+    p_notes.add_argument("--resume", "-r", action="store_true", help="Resume last notes")
+
+    p_summarize = sub.add_parser("summarize", help="Summarize meeting notes")
+    p_summarize.add_argument("notes", help="Path to meeting notes (.md)")
+
+    p_actions = sub.add_parser("action-items", aliases=["actions"], help="Extract action items")
+    p_actions.add_argument("notes", help="Path to meeting notes")
+
+    p_agenda = sub.add_parser("agenda", help="AI-generate meeting agenda")
+    p_agenda.add_argument("title", help="Meeting title")
+
+    p_followup = sub.add_parser("followup", help="Generate follow-up email")
+    p_followup.add_argument("notes", help="Path to meeting notes")
+
+    p_find = sub.add_parser("schedule-find", aliases=["find"], help="Find available time slots")
+    p_find.add_argument("when", help="Time description")
+
+    p_transcribe = sub.add_parser("transcribe", help="Transcribe meeting audio")
+    p_transcribe.add_argument("audio", help="Audio file path")
+
+    sub.add_parser("list", aliases=["ls"], help="List saved meetings")
+
+    args = parser.parse_args()
+
+    if args.command == "schedule":
+        cmd_schedule(args)
+    elif args.command == "notes":
+        cmd_notes(args)
+    elif args.command == "summarize":
+        cmd_summarize(args)
+    elif args.command in ("action-items", "actions"):
+        cmd_action_items(args)
+    elif args.command == "agenda":
+        cmd_agenda(args)
+    elif args.command == "followup":
+        cmd_followup(args)
+    elif args.command in ("schedule-find", "find"):
+        cmd_schedule_find(args)
+    elif args.command == "transcribe":
+        cmd_transcribe(args)
+    elif args.command in ("list", "ls"):
+        cmd_list(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
