@@ -151,17 +151,25 @@ def cmd_create(args):
     """Create a new tunnel."""
     db = load_db()
 
-    if check_port(args.local_port if hasattr(args, 'local_port') else args.port):
-        print(f"⚠️  Port {args.local_port if hasattr(args, 'local_port') else args.port} is already in use")
+    port_to_check = None
+    if args.type == "local":
+        port_to_check = getattr(args, 'local_port', None)
+    elif args.type == "remote":
+        port_to_check = getattr(args, 'remote_port', None)
+    elif args.type == "socks":
+        port_to_check = getattr(args, 'port', None)
+
+    if port_to_check and check_port(port_to_check):
+        print(f"⚠️  Port {port_to_check} is already in use")
         if not args.force:
             sys.exit(1)
 
     if args.type == "local":
-        tid, cmd = create_local_tunnel(args.local_port, args.remote)
+        tid, cmd = create_local_tunnel(str(args.local_port), str(args.remote))
     elif args.type == "remote":
-        tid, cmd = create_remote_tunnel(args.remote_port, args.local)
+        tid, cmd = create_remote_tunnel(str(args.remote_port), str(args.local))
     elif args.type == "socks":
-        tid, cmd = create_socks_tunnel(args.port, args.host)
+        tid, cmd = create_socks_tunnel(str(args.port), str(args.host))
     else:
         print(f"Unknown tunnel type: {args.type}")
         sys.exit(1)

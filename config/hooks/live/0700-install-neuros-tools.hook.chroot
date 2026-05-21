@@ -10,6 +10,7 @@ echo "[NeurOS] Installing NeurOS tools..."
 # Make all neuros tools executable
 NEUROS_TOOLS=(
     "/usr/local/bin/nn"
+    "/usr/local/bin/neuroslib.py"
     "/usr/local/bin/neuros-chat"
     "/usr/local/bin/neuros-model"
     "/usr/local/bin/neuros-snippets"

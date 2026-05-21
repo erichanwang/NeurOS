@@ -234,7 +234,7 @@ def snapshot():
         "temperature": get_temperature(),
         "gpu": get_gpu(),
         "services": get_services(),
-        "top_processes": get_processes(5),
+        "top_processes": get_processes(8),
     }
 
 
