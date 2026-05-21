@@ -29,4 +29,8 @@ chmod +x /usr/local/bin/neuros-tray 2>/dev/null || true
 echo "neuros" > /etc/hostname
 sed -i 's/127.0.1.1.*/127.0.1.1    neuros/' /etc/hosts 2>/dev/null || true
 
+# Enable user services for first boot
+mkdir -p /etc/systemd/user/default.target.wants
+ln -sf /etc/systemd/user/neuros-firstboot.service /etc/systemd/user/default.target.wants/ 2>/dev/null || true
+
 echo "[NeurOS] System configuration complete."

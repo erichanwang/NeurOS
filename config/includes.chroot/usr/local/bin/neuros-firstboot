@@ -1,0 +1,113 @@
+#!/bin/bash
+# first-boot.sh — NeurOS first-boot setup
+# Runs on first login to configure user environment and apply settings.
+# Installed at /usr/local/bin/neuros-firstboot and triggered by systemd user service.
+
+set -e
+
+MARKER="$HOME/.config/neuros/.firstboot-done"
+CONFIG_DIR="$HOME/.config/neuros"
+SKEL_CONTINUE="/etc/skel/.continue/config.json"
+SKEL_LLM="/etc/skel/.config/neuros/llm.conf"
+SKEL_CODE="/etc/skel/.config/Code/User/settings.json"
+SKEL_NVIM="/etc/skel/.config/nvim/init.vim"
+SKEL_ZSHRC="/etc/skel/.zshrc"
+
+# Skip if already run
+if [ -f "$MARKER" ]; then
+    exit 0
+fi
+
+echo "=============================================="
+echo "  🧠 NeurOS — First Boot Setup"
+echo "=============================================="
+echo ""
+
+# 1. Copy configs from skel
+setup_configs() {
+    echo "[1/5] Setting up configs..."
+
+    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$HOME/.continue"
+    mkdir -p "$HOME/.config/Code/User"
+    mkdir -p "$HOME/.config/nvim"
+
+    # Copy defaults if user doesn't have them yet
+    [ ! -f "$HOME/.config/neuros/llm.conf" ] && [ -f "$SKEL_LLM" ] && cp "$SKEL_LLM" "$HOME/.config/neuros/llm.conf"
+    [ ! -f "$HOME/.continue/config.json" ] && [ -f "$SKEL_CONTINUE" ] && cp "$SKEL_CONTINUE" "$HOME/.continue/config.json"
+    [ ! -f "$HOME/.config/Code/User/settings.json" ] && [ -f "$SKEL_CODE" ] && cp "$SKEL_CODE" "$HOME/.config/Code/User/settings.json"
+    [ ! -f "$HOME/.config/nvim/init.vim" ] && [ -f "$SKEL_NVIM" ] && cp "$SKEL_NVIM" "$HOME/.config/nvim/init.vim"
+    [ ! -f "$HOME/.zshrc" ] && [ -f "$SKEL_ZSHRC" ] && cp "$SKEL_ZSHRC" "$HOME/.zshrc"
+}
+
+# 2. Check Ollama status
+check_ollama() {
+    echo "[2/5] Checking Ollama daemon..."
+
+    if systemctl is-active neuros-llm.service &>/dev/null; then
+        echo "  ✅ Ollama daemon is running."
+    else
+        echo "  ⚠️  Ollama daemon not running yet. Starting..."
+        sudo systemctl start neuros-llm.service 2>/dev/null || true
+        echo "  It may take a moment for the model to load."
+    fi
+}
+
+# 3. Verify Mistral model
+check_model() {
+    echo "[3/5] Verifying Mistral model..."
+
+    # Wait a bit for ollama to start
+    for i in {1..10}; do
+        if curl -s http://localhost:11434/api/tags 2>/dev/null | grep -q "mistral"; then
+            echo "  ✅ Mistral model is available."
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo "  ⚠️  Mistral model not found. It will be pulled on first use."
+    echo "  Run: ollama pull mistral"
+}
+
+# 4. Configure shell
+setup_shell() {
+    echo "[4/5] Configuring shell..."
+
+    if command -v zsh &>/dev/null; then
+        # Don't change shell automatically, but remind
+        echo "  ℹ️  zsh is available. Switch with: chsh -s /usr/bin/zsh"
+    fi
+}
+
+# 5. Display welcome info
+show_welcome() {
+    echo "[5/5] Welcome to NeurOS!"
+    echo ""
+    echo "  Quick Start:"
+    echo "  ───────────"
+    echo "  nn \"your question\"       Ask the local AI"
+    echo "  nn -i                     Interactive mode"
+    echo "  nn explain ./file.txt     Analyze a file"
+    echo ""
+    echo "  Keyboard Shortcuts:"
+    echo "  Ctrl+Space (terminal)     Open nn"
+    echo "  Super+A                    Quick Ask tray"
+    echo "  Super+Shift+A              Pause/Resume LLM"
+    echo ""
+    echo "  More info: cat /usr/share/doc/neuros/README.md"
+    echo ""
+}
+
+# Run setup
+setup_configs
+check_ollama
+check_model
+setup_shell
+show_welcome
+
+# Mark as done
+mkdir -p "$(dirname "$MARKER")"
+echo "$(date -Iseconds)" > "$MARKER"
+
+echo "Setup complete! 🎉"
