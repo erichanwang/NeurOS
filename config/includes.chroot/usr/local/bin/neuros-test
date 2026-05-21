@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""
+neuros-test — NeurOS Test Generator
+AI-powered test generation with coverage analysis.
+
+Usage:
+  neuros-test generate ./src/module.py        Generate tests
+  neuros-test coverage ./src/                 Analyze test coverage gaps
+  neuros-test fix ./tests/test_foo.py         Fix failing tests
+  neuros-test describe ./tests/               Describe what tests cover
+"""
+
+import sys, os, json, subprocess, argparse
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=180) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        return f"Error: {e}"
+
+def generate_tests(filepath):
+    try:
+        with open(filepath, 'r') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error: {e}"); return
+
+    ext = os.path.splitext(filepath)[1].lower()
+    lang_map = {'.py': 'pytest', '.js': 'jest', '.ts': 'jest',
+                '.rs': 'cargo test', '.go': 'go test', '.java': 'JUnit'}
+    framework = lang_map.get(ext, 'standard testing framework')
+
+    prompt = f"""Generate comprehensive unit tests for this code using {framework}.
+
+Source:
+{content[:6000]}
+
+Requirements:
+- Cover every function/method
+- Include happy path, edge cases, error cases
+- Use mocks where appropriate
+- Parameterized tests for multiple inputs
+- Clear test descriptions
+- Setup/teardown as needed
+
+Return ONLY the test code."""
+
+    print(f"🤖 Generating tests ({framework})...\n")
+    result = query_ollama(prompt)
+    print(result)
+
+    # Suggest filename
+    base = os.path.splitext(os.path.basename(filepath))[0]
+    test_names = {'.py': f'test_{base}.py', '.js': f'{base}.test.js',
+                  '.rs': f'test_{base}.rs', '.go': f'{base}_test.go'}
+    suggest = test_names.get(ext, f'test_{base}.py')
+    save = input(f"\nSave as {suggest}? [y/N]: ")
+    if save.lower() == 'y':
+        with open(suggest, 'w') as f:
+            clean = result
+            if clean.startswith("```"): clean = '\n'.join(l for l in clean.split('\n') if not l.startswith("```"))
+            f.write(clean)
+        print(f"✅ Saved: {suggest}")
+
+def analyze_coverage(directory):
+    # Try to run pytest coverage
+    try:
+        result = subprocess.run(
+            ["python3", "-m", "pytest", "--cov=" + directory, "--cov-report=term-missing", "-q"],
+            capture_output=True, text=True, timeout=120, cwd=os.path.dirname(directory) or "."
+        )
+        coverage_output = result.stdout + result.stderr
+    except:
+        coverage_output = "(pytest coverage not available)"
+
+    # Collect source files
+    source_files = []
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('__pycache__','.git')]
+        for f in files:
+            if f.endswith('.py'):
+                fpath = os.path.join(root, f)
+                with open(fpath, 'r') as fh:
+                    source_files.append(f"### {fpath}\n```\n{fh.read()[:2000]}\n```")
+
+    source_text = '\n\n'.join(source_files[:5])
+
+    prompt = f"""Analyze test coverage for this codebase.
+
+Coverage report:
+{coverage_output[:2000]}
+
+Source files:
+{source_text[:4000]}
+
+Provide:
+1. Files/functions with NO coverage (critical to test)
+2. Edge cases not covered
+3. Three most important tests to add
+4. Overall coverage quality assessment"""
+
+    print(f"🤖 Analyzing coverage...\n")
+    print(query_ollama(prompt))
+
+def fix_tests(test_file):
+    try:
+        with open(test_file, 'r') as f:
+            test_content = f.read()
+    except Exception as e:
+        print(f"Error: {e}"); return
+
+    # Try running the tests
+    result = subprocess.run(
+        ["python3", "-m", "pytest", test_file, "-v"],
+        capture_output=True, text=True, timeout=60
+    )
+    test_output = result.stdout + "\n" + result.stderr
+
+    prompt = f"""These tests are failing. Analyze and provide fixes.
+
+Test file:
+{test_content[:3000]}
+
+Test output:
+{test_output[:3000]}
+
+For each failure:
+1. Why it fails
+2. How to fix (specific code)
+3. The corrected test code"""
+
+    print(f"🤖 Analyzing test failures...\n")
+    print(query_ollama(prompt))
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Test Generator")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    gen = subparsers.add_parser("generate", help="Generate tests for a source file")
+    gen.add_argument("file", help="Source file path")
+
+    cov = subparsers.add_parser("coverage", help="Analyze coverage gaps")
+    cov.add_argument("directory", help="Source directory")
+
+    fix = subparsers.add_parser("fix", help="Fix failing tests")
+    fix.add_argument("file", help="Test file path")
+
+    subparsers.add_parser("describe", help="Describe what tests cover")
+
+    args = parser.parse_args()
+
+    if args.command == "generate":
+        generate_tests(args.file)
+    elif args.command == "coverage":
+        analyze_coverage(args.directory)
+    elif args.command == "fix":
+        fix_tests(args.file)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

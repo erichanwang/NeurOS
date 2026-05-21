@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""
+neuros-scan — NeurOS Security Scanner
+AI-powered security vulnerability scanner for code and system.
+
+Usage:
+  neuros-scan .                           Scan current directory
+  neuros-scan --system                     Scan system configuration
+  neuros-scan --network                    Network vulnerability scan
+  neuros-scan --deps                       Scan dependencies
+"""
+
+import sys
+import os
+import json
+import re
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
+
+SCAN_DIR = os.path.expanduser("~/.local/share/neuros/scans")
+PATTERNS = {
+    "hardcoded_secret": [
+        (r'(?:password|passwd|pwd|secret|api[_-]?key|token|auth)\s*[=:]\s*["\'][^"\']+["\']', "Hardcoded secret/credential"),
+        (r'-----BEGIN\s+(?:RSA|DSA|EC|OPENSSH)\s+PRIVATE\s+KEY', "Private key in source"),
+        (r'(?:sk-[a-zA-Z0-9]{20,})', "Stripe/OpenAI-style API key"),
+    ],
+    "insecure_config": [
+        (r'DEBUG\s*=\s*True', "Debug mode enabled in production"),
+        (r'ALLOWED_HOSTS\s*=\s*\[\s*[\'"]?\*[\'"]?\s*\]', "Wildcard ALLOWED_HOSTS"),
+        (r'CORS_ORIGIN_ALLOW_ALL\s*=\s*True', "CORS allows all origins"),
+        (r'verify\s*=\s*False', "SSL verification disabled"),
+    ],
+    "dangerous_function": [
+        (r'\beval\s*\(', "eval() usage"),
+        (r'\bexec\s*\(', "exec() usage"),
+        (r'\bos\.system\s*\(', "os.system() usage"),
+        (r'\bsubprocess\.(?:call|Popen)\s*\(\s*["\'].*shell\s*=\s*True', "Shell=True in subprocess"),
+        (r'\bpickle\.(?:loads|load)\s*\(', "Pickle deserialization"),
+    ],
+    "dependency_risk": [
+        (r'requests\s*==\s*2\.(?:[0-9]|1[0-9]|2[0-6])', "Outdated requests library (CVE risk)"),
+        (r'django\s*[<>=]+\s*[12]\.', "Old Django version"),
+    ]
+}
+
+
+def ensure_dirs():
+    os.makedirs(SCAN_DIR, exist_ok=True)
+
+
+def scan_file(filepath):
+    findings = []
+    try:
+        with open(filepath, errors="ignore") as f:
+            content = f.read()
+        for category, patterns in PATTERNS.items():
+            for pattern, description in patterns:
+                matches = re.finditer(pattern, content, re.IGNORECASE)
+                for match in matches:
+                    line_no = content[:match.start()].count("\n") + 1
+                    findings.append({
+                        "file": filepath,
+                        "line": line_no,
+                        "category": category,
+                        "issue": description,
+                        "match": match.group()[:60]
+                    })
+    except Exception:
+        pass
+    return findings
+
+
+def scan_directory(directory):
+    findings = []
+    skipped = ["node_modules", ".git", "__pycache__", "venv", ".venv",
+               "dist", "build", "target", ".next", ".nuxt", "*.pyc",
+               "*.min.js", "*.bundle.js"]
+    files_scanned = 0
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in skipped
+                   and not d.startswith(".")]
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in (".py", ".js", ".ts", ".sh", ".yaml", ".yml",
+                       ".toml", ".json", ".env", ".conf", ".cfg",
+                       ".ini", ".rb", ".php", ".java", ".go", ".rs"):
+                try:
+                    path = os.path.join(root, f)
+                    findings.extend(scan_file(path))
+                    files_scanned += 1
+                except Exception:
+                    pass
+    return findings, files_scanned
+
+
+def scan_system():
+    findings = []
+    checks = [
+        ("UFW enabled", "sudo ufw status | grep -q active",
+         "Firewall is not active"),
+        ("SSH password auth disabled",
+         "grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config 2>/dev/null",
+         "SSH allows password authentication"),
+        ("Auto-updates enabled",
+         "systemctl is-enabled unattended-upgrades 2>/dev/null | grep -q enabled",
+         "Automatic security updates not enabled"),
+    ]
+    for name, cmd, issue in checks:
+        try:
+            subprocess.check_call(cmd, shell=True,
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            findings.append({
+                "category": "system_config",
+                "issue": issue,
+                "check": name
+            })
+    return findings
+
+
+def scan_dependencies(directory):
+    findings = []
+    dep_files = {
+        "requirements.txt": directory,
+        "package.json": directory,
+        "Cargo.toml": directory,
+        "go.mod": directory,
+    }
+    for depfile, search_dir in dep_files.items():
+        path = os.path.join(search_dir, depfile)
+        if os.path.exists(path):
+            findings.extend(scan_file(path))
+    return findings
+
+
+def ai_summarize(findings):
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    summary = json.dumps(findings[:30], indent=2)
+    prompt = (
+        f"Summarize these security scan findings. Group by severity, identify "
+        f"the 3 most critical issues, and suggest specific fixes.\n\n{summary}"
+    )
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        return json.loads(resp.read().decode()).get("response", "")
+    except Exception:
+        return "AI summary unavailable"
+
+
+def main():
+    ensure_dirs()
+    parser = argparse.ArgumentParser(description="NeurOS Security Scanner")
+    parser.add_argument("path", nargs="?", default=".",
+                        help="Directory to scan")
+    parser.add_argument("--system", "-s", action="store_true",
+                        help="Scan system configuration")
+    parser.add_argument("--network", "-n", action="store_true",
+                        help="Network vulnerability scan")
+    parser.add_argument("--deps", "-d", action="store_true",
+                        help="Scan dependencies")
+    parser.add_argument("--ai", "-a", action="store_true",
+                        help="AI-powered vulnerability analysis")
+    parser.add_argument("--json", "-j", action="store_true",
+                        help="Output as JSON")
+
+    args = parser.parse_args()
+
+    all_findings = []
+
+    if args.system:
+        findings = scan_system()
+        all_findings.extend(findings)
+        print(f"System scan: {len(findings)} issues found")
+        for f in findings:
+            print(f"  ⚠  {f['check']}: {f['issue']}")
+
+    if args.deps:
+        findings = scan_dependencies(args.path)
+        all_findings.extend(findings)
+        print(f"Dependency scan: {len(findings)} issues found")
+
+    if args.network:
+        print("Network scan running (nmap required)...")
+        try:
+            result = subprocess.check_output(
+                ["nmap", "-sV", "--top-ports", "100", "localhost"],
+                text=True, timeout=60
+            )
+            print(result)
+        except FileNotFoundError:
+            print("  nmap not installed: sudo apt install nmap")
+
+    if not args.system and not args.deps and not args.network:
+        findings, files = scan_directory(args.path)
+        all_findings = findings
+        if args.json:
+            print(json.dumps({
+                "files_scanned": files,
+                "findings": findings,
+                "timestamp": datetime.now().isoformat()
+            }, indent=2))
+        else:
+            print(f"Scanned {files} files, {len(findings)} potential issues found\n")
+            by_cat = {}
+            for f in findings:
+                by_cat.setdefault(f["category"], []).append(f)
+            for cat, items in by_cat.items():
+                print(f"  [{cat.upper()}] {len(items)} issues")
+                for item in items[:5]:
+                    print(f"    ⚠ {item['file']}:{item['line']} - {item['issue']}")
+                    print(f"      → {item['match']}")
+                if len(items) > 5:
+                    print(f"    ... and {len(items) - 5} more")
+
+    if args.ai and all_findings:
+        print("\n--- AI Security Analysis ---")
+        print(ai_summarize(all_findings))
+
+    if all_findings:
+        report_file = os.path.join(
+            SCAN_DIR, f"scan-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        )
+        with open(report_file, "w") as f:
+            json.dump({
+                "timestamp": datetime.now().isoformat(),
+                "findings": all_findings
+            }, f, indent=2)
+        print(f"\nReport saved: {report_file}")
+
+
+if __name__ == "__main__":
+    main()

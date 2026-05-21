@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+neuros-refactor — NeurOS Code Refactoring Assistant
+AI-powered code refactoring with multi-file awareness and git safety.
+
+Usage:
+  neuros-refactor file.py                                Refactor a file
+  neuros-refactor file.py --function "process_data"       Refactor a function
+  neuros-refactor src/ --pattern "*.py"                   Refactor directory
+  neuros-refactor --dry-run file.py                       Show plan without changes
+"""
+
+import sys
+import os
+import json
+import argparse
+import subprocess
+import shutil
+import urllib.request
+import urllib.error
+import difflib
+
+
+def query_llm(prompt, max_tokens=3000, temperature=0.3):
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": temperature}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=90)
+        return json.loads(resp.read().decode()).get("response", "")
+    except Exception as e:
+        return f"LLM error: {e}"
+
+
+def find_usages(function_name, directory="."):
+    """Find all usages of a function across the codebase."""
+    try:
+        result = subprocess.check_output(
+            ["rg", "-n", f"\\b{function_name}\\b",
+             "--type-add", "code:*.py",
+             "--type-add", "code:*.js",
+             "--type-add", "code:*.ts",
+             "-t", "code",
+             directory],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        return result.strip()
+    except subprocess.CalledProcessError:
+        return ""
+
+
+def refactor_target(filepath, target=None, dry_run=False, auto_yes=False):
+    if not os.path.exists(filepath):
+        print(f"File not found: {filepath}")
+        return
+
+    with open(filepath) as f:
+        original = f.read()
+
+    if target:
+        usages = find_usages(target, os.path.dirname(filepath) or ".")
+        prompt = (
+            f"Refactor the function/class '{target}' in this file. Improve "
+            f"readability, performance, and maintainability. Return the COMPLETE "
+            f"updated file. No explanations, no markdown.\n\n"
+        )
+        if usages:
+            prompt += f"Usages across codebase (DO NOT change signatures unless necessary):\n{usages[:2000]}\n\n"
+        prompt += f"File:\n```\n{original[:5000]}\n```\n\nRefactored file:"
+    else:
+        prompt = (
+            f"Refactor this entire file for best practices. Split large "
+            f"functions, reduce nesting, improve naming, add docstrings. "
+            f"Return COMPLETE file, no markdown.\n\n"
+            f"```\n{original[:5000]}\n```\n\nRefactored:"
+        )
+
+    print(f"Analyzing {filepath}..." +
+          (f" (target: {target})" if target else ""))
+    refactored = query_llm(prompt, max_tokens=5000, temperature=0.3)
+    refactored = refactored.replace("```", "").strip()
+
+    if not refactored or refactored == original:
+        print("No refactoring changes needed.")
+        return
+
+    diff = difflib.unified_diff(
+        original.splitlines(True), refactored.splitlines(True),
+        fromfile=filepath, tofile=f"{filepath} (refactored)"
+    )
+    diff_text = "".join(list(diff)[:150])
+    if len(diff_text) > 4000:
+        diff_text = diff_text[:4000] + "\n... (diff truncated)"
+    print(f"\nProposed changes:\n{diff_text}")
+
+    if dry_run:
+        print("\n[Dry run] No changes made. Remove --dry-run to apply.")
+        return
+
+    if not auto_yes:
+        confirm = input(f"\nApply changes to {filepath}? [y/N] ").lower()
+        if confirm != "y":
+            print("Skipped.")
+            return
+    shutil.copy(filepath, filepath + ".bak")
+    with open(filepath, "w") as f:
+        f.write(refactored)
+    print(f"Refactored: {filepath} (backup: {filepath}.bak)")
+def refactor_directory(directory, pattern="*.py", dry_run=False, auto_yes=False):
+    import fnmatch
+    files = []
+    for root, dirs, filenames in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in
+                   ("node_modules", ".git", "__pycache__", "venv")]
+        for f in filenames:
+            if fnmatch.fnmatch(f, pattern):
+                files.append(os.path.join(root, f))
+
+    print(f"Found {len(files)} files matching '{pattern}'")
+    for f in files:
+        print(f"\n{'='*50}")
+        refactor_target(f, dry_run=dry_run, auto_yes=auto_yes)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Refactoring Assistant")
+    parser.add_argument("path", help="File or directory to refactor")
+    parser.add_argument("--function", "-f", help="Specific function/class to refactor")
+    parser.add_argument("--pattern", "-p", default="*.py",
+                        help="File pattern for directory scan")
+    parser.add_argument("--dry-run", "-n", action="store_true",
+                        help="Show plan without making changes")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip confirmation prompts")
+
+    args = parser.parse_args()
+
+    if os.path.isfile(args.path):
+        refactor_target(args.path, args.function, args.dry_run, args.yes)
+    elif os.path.isdir(args.path):
+        refactor_directory(args.path, args.pattern, args.dry_run, args.yes)
+    else:
+        print(f"Path not found: {args.path}")
+
+
+if __name__ == "__main__":
+    main()

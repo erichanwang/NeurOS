@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""
+neuros-network — NeurOS Network Assistant
+AI-powered network diagnostics, configuration, and troubleshooting.
+
+Usage:
+  neuros-network status               Network health overview
+  neuros-network diagnose              AI-powered network troubleshooting
+  neuros-network speed                 Check internet speed (basic)
+  neuros-network ports                 List open ports and services
+  neuros-network scan 192.168.1.0/24  Basic network scan
+  neuros-network dns example.com       DNS lookup and analysis
+"""
+
+import sys, os, json, subprocess, argparse, socket, time
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except: return None
+
+def network_status():
+    info = {}
+
+    # Hostname & IP
+    try: info["hostname"] = socket.gethostname()
+    except: pass
+    try: info["local_ip"] = socket.gethostbyname(socket.gethostname())
+    except: pass
+
+    # Default route
+    try:
+        result = subprocess.run(["ip", "route", "show", "default"],
+                               capture_output=True, text=True, timeout=5)
+        info["default_route"] = result.stdout.strip()
+    except: pass
+
+    # DNS
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                if line.startswith("nameserver"):
+                    info.setdefault("dns", []).append(line.split()[1])
+    except: pass
+
+    # Interfaces
+    try:
+        result = subprocess.run(["ip", "-br", "addr"], capture_output=True, text=True, timeout=5)
+        info["interfaces"] = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+    except: pass
+
+    # Connections
+    try:
+        result = subprocess.run(["ss", "-tunap4"], capture_output=True, text=True, timeout=5)
+        connections = [l for l in result.stdout.strip().split('\n') if l.strip()]
+        info["connections"] = len(connections) - 1
+        info["listening"] = len([l for l in connections if "LISTEN" in l])
+    except: pass
+
+    # Internet connectivity
+    try:
+        socket.create_connection(("1.1.1.1", 53), timeout=3)
+        info["internet"] = "Connected"
+    except:
+        info["internet"] = "Not connected"
+
+    print("🌐 Network Status\n" + "=" * 40)
+    for k, v in info.items():
+        if isinstance(v, list):
+            print(f"  {k}:")
+            for item in v[:5]:
+                print(f"    • {item}")
+        else:
+            print(f"  {k}: {v}")
+
+def network_diagnose():
+    print("🔍 Running network diagnostics...\n")
+    issues = []
+
+    # Check connectivity
+    tests = [
+        ("Loopback", ["ping", "-c", "1", "127.0.0.1"]),
+        ("Gateway", ["ping", "-c", "1", "-W", "2", "1.1.1.1"]),
+        ("DNS resolution", ["nslookup", "google.com"]),
+        ("HTTP", ["curl", "-s", "--max-time", "5", "-o", "/dev/null", "-w", "%{http_code}", "http://google.com"]),
+    ]
+
+    results = []
+    for name, cmd in tests:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            success = result.returncode == 0
+            results.append(f"{'✅' if success else '❌'} {name}: {'OK' if success else result.stderr[:100]}")
+            if not success:
+                issues.append(name)
+        except:
+            results.append(f"❌ {name}: test failed")
+            issues.append(name)
+
+    for r in results:
+        print(f"  {r}")
+
+    # AI analysis
+    if issues:
+        prompt = f"""Diagnose these network issues on an Ubuntu 24.04 system:
+
+{chr(10).join(results)}
+
+Problem areas: {', '.join(issues)}
+
+Provide:
+1. Most likely cause
+2. Steps to fix (specific commands)
+3. Prevention tips"""
+        insight = query_ollama(prompt)
+        if insight:
+            print(f"\n🤖 AI Diagnosis\n{'─'*40}")
+            print(insight)
+
+def check_ports():
+    print("🔌 Open Ports\n" + "=" * 40)
+    try:
+        result = subprocess.run(["ss", "-tlnp4"], capture_output=True, text=True, timeout=5)
+        print(result.stdout)
+    except: pass
+
+def dns_lookup(domain):
+    print(f"🔍 DNS Lookup: {domain}\n" + "=" * 40)
+    try:
+        result = subprocess.run(["dig", "+short", domain], capture_output=True, text=True, timeout=5)
+        print(f"  A records:\n    {result.stdout.strip()}")
+    except: pass
+    try:
+        result = subprocess.run(["dig", "+short", "MX", domain], capture_output=True, text=True, timeout=5)
+        if result.stdout.strip():
+            print(f"  MX records:\n    {result.stdout.strip()}")
+    except: pass
+    try:
+        ips = socket.gethostbyname_ex(domain)
+        print(f"  All IPs: {ips[2]}")
+    except:
+        print(f"  Could not resolve {domain}")
+
+def basic_scan(network):
+    print(f"🔍 Scanning {network} (basic)...\n")
+    try:
+        result = subprocess.run(
+            ["nmap", "-sn", "-T4", network],
+            capture_output=True, text=True, timeout=120
+        )
+        print(result.stdout)
+    except FileNotFoundError:
+        print("nmap not installed. Install: sudo apt install nmap")
+        # Fallback: simple ping sweep
+        base = network.rsplit('.', 1)[0]
+        if '/' in network:
+            base = network.split('/')[0].rsplit('.', 1)[0]
+        for i in range(1, 20):
+            ip = f"{base}.{i}"
+            try:
+                socket.create_connection((ip, 80), timeout=0.3)
+                try: host = socket.gethostbyaddr(ip)[0]
+                except: host = "unknown"
+                print(f"  🟢 {ip} ({host})")
+            except: pass
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Network Assistant")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    subparsers.add_parser("status", help="Network health overview")
+    subparsers.add_parser("diagnose", help="AI-powered diagnostics")
+    subparsers.add_parser("ports", help="List open ports")
+    subparsers.add_parser("speed", help="Basic speed check")
+
+    scan = subparsers.add_parser("scan", help="Network scan")
+    scan.add_argument("network", help="Network range (e.g., 192.168.1.0/24)")
+
+    dns = subparsers.add_parser("dns", help="DNS lookup")
+    dns.add_argument("domain", help="Domain name")
+
+    args = parser.parse_args()
+
+    if args.command == "status":
+        network_status()
+    elif args.command == "diagnose":
+        network_diagnose()
+    elif args.command == "ports":
+        check_ports()
+    elif args.command == "scan":
+        basic_scan(args.network)
+    elif args.command == "dns":
+        dns_lookup(args.domain)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+neuros-learn — NeurOS Interactive Learning
+Learn any topic through AI-guided interactive lessons, quizzes, and practice.
+
+Usage:
+  neuros-learn python              Start a Python course
+  neuros-learn "quantum physics"   Learn about a topic
+  neuros-learn --quiz python       Take a quiz on Python
+  neuros-learn --flashcards git    Generate flashcards
+  neuros-learn --tutorial docker   Step-by-step tutorial
+  neuros-learn --list              List available courses
+"""
+
+import sys, os, json, argparse, textwrap, random, hashlib, time
+from urllib.request import Request, urlopen
+from datetime import datetime
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+LEARN_DIR = os.path.expanduser("~/.config/neuros/learn")
+os.makedirs(LEARN_DIR, exist_ok=True)
+
+def query_ollama(prompt, stream=False):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": stream}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=180) as resp:
+            if stream:
+                result = ""
+                for line in resp:
+                    if line:
+                        chunk = json.loads(line)
+                        text = chunk.get("response", "")
+                        print(text, end="", flush=True)
+                        result += text
+                        if chunk.get("done"):
+                            print()
+                            return result
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        print(f"Error: LLM unavailable ({e})")
+        sys.exit(1)
+
+def course_mode(topic):
+    print(f"\n🧠 NeurOS Learn: {topic}")
+    print("=" * 50)
+    print("Type 'next' to continue, 'quiz' for a quiz, 'exit' to quit.\n")
+
+    history = []
+    lesson_num = 1
+
+    while True:
+        if lesson_num == 1:
+            prompt = f"""You are an expert teacher. Start teaching {topic} from the absolute basics.
+            
+Lesson 1: Introduction to {topic}
+- Start with what it is and why it matters
+- Cover 3-4 key concepts with examples
+- Keep it engaging and conversational
+- End with a question to check understanding
+
+Return the lesson in markdown. Be thorough but not overwhelming."""
+        else:
+            concepts = '; '.join(history[-3:])
+            prompt = f"""Continue teaching {topic}. Previous concepts covered: {concepts}
+
+Lesson {lesson_num}:
+- Build on previous concepts
+- Introduce 2-3 new ideas with practical examples
+- Connect back to earlier lessons
+- End with a thought-provoking question
+
+Return the lesson in markdown."""
+
+        print(f"\n📖 Lesson {lesson_num}\n{'─'*40}")
+        response = query_ollama(prompt)
+        print(response)
+        history.append(response[:200])
+
+        while True:
+            cmd = input("\n⏭️  [next/quiz/deeper/exit]: ").strip().lower()
+            if cmd == 'next':
+                lesson_num += 1
+                break
+            elif cmd == 'quiz':
+                quiz_mode(topic, history)
+            elif cmd == 'deeper':
+                deeper = query_ollama(f"Go deeper on the last lesson about {topic}. Provide more examples and technical details.")
+                print(f"\n🔬 Deep Dive\n{'─'*40}")
+                print(deeper)
+            elif cmd == 'exit':
+                return
+            elif cmd:
+                # User asked a specific question
+                answer = query_ollama(f"Student question about {topic}: {cmd}\n\nContext from lessons: {' '.join(history[-2:])}")
+                print(f"\n💡 Answer\n{'─'*40}")
+                print(answer)
+
+def quiz_mode(topic, context=None):
+    ctx = '\n'.join(context[-3:]) if context else ""
+    prompt = f"""Create a 5-question quiz about {topic}. 
+Context: {ctx[:500]}
+
+For each question:
+1. Multiple choice (A/B/C/D)
+2. Show correct answer after user responds
+3. Explain why the answer is correct
+
+Return in this format:
+Question 1: [question]
+A) [option]
+B) [option]
+C) [option]
+D) [option]
+
+(Then later show answers with explanations)"""
+
+    questions = query_ollama(prompt)
+
+    lines = questions.split('\n')
+    current_q = []
+    quiz_items = []
+
+    for line in lines:
+        if line.startswith("Question ") and current_q:
+            quiz_items.append('\n'.join(current_q))
+            current_q = [line]
+        else:
+            current_q.append(line)
+    if current_q:
+        quiz_items.append('\n'.join(current_q))
+
+    print(f"\n📝 Quiz: {topic}\n{'─'*40}")
+
+    score = 0
+    for i, q in enumerate(quiz_items[:5]):
+        print(f"\n{q}")
+        answer = input(f"\nYour answer (A/B/C/D): ").strip().upper()
+
+        # Ask LLM to grade
+        grade_prompt = f"Question: {q}\nStudent answered: {answer}\nIs it correct? Say 'CORRECT' or 'INCORRECT' then explain briefly."
+        result = query_ollama(grade_prompt)
+        print(f"\n{result}")
+        if 'CORRECT' in result.upper():
+            score += 1
+
+    print(f"\n📊 Score: {score}/{len(quiz_items[:5])}")
+
+def flashcard_mode(topic):
+    prompt = f"""Create 10 flashcards for learning {topic}.
+Each flashcard should have a question/term on one side and the answer/definition on the other.
+Return in format:
+Q: [question]
+A: [answer]
+---
+Q: [question]
+A: [answer]"""
+
+    print(f"🃏 Generating flashcards for {topic}...")
+    cards_text = query_ollama(prompt)
+    cards = []
+    for block in cards_text.split('---'):
+        lines = block.strip().split('\n')
+        q = a = ""
+        for line in lines:
+            if line.startswith('Q:') or line.startswith('**Q:'):
+                q = line.split(':', 1)[1].strip().lstrip('*').rstrip('*')
+            elif line.startswith('A:') or line.startswith('**A:'):
+                a = line.split(':', 1)[1].strip().lstrip('*').rstrip('*')
+        if q and a:
+            cards.append((q, a))
+
+    if not cards:
+        print("No flashcards generated.")
+        return
+
+    flash_file = os.path.join(LEARN_DIR, f"flashcards-{topic.replace(' ', '-')}.json")
+    with open(flash_file, 'w') as f:
+        json.dump(cards, f, indent=2)
+
+    print(f"\n🃏 {len(cards)} flashcards ready!")
+    print(f"Saved: {flash_file}")
+
+    # Study mode
+    print("\nStudy mode — type 'flip' to see answer, 'next' to continue, 'exit' to quit")
+    random.shuffle(cards)
+    idx = 0
+    while idx < len(cards):
+        q, a = cards[idx]
+        print(f"\n📋 Q: {q}")
+        cmd = input("   > ").strip().lower()
+        if cmd == 'exit':
+            break
+        elif cmd in ('flip', 'f', ''):
+            print(f"   ✅ A: {a}")
+            idx += 1
+        elif cmd == 'next':
+            idx += 1
+
+def tutorial_mode(topic):
+    print(f"\n📚 Step-by-Step Tutorial: {topic}")
+    print("=" * 50)
+
+    prompt = f"""Create a step-by-step hands-on tutorial for learning {topic}.
+Include:
+- Prerequisites
+- 5-8 concrete steps with commands/code
+- Expected output for each step
+- Common pitfalls to avoid
+- A final exercise for practice
+
+Make it practical and actionable."""
+
+    tutorial = query_ollama(prompt)
+    print(tutorial)
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Interactive Learning")
+    parser.add_argument("topic", nargs="?", help="Topic to learn")
+    parser.add_argument("--quiz", "-q", help="Take a quiz on a topic")
+    parser.add_argument("--flashcards", "-f", help="Generate flashcards")
+    parser.add_argument("--tutorial", "-t", help="Step-by-step tutorial")
+    parser.add_argument("--list", "-l", action="store_true", help="List saved learning materials")
+
+    args = parser.parse_args()
+
+    if args.list:
+        if os.path.exists(LEARN_DIR):
+            for f in sorted(os.listdir(LEARN_DIR)):
+                fpath = os.path.join(LEARN_DIR, f)
+                size = os.path.getsize(fpath)
+                print(f"  📄 {f} ({size}B)")
+        else:
+            print("No saved learning materials.")
+        return
+
+    if args.quiz:
+        quiz_mode(args.quiz)
+    elif args.flashcards:
+        flashcard_mode(args.flashcards)
+    elif args.tutorial:
+        tutorial_mode(args.tutorial)
+    elif args.topic:
+        course_mode(args.topic)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

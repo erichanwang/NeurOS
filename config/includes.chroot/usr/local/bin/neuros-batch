@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+neuros-batch — NeurOS Batch Processor
+Process multiple files through AI with parallel execution.
+
+Usage:
+  neuros-batch "summarize" ./docs/*.md          Summarize all markdown files
+  neuros-batch "translate to Spanish" *.txt     Translate all text files
+  neuros-batch "find bugs" ./src/*.py           Review all Python files
+  neuros-batch "optimize" --ext .py ./src/      Optimize all Python files
+  neuros-batch "generate docs" --output ./docs/  Document a project
+"""
+
+import sys, os, json, subprocess, argparse, time, glob, concurrent.futures
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=180) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        return f"Error: {e}"
+
+def process_file(filepath, instruction, output_dir=None, dry_run=False):
+    rel = os.path.relpath(filepath, os.getcwd())
+    print(f"  Processing: {rel}...", end=" ", flush=True)
+
+    try:
+        with open(filepath, 'r', errors='replace') as f:
+            content = f.read()[:5000]
+    except Exception as e:
+        print(f"❌ Read error: {e}")
+        return {"file": filepath, "status": "error", "error": str(e)}
+
+    prompt = f"""Process this file according to the instruction.
+
+Instruction: {instruction}
+File: {rel}
+
+Content:
+{content}
+
+Return ONLY the processed result."""
+
+    try:
+        result = query_ollama(prompt)
+        if result.startswith("Error:"):
+            print("❌ LLM error")
+            return {"file": filepath, "status": "error", "error": result}
+
+        if output_dir and not dry_run:
+            os.makedirs(output_dir, exist_ok=True)
+            outname = os.path.splitext(os.path.basename(filepath))[0] + ".processed.txt"
+            outpath = os.path.join(output_dir, outname)
+
+            clean = result
+            if clean.startswith("```"): clean = '\n'.join(l for l in clean.split('\n') if not l.startswith("```"))
+            with open(outpath, 'w') as f: f.write(clean)
+            print(f"✅ → {outname}")
+            return {"file": filepath, "status": "done", "output": outpath}
+        else:
+            print("✅")
+            return {"file": filepath, "status": "done", "result": result[:200]}
+    except Exception as e:
+        print(f"❌ {e}")
+        return {"file": filepath, "status": "error", "error": str(e)}
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Batch Processor")
+    parser.add_argument("instruction", help="What to do with each file")
+    parser.add_argument("files", nargs="+", help="Files to process (supports globs)")
+    parser.add_argument("--ext", help="Filter by extension (e.g., .py)")
+    parser.add_argument("--output", "-o", help="Output directory")
+    parser.add_argument("--parallel", "-p", type=int, default=1, help="Parallel workers (default: 1)")
+    parser.add_argument("--dry-run", action="store_true", help="Preview without saving")
+
+    args = parser.parse_args()
+
+    # Expand globs
+    all_files = []
+    for pattern in args.files:
+        expanded = glob.glob(pattern, recursive=True)
+        if not expanded and not any(c in pattern for c in '*?[]'):
+            # Single file
+            if os.path.isfile(pattern):
+                expanded = [pattern]
+        all_files.extend(expanded)
+
+    # Filter by extension
+    if args.ext:
+        ext = args.ext if args.ext.startswith('.') else f'.{args.ext}'
+        all_files = [f for f in all_files if os.path.splitext(f)[1].lower() == ext.lower()]
+
+    if not all_files:
+        print("No files found matching the pattern(s).")
+        return
+
+    print(f"\n📦 Batch Processing: {len(all_files)} files")
+    print(f"   Instruction: {args.instruction}")
+    if args.output:
+        print(f"   Output: {args.output}/")
+    print()
+
+    start = time.time()
+    results = []
+
+    if args.parallel > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            futures = {
+                executor.submit(process_file, f, args.instruction, args.output, args.dry_run): f
+                for f in all_files
+            }
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+    else:
+        for f in all_files:
+            results.append(process_file(f, args.instruction, args.output, args.dry_run))
+
+    elapsed = time.time() - start
+    done = sum(1 for r in results if r['status'] == 'done')
+    errors = sum(1 for r in results if r['status'] == 'error')
+
+    print(f"\n{'─'*50}")
+    print(f"✅ {done} processed | ❌ {errors} errors | ⏱️ {elapsed:.1f}s")
+
+if __name__ == "__main__":
+    main()

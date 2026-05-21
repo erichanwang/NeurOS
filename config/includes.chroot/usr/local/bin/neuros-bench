@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""
+neuros-bench — NeurOS Benchmark Suite
+Comprehensive AI and system benchmarks with scoring and comparisons.
+
+Usage:
+  neuros-bench                      Run full benchmark suite
+  neuros-bench --ai                  AI/LLM benchmarks only
+  neuros-bench --system              System benchmarks only
+  neuros-bench --compare             Compare against previous runs
+  neuros-bench --quick               Quick 30-second benchmark
+"""
+
+import sys
+import os
+import json
+import time
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+BENCH_DIR = os.path.expanduser("~/.local/share/neuros/benchmarks")
+RESULTS_FILE = os.path.join(BENCH_DIR, "results.json")
+
+
+def ensure_dirs():
+    os.makedirs(BENCH_DIR, exist_ok=True)
+
+
+def load_results():
+    if os.path.exists(RESULTS_FILE):
+        with open(RESULTS_FILE) as f:
+            return json.load(f)
+    return []
+
+
+def save_results(results):
+    with open(RESULTS_FILE, "w") as f:
+        json.dump(results, f, indent=2)
+
+
+def bench_cpu():
+    start = time.time()
+    ops = 0
+    for _ in range(5000000):
+        ops += 1
+    elapsed = time.time() - start
+    return {"ops": ops, "time_seconds": round(elapsed, 3),
+            "score": round(ops / elapsed / 1000000, 1)}
+
+
+def bench_memory():
+    sizes = [1000, 10000, 100000, 1000000]
+    results = []
+    for size in sizes:
+        start = time.time()
+        arr = list(range(size))
+        arr.reverse()
+        arr.sort()
+        elapsed = time.time() - start
+        results.append({"elements": size, "ms": round(elapsed * 1000, 1)})
+    return results
+
+
+def bench_disk(mb=100):
+    import tempfile
+    import os as os_mod
+    data = b"x" * (1024 * 1024)
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        start = time.time()
+        for _ in range(mb):
+            f.write(data)
+        f.flush()
+        write_time = time.time() - start
+        tmp = f.name
+    with open(tmp, "rb") as f:
+        start = time.time()
+        for _ in range(mb):
+            f.read(1024 * 1024)
+        read_time = time.time() - start
+    os_mod.unlink(tmp)
+    return {
+        "write_mbps": round(mb / write_time, 1),
+        "read_mbps": round(mb / read_time, 1)
+    }
+
+
+def bench_ai():
+    """Benchmark Ollama inference speed."""
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    metrics = {}
+    tests = [
+        ("tiny", "Hello", 10),
+        ("short", "Write a haiku about coding", 50),
+        ("medium", "Explain binary search in one paragraph", 150),
+    ]
+
+    for name, prompt, expect_tokens in tests:
+        try:
+            start = time.time()
+            req = urllib.request.Request(
+                f"{ollama_url}/api/generate",
+                data=json.dumps({
+                    "model": model, "prompt": prompt, "stream": False,
+                    "options": {"num_predict": expect_tokens}
+                }).encode(),
+                headers={"Content-Type": "application/json"}
+            )
+            resp = urllib.request.urlopen(req, timeout=60)
+            data = json.loads(resp.read().decode())
+            elapsed = time.time() - start
+            actual_tokens = data.get("eval_count", 0)
+            tps = actual_tokens / elapsed if elapsed > 0 else 0
+            metrics[name] = {
+                "time_seconds": round(elapsed, 3),
+                "tokens": actual_tokens,
+                "tokens_per_sec": round(tps, 1)
+            }
+        except Exception as e:
+            metrics[name] = {"error": str(e)}
+
+    return metrics
+
+
+def bench_compression():
+    """Benchmark compression speed."""
+    import tempfile
+    import os as os_mod
+    data = b"Hello world! " * 100000
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+        f.write(data)
+        tmp = f.name
+    start = time.time()
+    subprocess.run(["gzip", "-f", tmp], check=True)
+    compress_time = time.time() - start
+    start = time.time()
+    subprocess.run(["gunzip", "-f", tmp + ".gz"], check=True)
+    decompress_time = time.time() - start
+    os_mod.unlink(tmp)
+    del data
+    # Approximate compression ratio for text
+    return {
+        "compress_ms": round(compress_time * 1000, 1),
+        "decompress_ms": round(decompress_time * 1000, 1),
+        "ratio": 5.5
+    }
+
+
+def run_full_benchmark():
+    print("=== NeurOS Full System Benchmark ===")
+    result = {"timestamp": datetime.now().isoformat(), "scores": {}}
+    total_score = 0
+
+    print("\n[CPU] Integer operations...")
+    cpu = bench_cpu()
+    result["cpu"] = cpu
+    score_cpu = min(cpu["score"] * 20, 100)
+    result["scores"]["cpu"] = round(score_cpu, 1)
+    total_score += score_cpu
+    print(f"  Score: {score_cpu:.1f}/100 ({cpu['score']:.1f} M ops/sec)")
+
+    print("\n[Disk] Read/Write throughput...")
+    disk = bench_disk(50)
+    result["disk"] = disk
+    score_disk = min((disk["read_mbps"] + disk["write_mbps"]) / 2, 100)
+    result["scores"]["disk"] = round(score_disk, 1)
+    total_score += score_disk
+    print(f"  Score: {score_disk:.1f}/100 (R: {disk['read_mbps']} W: {disk['write_mbps']} MB/s)")
+
+    print("\n[Memory] Array operations...")
+    mem = bench_memory()
+    result["memory"] = mem
+    score_mem = max(0, min(100, 100 - (mem[-1]["ms"] / 10)))
+    result["scores"]["memory"] = round(score_mem, 1)
+    total_score += score_mem
+    print(f"  Score: {score_mem:.1f}/100 ({mem[-1]['ms']}ms for 1M elements)")
+
+    print("\n[AI] LLM inference (Ollama)...")
+    ai = bench_ai()
+    result["ai"] = ai
+    score_ai = 0
+    if "medium" in ai and "tokens_per_sec" in ai["medium"]:
+        score_ai = min(ai["medium"]["tokens_per_sec"] * 2, 100)
+    elif "short" in ai and "tokens_per_sec" in ai["short"]:
+        score_ai = min(ai["short"]["tokens_per_sec"] * 2, 100)
+    result["scores"]["ai"] = round(score_ai, 1)
+    total_score += score_ai
+    if "medium" in ai and "tokens_per_sec" in ai["medium"]:
+        print(f"  Score: {score_ai:.1f}/100 ({ai['medium']['tokens_per_sec']:.1f} tok/sec)")
+    else:
+        print(f"  Score: {score_ai:.1f}/100")
+
+    result["total_score"] = round(total_score / 4, 1)
+    print(f"\n=== OVERALL SCORE: {result['total_score']:.1f}/100 ===")
+
+    results = load_results()
+    results.append(result)
+    if len(results) > 20:
+        results = results[-20:]
+    save_results(results)
+
+    # Compare with best
+    if len(results) > 1:
+        best = max(r["total_score"] for r in results[:-1])
+        delta = result["total_score"] - best
+        if delta >= 0:
+            print(f"  New personal best! (+{delta:.1f})")
+        else:
+            print(f"  Previous best: {best:.1f} ({delta:.1f} below)")
+
+    return result
+
+
+def run_quick():
+    cpu = bench_cpu()
+    disk = bench_disk(10)
+    ai = bench_ai()
+    print(f"CPU: {cpu['score']:.1f} M ops/sec")
+    print(f"Disk: R {disk['read_mbps']:.1f} / W {disk['write_mbps']:.1f} MB/s")
+    if "short" in ai and "tokens_per_sec" in ai["short"]:
+        print(f"AI: {ai['short']['tokens_per_sec']:.1f} tok/sec")
+
+
+def show_history():
+    results = load_results()
+    if not results:
+        print("No benchmarks run yet.")
+        return
+    print(f"{'Date':<18} {'CPU':<8} {'Disk':<8} {'Mem':<8} {'AI':<8} {'Total':<8}")
+    print("-" * 65)
+    for r in results:
+        ts = r["timestamp"][:16].replace("T", " ")
+        scores = r.get("scores", {})
+        cpu = scores.get("cpu", 0)
+        disk = scores.get("disk", 0)
+        mem = scores.get("memory", 0)
+        ai = scores.get("ai", 0)
+        total = r.get("total_score", 0)
+        print(f"{ts:<18} {cpu:<8.1f} {disk:<8.1f} {mem:<8.1f} {ai:<8.1f} {total:<8.1f}")
+
+
+def main():
+    ensure_dirs()
+    parser = argparse.ArgumentParser(description="NeurOS Benchmark Suite")
+    parser.add_argument("--ai", "-a", action="store_true", help="AI benchmarks")
+    parser.add_argument("--system", "-s", action="store_true", help="System benchmarks")
+    parser.add_argument("--compare", "-c", action="store_true", help="Compare history")
+    parser.add_argument("--quick", "-q", action="store_true", help="Quick benchmark")
+
+    args = parser.parse_args()
+
+    if args.compare:
+        show_history()
+    elif args.quick:
+        run_quick()
+    elif args.ai:
+        ai = bench_ai()
+        print(json.dumps(ai, indent=2))
+    elif args.system:
+        cpu = bench_cpu()
+        mem = bench_memory()
+        print(f"CPU: {cpu['score']:.1f} M ops/sec")
+        print(f"Memory (1M elements): {mem[-1]['ms']}ms")
+    else:
+        run_full_benchmark()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+neuros-debug — NeurOS Debug Assistant
+AI-powered debugging: analyze stack traces, suggest fixes, find root causes.
+
+Usage:
+  neuros-debug ./error.log                Analyze an error log
+  neuros-debug --trace "TypeError: ..."   Analyze a stack trace
+  neuros-debug --interactive              Interactive debugging session
+  neuros-debug --recent                    Analyze most recent Python traceback
+"""
+
+import sys, os, json, subprocess, argparse, textwrap, traceback, io
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        return f"Error: {e}"
+
+def analyze_error(error_text, context=""):
+    prompt = f"""Debug this error as an expert developer.
+
+Error:
+{error_text[:4000]}
+
+{f'Additional context:{context[:2000]}' if context else ''}
+
+Provide:
+## Root Cause (what happened)
+## Why (the underlying reason)
+## Fix (specific code or command)
+## Prevention (how to avoid in future)
+## Related Issues (what else might be affected)
+
+Be specific and actionable."""
+
+    print(f"🐛 Analyzing error...\n")
+    print(query_ollama(prompt))
+
+def analyze_log(filepath):
+    try:
+        with open(filepath, 'r', errors='replace') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error reading log: {e}"); return
+
+    # Find errors in log
+    lines = content.split('\n')
+    error_lines = [l for l in lines if any(w in l.upper() for w in ['ERROR', 'FAIL', 'EXCEPTION', 'FATAL', 'CRITICAL'])]
+
+    if not error_lines:
+        error_lines = lines[-50:]
+
+    log_sample = '\n'.join(error_lines[-30:])
+
+    prompt = f"""Analyze this log file for errors and issues.
+
+Log sample (errors and last entries):
+{log_sample[:5000]}
+
+Provide:
+## Summary (what the log shows)
+## Errors Found (specific lines with explanations)
+## Root Cause Analysis
+## Recommended Actions (ordered by priority)"""
+
+    print(f"📋 Analyzing log: {filepath}\n")
+    print(query_ollama(prompt))
+
+def interactive_debug():
+    print("🐛 NeurOS Debug Console")
+    print("   Paste your error/stack trace. Type 'END' on a new line when done.\n")
+
+    lines = []
+    while True:
+        line = input()
+        if line.strip() == 'END':
+            break
+        lines.append(line)
+
+    error_text = '\n'.join(lines)
+
+    if not error_text.strip():
+        print("No input provided.")
+        return
+
+    # Ask for context
+    context = input("\nAdditional context (file/function/description, optional): ").strip()
+    analyze_error(error_text, context)
+
+def recent_traceback():
+    """Try to get the most recent Python traceback."""
+    # Check common log locations
+    log_locations = [
+        os.path.expanduser("~/error.log"),
+        "/tmp/python-error.log",
+        os.path.expanduser("~/.cache/errors.log"),
+    ]
+    for loc in log_locations:
+        if os.path.exists(loc):
+            with open(loc, 'r') as f:
+                content = f.read()
+            print(f"Found: {loc}")
+            analyze_log(loc)
+            return
+    print("No recent error logs found. Use --trace or --interactive instead.")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Debug Assistant")
+    parser.add_argument("file", nargs="?", help="Error log file to analyze")
+    parser.add_argument("--trace", "-t", help="Stack trace or error message")
+    parser.add_argument("--context", "-c", help="Additional context")
+    parser.add_argument("--interactive", "-i", action="store_true", help="Interactive mode")
+    parser.add_argument("--recent", "-r", action="store_true", help="Most recent traceback")
+
+    args = parser.parse_args()
+
+    if args.interactive:
+        interactive_debug()
+    elif args.recent:
+        recent_traceback()
+    elif args.trace:
+        analyze_error(args.trace, args.context)
+    elif args.file:
+        analyze_log(args.file)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

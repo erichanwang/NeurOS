@@ -11,7 +11,7 @@
 #   make wallpaper    Generate wallpaper SVG
 #   make help         Show this help
 
-.PHONY: all build test-vm vm clean deep-clean wallpaper help
+.PHONY: all build test-vm vm clean deep-clean wallpaper validate test help
 
 ISO := live-image-amd64.hybrid.iso
 BUILD_LOG := build.log
@@ -48,6 +48,12 @@ deep-clean: clean
 	@rm -rf auto/ 2>/dev/null || true
 	@echo "Deep clean complete."
 
+validate:
+	@bash validate-build.sh
+
+test:
+	@python3 tests/test_nn.py -v
+
 help:
 	@echo "NeurOS Build Targets:"
 	@echo ""
@@ -56,6 +62,8 @@ help:
 	@echo "  make test-vm       Build and launch test VM"
 	@echo "  make vm            Launch VM with existing ISO"
 	@echo "  make wallpaper     Generate wallpaper SVG/PNG"
+	@echo "  make validate      Run pre-build validation checks"
+	@echo "  make test          Run unit tests"
 	@echo "  make clean         Remove build artifacts"
 	@echo "  make deep-clean    Full clean (including lb config)"
 	@echo "  make help          Show this help"

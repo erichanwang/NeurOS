@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""
+neuros-profile — NeurOS System Profiler
+AI-powered system profiling and performance optimization.
+
+Usage:
+  neuros-profile                      Profile current system
+  neuros-profile --cpu                 CPU benchmarks
+  neuros-profile --memory              Memory analysis
+  neuros-profile --disk                Disk performance
+  neuros-profile --recommend           AI recommendations
+"""
+
+import sys
+import os
+import json
+import time
+import subprocess
+import platform
+import argparse
+from datetime import datetime
+
+
+def run_cmd(cmd):
+    try:
+        return subprocess.check_output(cmd, shell=True, text=True).strip()
+    except Exception:
+        return "N/A"
+
+
+def get_cpu_info():
+    info = {
+        "model": run_cmd("lscpu | grep 'Model name' | cut -d: -f2- | xargs"),
+        "cores": run_cmd("nproc"),
+        "threads": run_cmd("lscpu | grep 'Thread(s)' | awk '{print $NF}'"),
+        "max_mhz": run_cmd("lscpu | grep 'CPU max MHz' | awk '{print $NF}'"),
+        "architecture": platform.machine()
+    }
+    bench = cpu_bench()
+    info["benchmark"] = bench
+    return info
+
+
+def cpu_bench():
+    """Simple CPU benchmark: compute primes."""
+    start = time.time()
+    n = 0
+    for i in range(2, 50000):
+        is_prime = True
+        for j in range(2, int(i ** 0.5) + 1):
+            if i % j == 0:
+                is_prime = False
+                break
+        if is_prime:
+            n += 1
+    elapsed = time.time() - start
+    return {
+        "primes_found": n,
+        "time_seconds": round(elapsed, 3),
+        "primes_per_sec": round(n / elapsed, 1)
+    }
+
+
+def get_memory_info():
+    mem = run_cmd("free -h | grep Mem | awk '{print $2,$3,$4,$5,$6,$7}'")
+    parts = mem.split() if mem else []
+    return {
+        "total": parts[0] if len(parts) > 0 else "N/A",
+        "used": parts[1] if len(parts) > 1 else "N/A",
+        "free": parts[2] if len(parts) > 2 else "N/A",
+        "cached": parts[4] if len(parts) > 4 else "N/A",
+        "available": parts[5] if len(parts) > 5 else "N/A"
+    }
+
+
+def get_disk_info():
+    disk = run_cmd("df -h / | tail -1 | awk '{print $2,$3,$4,$5}'")
+    parts = disk.split() if disk else []
+    bench = disk_bench()
+    return {
+        "total": parts[0] if len(parts) > 0 else "N/A",
+        "used": parts[1] if len(parts) > 1 else "N/A",
+        "free": parts[2] if len(parts) > 2 else "N/A",
+        "usage_pct": parts[3] if len(parts) > 3 else "N/A",
+        "benchmark": bench
+    }
+
+
+def disk_bench():
+    """Simple disk write/read benchmark."""
+    import tempfile
+    import os as os_mod
+    data = b"x" * (1024 * 1024)
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            start = time.time()
+            for _ in range(100):
+                f.write(data)
+            f.flush()
+            write_time = time.time() - start
+            tmp = f.name
+        with open(tmp, "rb") as f:
+            start = time.time()
+            for _ in range(100):
+                f.read(1024 * 1024)
+            read_time = time.time() - start
+        os_mod.unlink(tmp)
+        return {
+            "write_mb_sec": round(100 / write_time, 1),
+            "read_mb_sec": round(100 / read_time, 1)
+        }
+    except Exception:
+        return {"write_mb_sec": 0, "read_mb_sec": 0}
+
+
+def get_gpu_info():
+    gpu = run_cmd("lspci | grep -i vga | cut -d: -f3- | xargs")
+    nvidia = run_cmd("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null")
+    return {
+        "vga": gpu or "N/A",
+        "nvidia": nvidia or "N/A"
+    }
+
+
+def get_top_processes(n=5):
+    procs = run_cmd(f"ps aux --sort=-%mem | head -{n+1} | tail -{n} | "
+                    "awk '{print $2,$11,$4\"%\",$6\"KB\"}'")
+    result = []
+    if procs:
+        for line in procs.splitlines():
+            parts = line.split()
+            if len(parts) >= 4:
+                result.append({
+                    "pid": parts[0], "name": parts[1],
+                    "mem_pct": parts[2], "mem_kb": parts[3]
+                })
+    return result
+
+
+def get_ollama_models():
+    import urllib.request
+    try:
+        req = urllib.request.Request("http://localhost:11434/api/tags")
+        resp = urllib.request.urlopen(req, timeout=5)
+        data = json.loads(resp.read().decode())
+        return [m["name"] for m in data.get("models", [])]
+    except Exception:
+        return []
+
+
+def ai_recommendations(profile):
+    """Get AI recommendations based on system profile."""
+    import urllib.request
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    prompt = (
+        f"Based on this system profile, give 3-5 specific recommendations for "
+        f"performance improvement and optimization. Be concise.\n\n"
+        f"Profile: {json.dumps(profile, indent=2)}\n\nRecommendations:"
+    )
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        data = json.loads(resp.read().decode())
+        return data.get("response", "No recommendations available.")
+    except Exception as e:
+        return f"AI recommendations unavailable: {e}"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS System Profiler")
+    parser.add_argument("--cpu", action="store_true", help="CPU benchmarks")
+    parser.add_argument("--memory", action="store_true", help="Memory analysis")
+    parser.add_argument("--disk", action="store_true", help="Disk performance")
+    parser.add_argument("--recommend", "-r", action="store_true",
+                        help="AI performance recommendations")
+    parser.add_argument("--json", "-j", action="store_true",
+                        help="Output as JSON")
+
+    args = parser.parse_args()
+
+    profile = {
+        "timestamp": datetime.now().isoformat(),
+        "hostname": platform.node(),
+        "system": f"{platform.system()} {platform.release()}",
+        "cpu": get_cpu_info(),
+        "memory": get_memory_info(),
+        "disk": get_disk_info(),
+        "gpu": get_gpu_info(),
+        "top_processes": get_top_processes(),
+        "ollama_models": get_ollama_models()
+    }
+
+    if args.json:
+        print(json.dumps(profile, indent=2))
+        return
+
+    if args.cpu:
+        cpu = profile["cpu"]
+        print(f"CPU: {cpu['model']}")
+        print(f"  Cores: {cpu['cores']} | Threads: {cpu['threads']}")
+        print(f"  Max MHz: {cpu['max_mhz']}")
+        bench = cpu["benchmark"]
+        print(f"  Benchmark: {bench['primes_per_sec']} primes/sec "
+              f"({bench['time_seconds']}s)")
+        return
+
+    if args.memory:
+        mem = profile["memory"]
+        print(f"Memory: {mem['total']} total")
+        print(f"  Used: {mem['used']} | Free: {mem['free']}")
+        print(f"  Available: {mem['available']} | Cached: {mem['cached']}")
+        return
+
+    if args.disk:
+        disk = profile["disk"]
+        print(f"Disk (/): {disk['total']} total | {disk['usage_pct']} used")
+        bench = disk["benchmark"]
+        print(f"  Write: {bench['write_mb_sec']} MB/s")
+        print(f"  Read:  {bench['read_mb_sec']} MB/s")
+        return
+
+    if args.recommend:
+        recs = ai_recommendations(profile)
+        print("AI Recommendations:")
+        print(recs)
+        return
+
+    print("=== NeurOS System Profile ===")
+    cpu = profile["cpu"]
+    print(f"CPU: {cpu['model']} ({cpu['cores']} cores @ {cpu['max_mhz']} MHz)")
+    print(f"  Benchmark: {cpu['benchmark']['primes_per_sec']} primes/sec")
+
+    mem = profile["memory"]
+    print(f"Memory: {mem['total']} ({mem['available']} available)")
+
+    disk = profile["disk"]
+    print(f"Disk: {disk['total']} ({disk['usage_pct']} used)")
+
+    gpu = profile["gpu"]
+    print(f"GPU: {gpu['vga']}")
+
+    models = profile["ollama_models"]
+    if models:
+        print(f"Ollama models: {', '.join(models)}")
+
+    print(f"\nTop processes by memory:")
+    for p in profile["top_processes"]:
+        print(f"  {p['name']}: {p['mem_pct']} ({p['mem_kb']}KB)")
+
+    print(f"\nRun 'neuros-profile --recommend' for AI optimization tips.")
+
+
+if __name__ == "__main__":
+    main()

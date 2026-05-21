@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+neuros-schedule — NeurOS Task Scheduler
+Schedule recurring tasks using natural language. AI-powered cron management.
+
+Usage:
+  neuros-schedule add "run backup every Sunday at 3am" --command "neuros-backup"
+  neuros-schedule add "check for updates daily at 9am"
+  neuros-schedule list
+  neuros-schedule remove <id>
+  neuros-schedule edit <id> "new schedule description"
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+import tempfile
+from datetime import datetime
+
+SCHEDULE_DIR = os.path.expanduser("~/.local/share/neuros/schedules")
+SCHEDULE_FILE = os.path.join(SCHEDULE_DIR, "schedule.json")
+CRON_MARKER = "# NEUROS-SCHEDULED"
+
+
+def ensure_dirs():
+    os.makedirs(SCHEDULE_DIR, exist_ok=True)
+
+
+def load_schedule():
+    if os.path.exists(SCHEDULE_FILE):
+        with open(SCHEDULE_FILE) as f:
+            return json.load(f)
+    return []
+
+
+def save_schedule(schedule):
+    with open(SCHEDULE_FILE, "w") as f:
+        json.dump(schedule, f, indent=2)
+
+
+def nl_to_cron(description):
+    """Use local LLM to convert natural language to cron expression."""
+    import urllib.request
+    import urllib.error
+
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    prompt = (
+        f"Convert this schedule description to a cron expression (5 fields: minute hour day month weekday). "
+        f"Reply with ONLY the cron expression and nothing else.\n\n"
+        f"Schedule: {description}\n\n"
+        f"Cron:"
+    )
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt,
+                "stream": False, "options": {"num_predict": 20}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        data = json.loads(resp.read().decode())
+        cron = data.get("response", "").strip()
+        parts = cron.split()
+        if len(parts) == 5:
+            return " ".join(parts)
+    except Exception:
+        pass
+    return None
+
+
+def install_crontab(schedule):
+    """Regenerate crontab with all scheduled tasks."""
+    entries = []
+    for item in schedule:
+        if item.get("cron") and item.get("command"):
+            entries.append(f"{item['cron']} {item['command']} {CRON_MARKER}:{item['id']}")
+
+    existing = []
+    try:
+        existing = subprocess.check_output(["crontab", "-l"], text=True).splitlines()
+    except subprocess.CalledProcessError:
+        pass
+
+    existing = [l for l in existing if CRON_MARKER not in l]
+    new_crontab = "\n".join(existing + entries) + "\n"
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".cron", delete=False) as f:
+        f.write(new_crontab)
+        f.flush()
+        subprocess.run(["crontab", f.name], check=True)
+        os.unlink(f.name)
+
+
+def cmd_add(args):
+    ensure_dirs()
+    description = args.description
+    command = args.command or f'neuros-notify "Scheduled task: {description}"'
+    cron = nl_to_cron(description)
+
+    schedule = load_schedule()
+    entry = {
+        "id": str(len(schedule) + 1),
+        "description": description,
+        "command": command,
+        "cron": cron,
+        "created": datetime.now().isoformat(),
+        "enabled": True
+    }
+    schedule.append(entry)
+    save_schedule(schedule)
+    install_crontab(schedule)
+
+    if cron:
+        print(f"Scheduled: {description}")
+        print(f"  Cron: {cron}")
+    else:
+        print(f"Scheduled (AI fallback): {description}")
+        print(f"  Cron: Could not determine. Edit manually with: neuros-schedule edit {entry['id']}")
+
+
+def cmd_list(args):
+    schedule = load_schedule()
+    if not schedule:
+        print("No scheduled tasks.")
+        return
+    print(f"{'ID':<4} {'Enabled':<8} {'Cron':<20} {'Description'}")
+    print("-" * 70)
+    for item in schedule:
+        status = "✔" if item.get("enabled", True) else "✘"
+        cron = item.get("cron", "N/A")
+        desc = item["description"][:40]
+        print(f"{item['id']:<4} {status:<8} {cron:<20} {desc}")
+
+
+def cmd_remove(args):
+    schedule = load_schedule()
+    schedule = [s for s in schedule if s["id"] != args.id]
+    save_schedule(schedule)
+    install_crontab(schedule)
+    print(f"Removed schedule {args.id}")
+
+
+def cmd_edit(args):
+    schedule = load_schedule()
+    for item in schedule:
+        if item["id"] == args.id:
+            item["description"] = args.new_desc
+            if item.get("command"):
+                item["cron"] = nl_to_cron(args.new_desc)
+            break
+    save_schedule(schedule)
+    install_crontab(schedule)
+    print(f"Updated schedule {args.id}")
+
+
+def cmd_toggle(args):
+    schedule = load_schedule()
+    for item in schedule:
+        if item["id"] == args.id:
+            item["enabled"] = not item.get("enabled", True)
+            state = "enabled" if item["enabled"] else "disabled"
+            print(f"Schedule {args.id} {state}")
+            break
+    save_schedule(schedule)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Task Scheduler")
+    sub = parser.add_subparsers(dest="cmd")
+
+    add_p = sub.add_parser("add", help="Add a scheduled task")
+    add_p.add_argument("description", help="Natural language schedule description")
+    add_p.add_argument("--command", "-c", help="Command to run")
+
+    sub.add_parser("list", help="List scheduled tasks")
+
+    rm_p = sub.add_parser("remove", help="Remove a scheduled task")
+    rm_p.add_argument("id", help="Task ID to remove")
+
+    edit_p = sub.add_parser("edit", help="Edit a scheduled task")
+    edit_p.add_argument("id", help="Task ID to edit")
+    edit_p.add_argument("new_desc", help="New schedule description")
+
+    toggle_p = sub.add_parser("toggle", help="Enable/disable a scheduled task")
+    toggle_p.add_argument("id", help="Task ID to toggle")
+
+    args = parser.parse_args()
+
+    if args.cmd == "add":
+        cmd_add(args)
+    elif args.cmd == "list":
+        cmd_list(args)
+    elif args.cmd == "remove":
+        cmd_remove(args)
+    elif args.cmd == "edit":
+        cmd_edit(args)
+    elif args.cmd == "toggle":
+        cmd_toggle(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

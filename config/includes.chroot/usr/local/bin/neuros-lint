@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+neuros-lint — NeurOS AI Code Linter
+AI-powered linting that explains issues and suggests fixes with context.
+
+Usage:
+  neuros-lint file.py                  Lint a single file
+  neuros-lint src/                     Lint all files in directory
+  neuros-lint --git                    Lint staged git changes
+  neuros-lint --fix file.py            Suggest fixes interactively
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+from pathlib import Path
+
+LINT_EXTENSIONS = {
+    ".py": {"cmd": "python3 -m flake8 --max-line-length=100", "name": "Python"},
+    ".js": {"cmd": "npx eslint --no-color", "name": "JavaScript"},
+    ".ts": {"cmd": "npx eslint --no-color", "name": "TypeScript"},
+    ".sh": {"cmd": "shellcheck -x", "name": "Shell"},
+    ".bash": {"cmd": "shellcheck -x", "name": "Bash"},
+    ".go": {"cmd": "golangci-lint run", "name": "Go"},
+    ".rs": {"cmd": "cargo clippy --message-format short 2>&1 | head -20", "name": "Rust"},
+}
+
+
+def get_linter_for_file(path):
+    ext = os.path.splitext(path)[1].lower()
+    return LINT_EXTENSIONS.get(ext)
+
+
+def run_linter(path, linter):
+    import shlex
+    try:
+        cmd = shlex.split(linter['cmd']) + [path]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+            cwd=os.path.dirname(os.path.abspath(path)) or "."
+        )
+        return result.stdout + result.stderr
+    except subprocess.TimeoutExpired:
+        return "Linter timed out."
+    except Exception as e:
+        return f"Linter error: {e}"
+
+
+def ai_explain(file_path, file_content, lint_output):
+    """Use LLM to explain lint errors in context."""
+    import urllib.request
+
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    content_preview = file_content[:4000]
+
+    prompt = (
+        f"Analyze these lint errors in context and provide clear, actionable "
+        f"explanations and fixes. Group related issues.\n\n"
+        f"File: {file_path}\n"
+        f"```\n{content_preview}\n```\n\n"
+        f"Lint output:\n{lint_output[:2000]}\n\n"
+        f"Analysis (explain each issue and how to fix):"
+    )
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        data = json.loads(resp.read().decode())
+        return data.get("response", "No AI analysis available.")
+    except Exception as e:
+        return f"AI analysis unavailable: {e}"
+
+
+def lint_file(file_path, explain=False):
+    if not os.path.exists(file_path):
+        print(f"File not found: {file_path}")
+        return
+
+    linter = get_linter_for_file(file_path)
+    if not linter:
+        ext = os.path.splitext(file_path)[1]
+        print(f"No linter configured for {ext} files.")
+        return
+
+    print(f"Linting {file_path} ({linter['name']})...")
+    output = run_linter(file_path, linter)
+
+    if not output.strip():
+        print("  No issues found.")
+        return
+
+    print(f"  Issues found:\n{output}")
+
+    if explain:
+        with open(file_path) as f:
+            content = f.read()
+        print("\n--- AI Analysis ---")
+        print(ai_explain(file_path, content, output))
+
+
+def lint_directory(directory, explain=False):
+    found = 0
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in
+                   ("node_modules", ".git", "__pycache__", "venv", ".venv")]
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in LINT_EXTENSIONS:
+                found += 1
+                lint_file(os.path.join(root, f), explain)
+
+    if found == 0:
+        print("No lintable files found.")
+
+
+def lint_git():
+    """Lint staged git changes."""
+    try:
+        changed = subprocess.check_output(
+            ["git", "diff", "--cached", "--name-only"], text=True
+        ).splitlines()
+    except subprocess.CalledProcessError:
+        print("Not a git repository or no staged changes.")
+        return
+
+    lintable = [f for f in changed if
+                os.path.splitext(f)[1].lower() in LINT_EXTENSIONS]
+    if not lintable:
+        print("No lintable files in staged changes.")
+        return
+
+    for f in lintable:
+        if os.path.exists(f):
+            lint_file(f)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS AI Code Linter")
+    parser.add_argument("path", nargs="?", help="File or directory to lint")
+    parser.add_argument("--explain", "-e", action="store_true",
+                        help="Get AI explanations for issues")
+    parser.add_argument("--fix", "-f", action="store_true",
+                        help="Suggest fixes interactively")
+    parser.add_argument("--git", "-g", action="store_true",
+                        help="Lint staged git changes")
+
+    args = parser.parse_args()
+
+    if args.git:
+        lint_git()
+    elif args.path:
+        if os.path.isfile(args.path):
+            lint_file(args.path, explain=args.explain or args.fix)
+        elif os.path.isdir(args.path):
+            lint_directory(args.path, explain=args.explain or args.fix)
+        else:
+            print(f"Path not found: {args.path}")
+    else:
+        # Default to current directory
+        lint_directory(".", explain=args.explain or args.fix)
+
+
+if __name__ == "__main__":
+    main()

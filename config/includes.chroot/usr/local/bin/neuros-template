@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""
+neuros-template — NeurOS Template Engine
+AI-powered project scaffolding from templates with smart variable substitution.
+
+Usage:
+  neuros-template list                   List available templates
+  neuros-template create <name> <dir>    Create project from template
+  neuros-template save <name> <dir>      Save a directory as template
+  neuros-template --ai "python cli"      Generate a template with AI
+"""
+
+import sys
+import os
+import json
+import shutil
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+TEMPLATE_DIR = os.path.expanduser("~/.local/share/neuros/templates")
+INDEX_FILE = os.path.join(TEMPLATE_DIR, "index.json")
+
+
+def ensure_dirs():
+    os.makedirs(TEMPLATE_DIR, exist_ok=True)
+    if not os.path.exists(INDEX_FILE):
+        with open(INDEX_FILE, "w") as f:
+            json.dump([], f)
+
+
+def load_index():
+    with open(INDEX_FILE) as f:
+        return json.load(f)
+
+
+def save_index(index):
+    with open(INDEX_FILE, "w") as f:
+        json.dump(index, f, indent=2)
+
+
+def list_templates():
+    index = load_index()
+    if not index:
+        print("No templates available.")
+        print("Create one: neuros-template save <name> <directory>")
+        return
+    print(f"{'Name':<25} {'Files':<8} {'Created':<12} {'Description'}")
+    print("-" * 70)
+    for t in index:
+        files = t.get("file_count", "?")
+        created = t.get("created", "")[:10]
+        desc = t.get("description", "")[:30]
+        print(f"{t['name']:<25} {str(files):<8} {created:<12} {desc}")
+
+
+def create_from_template(template_name, target_dir):
+    index = load_index()
+    template = None
+    for t in index:
+        if t["name"] == template_name:
+            template = t
+            break
+    if not template:
+        print(f"Template '{template_name}' not found.")
+        return
+
+    src = os.path.join(TEMPLATE_DIR, template_name)
+    if not os.path.isdir(src):
+        print(f"Template source not found: {src}")
+        return
+
+    os.makedirs(target_dir, exist_ok=True)
+    for item in os.listdir(src):
+        s = os.path.join(src, item)
+        d = os.path.join(target_dir, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d)
+        else:
+            shutil.copy2(s, d)
+
+    print(f"Created '{template_name}' in {target_dir}")
+    print(f"  Files copied: {template.get('file_count', '?')}")
+
+
+def save_as_template(name, source_dir):
+    if not os.path.isdir(source_dir):
+        print(f"Not a directory: {source_dir}")
+        return
+
+    dest = os.path.join(TEMPLATE_DIR, name)
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    shutil.copytree(source_dir, dest, ignore=shutil.ignore_patterns(
+        ".git", "__pycache__", "node_modules", ".venv", "venv", "*.pyc"
+    ))
+
+    file_count = sum(1 for _ in os.walk(dest) for f in _[2])
+
+    index = load_index()
+    index = [t for t in index if t["name"] != name]
+    index.append({
+        "name": name,
+        "file_count": file_count,
+        "created": datetime.now().isoformat(),
+        "description": f"User template from {os.path.basename(source_dir)}"
+    })
+    save_index(index)
+    print(f"Template saved: {name} ({file_count} files)")
+
+
+def ai_generate(description, output_dir):
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    prompt = (
+        f"Generate a project scaffold (list all files and their contents) for: "
+        f"{description}\n\nReturn as JSON with keys being filepaths and values "
+        f"being file contents. Include README and any config files.\n\nJSON:"
+    )
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False,
+                "options": {"num_predict": 3000}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        response = json.loads(resp.read().decode()).get("response", "{}")
+        try:
+            files = json.loads(response)
+        except json.JSONDecodeError:
+            # Try to extract JSON from markdown
+            if "```json" in response:
+                json_str = response.split("```json")[1].split("```")[0]
+                files = json.loads(json_str)
+            elif "```" in response:
+                json_str = response.split("```")[1].split("```")[0]
+                files = json.loads(json_str)
+            else:
+                print("AI did not return valid JSON scaffold.")
+                return
+
+        os.makedirs(output_dir, exist_ok=True)
+        for filepath, content in files.items():
+            full_path = os.path.join(output_dir, filepath)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w") as f:
+                f.write(content)
+            print(f"  Created: {filepath}")
+        print(f"\nProject scaffolded in: {output_dir}")
+    except Exception as e:
+        print(f"AI generation error: {e}")
+
+
+def main():
+    ensure_dirs()
+    parser = argparse.ArgumentParser(description="NeurOS Template Engine")
+    sub = parser.add_subparsers(dest="cmd")
+
+    sub.add_parser("list", help="List available templates")
+
+    create_p = sub.add_parser("create", help="Create from template")
+    create_p.add_argument("name", help="Template name")
+    create_p.add_argument("dir", help="Target directory")
+
+    save_p = sub.add_parser("save", help="Save as template")
+    save_p.add_argument("name", help="Template name")
+    save_p.add_argument("dir", help="Source directory")
+
+    rm_p = sub.add_parser("remove", help="Remove a template")
+    rm_p.add_argument("name", help="Template name")
+
+    ai_p = sub.add_parser("ai", help="AI generate template")
+    ai_p.add_argument("description", help="Project description")
+    ai_p.add_argument("--output", "-o", default=".",
+                      help="Output directory (default: current)")
+
+    args = parser.parse_args()
+
+    if args.cmd == "list":
+        list_templates()
+    elif args.cmd == "create":
+        create_from_template(args.name, args.dir)
+    elif args.cmd == "save":
+        save_as_template(args.name, args.dir)
+    elif args.cmd == "remove":
+        index = load_index()
+        index = [t for t in index if t["name"] != args.name]
+        save_index(index)
+        tpl_dir = os.path.join(TEMPLATE_DIR, args.name)
+        if os.path.exists(tpl_dir):
+            shutil.rmtree(tpl_dir)
+        print(f"Removed: {args.name}")
+    elif args.cmd == "ai":
+        ai_generate(args.description, args.output)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

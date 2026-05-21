@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""
+neuros-screenshot — NeurOS Screenshot Tool
+AI-powered screenshot capture with OCR, annotation, and smart organization.
+
+Usage:
+  neuros-screenshot                      Full screen capture
+  neuros-screenshot --window              Capture active window
+  neuros-screenshot --region              Select region
+  neuros-screenshot --ocr                 Screenshot and extract text
+  neuros-screenshot --explain             Screenshot and ask AI to explain
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+import time
+from datetime import datetime
+
+SCREENSHOT_DIR = os.path.expanduser("~/Pictures/NeurOS")
+HISTORY_FILE = os.path.join(SCREENSHOT_DIR, "history.json")
+
+
+def ensure_dir():
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+
+def capture_fullscreen(output=None):
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    output = output or os.path.join(SCREENSHOT_DIR, f"screenshot-{timestamp}.png")
+    subprocess.run(["import", "-window", "root", output], check=True)
+    return output
+
+
+def capture_window(output=None):
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    output = output or os.path.join(SCREENSHOT_DIR, f"window-{timestamp}.png")
+    subprocess.run(["import", output], check=True)
+    return output
+
+
+def capture_region(output=None):
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    output = output or os.path.join(SCREENSHOT_DIR, f"region-{timestamp}.png")
+    subprocess.run(["import", output], check=True)
+    return output
+
+
+def ocr_screenshot(image_path):
+    """Extract text from screenshot using tesseract."""
+    try:
+        result = subprocess.check_output(
+            ["tesseract", image_path, "stdout", "-l", "eng"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        return result.strip()
+    except FileNotFoundError:
+        return "tesseract-ocr not installed. Install: sudo apt install tesseract-ocr"
+    except Exception as e:
+        return f"OCR error: {e}"
+
+
+def ai_explain(image_path):
+    """Ask local LLM to describe/explain the screenshot."""
+    import urllib.request
+
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    # First do OCR, then ask LLM
+    text = ocr_screenshot(image_path)
+    if not text:
+        return "No text found in screenshot."
+
+    prompt = (
+        f"Describe what this screenshot contains based on the extracted text. "
+        f"Identify the application, content type, and key information.\n\n"
+        f"Extracted text:\n{text[:3000]}\n\nDescription:"
+    )
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        return json.loads(resp.read().decode()).get("response", "No description.")
+    except Exception as e:
+        return f"AI explanation error: {e}"
+
+
+def save_to_history(path, description=""):
+    history = []
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE) as f:
+            history = json.load(f)
+    history.append({
+        "path": path,
+        "timestamp": datetime.now().isoformat(),
+        "description": description[:200]
+    })
+    if len(history) > 100:
+        history = history[-100:]
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+def list_history():
+    if not os.path.exists(HISTORY_FILE):
+        print("No screenshots taken yet.")
+        return
+    with open(HISTORY_FILE) as f:
+        history = json.load(f)
+    for i, entry in enumerate(history):
+        ts = entry["timestamp"][:16].replace("T", " ")
+        desc = entry.get("description", "")[:50]
+        print(f"  [{i}] {ts} - {os.path.basename(entry['path'])}")
+        if desc:
+            print(f"       {desc}")
+
+
+def main():
+    ensure_dir()
+    parser = argparse.ArgumentParser(description="NeurOS Screenshot Tool")
+    parser.add_argument("--window", "-w", action="store_true",
+                        help="Capture active window")
+    parser.add_argument("--region", "-r", action="store_true",
+                        help="Select region to capture")
+    parser.add_argument("--output", "-o", help="Output file path")
+    parser.add_argument("--ocr", action="store_true",
+                        help="Extract text from screenshot")
+    parser.add_argument("--explain", "-e", action="store_true",
+                        help="Ask AI to explain the screenshot")
+    parser.add_argument("--list", "-l", action="store_true",
+                        help="List screenshot history")
+    parser.add_argument("--open", help="Open screenshot by index number")
+
+    args = parser.parse_args()
+
+    if args.list:
+        list_history()
+        return
+
+    if args.open is not None:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE) as f:
+                history = json.load(f)
+            idx = int(args.open)
+            if 0 <= idx < len(history):
+                path = history[idx]["path"]
+                if os.path.exists(path):
+                    subprocess.run(["xdg-open", path])
+                else:
+                    print(f"File not found: {path}")
+            else:
+                print(f"Index out of range: {idx}")
+        return
+
+    # Capture
+    if args.window:
+        path = capture_window(args.output)
+    elif args.region:
+        path = capture_region(args.output)
+    else:
+        path = capture_fullscreen(args.output)
+
+    print(f"Screenshot saved: {path}")
+
+    if args.ocr:
+        text = ocr_screenshot(path)
+        print(f"\nOCR text:\n{text}")
+        save_to_history(path, text[:200])
+
+    if args.explain:
+        explanation = ai_explain(path)
+        print(f"\nAI explanation:\n{explanation}")
+        save_to_history(path, explanation[:200])
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""
+neuros-docs — NeurOS Documentation Generator
+Auto-generate READMEs, API docs, and docstrings from code.
+
+Usage:
+  neuros-docs ./src                 Generate docs for a directory
+  neuros-docs ./file.py            Document a single file
+  neuros-docs ./src --readme       Generate README.md for the project
+  neuros-docs ./src --api          Generate API documentation
+  neuros-docs ./src --format md    Output format (md, html, rst)
+  neuros-docs ./src --output docs/ Output directory
+"""
+
+import sys, os, json, subprocess, argparse, textwrap
+from urllib.request import Request, urlopen
+from datetime import datetime
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MAX_FILE_LEN = 6000
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        return f"(LLM unavailable: {e})"
+
+def get_project_files(directory):
+    """Discover all code files in a project."""
+    supported = {'.py','.js','.ts','.jsx','.tsx','.rs','.go','.java','.c','.cpp',
+                 '.h','.hpp','.rb','.php','.sh','.bash','.lua','.sql'}
+    files = []
+    for root, dirs, filenames in os.walk(directory):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
+                   ('node_modules','__pycache__','.git','venv','.venv','dist','build','target')]
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in supported:
+                files.append(os.path.join(root, fname))
+    return files[:50]  # Limit for token budget
+
+def get_file_tree(directory):
+    result = []
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        level = root.replace(directory, '').count(os.sep)
+        indent = '  ' * level
+        result.append(f"{indent}{os.path.basename(root)}/")
+        for f in sorted(files)[:10]:
+            if not f.startswith('.'):
+                result.append(f"{indent}  {f}")
+        if len(files) > 10:
+            result.append(f"{indent}  ... ({len(files)-10} more)")
+    return '\n'.join(result[:80])
+
+def generate_readme(directory, output_dir):
+    tree = get_file_tree(directory)
+    proj_name = os.path.basename(os.path.abspath(directory))
+
+    # Read key files for context
+    key_files = []
+    for fname in ['README.md', 'package.json', 'Cargo.toml', 'setup.py', 'pyproject.toml',
+                  'go.mod', 'Makefile', 'requirements.txt']:
+        fpath = os.path.join(directory, fname)
+        if os.path.exists(fpath):
+            with open(fpath, 'r', errors='replace') as f:
+                key_files.append(f"### {fname}\n```\n{f.read()[:1000]}\n```")
+
+    key_context = '\n\n'.join(key_files) if key_files else "(no config files found)"
+
+    prompt = f"""Generate a comprehensive README.md for this project.
+
+Project name: {proj_name}
+
+File tree:
+{tree}
+
+Key config files:
+{key_context}
+
+The README should include:
+# {proj_name}
+## Overview (what it does, key features)
+## Installation
+## Usage (with code examples)
+## Project Structure
+## Configuration
+## Development (how to contribute, build, test)
+## License
+
+Return the full README in markdown."""
+
+    print(f"🤖 Generating README for {proj_name}...")
+    readme = query_ollama(prompt)
+    os.makedirs(output_dir, exist_ok=True)
+    outpath = os.path.join(output_dir, "README.md")
+    with open(outpath, 'w') as f:
+        f.write(readme)
+    print(f"✅ Saved: {outpath} ({len(readme)} chars)")
+
+def generate_api_docs(directory, output_dir, fmt="md"):
+    files = get_project_files(directory)
+    print(f"📁 Found {len(files)} source files")
+    os.makedirs(output_dir, exist_ok=True)
+
+    for i, fpath in enumerate(files):
+        rel = os.path.relpath(fpath, directory)
+        print(f"  [{i+1}/{len(files)}] {rel}...", end=" ", flush=True)
+
+        try:
+            with open(fpath, 'r', errors='replace') as f:
+                content = f.read()[:MAX_FILE_LEN]
+
+            prompt = f"""Document this code file's public API. List all functions, classes, and their signatures with brief descriptions.
+
+File: {rel}
+Content:
+{content}
+
+Format as markdown:
+## {rel}
+### Functions
+- `func_name(params)` — description
+### Classes
+- `ClassName` — description
+  - `method_name(params)` — description
+
+Be concise. Focus on the public interface."""
+
+            docs = query_ollama(prompt)
+            outname = rel.replace('/', '_').replace('\\', '_').replace('.', '_') + f'.{fmt}'
+            outpath = os.path.join(output_dir, outname)
+            with open(outpath, 'w') as f:
+                f.write(f"# API: {rel}\n\n{docs}")
+            print("✅")
+
+        except Exception as e:
+            print(f"❌ {e}")
+
+    # Generate index
+    index = f"# API Documentation\n\nGenerated: {datetime.now().isoformat()}\n\n"
+    for fpath in files:
+        rel = os.path.relpath(fpath, directory)
+        outname = rel.replace('/', '_').replace('\\', '_').replace('.', '_') + f'.{fmt}'
+        index += f"- [{rel}]({outname})\n"
+
+    with open(os.path.join(output_dir, f"index.{fmt}"), 'w') as f:
+        f.write(index)
+
+    print(f"\n✅ API docs generated in {output_dir}/")
+
+def generate_file_docs(filepath, output_dir, fmt="md"):
+    with open(filepath, 'r', errors='replace') as f:
+        content = f.read()[:MAX_FILE_LEN]
+
+    fname = os.path.basename(filepath)
+
+    prompt = f"""Add comprehensive docstrings and comments to this code.
+Preserve all existing code and logic. Only add documentation.
+
+Code:
+{content}
+
+Return the complete file with documentation added. Use the standard docstring format for the language."""
+
+    print(f"🤖 Adding docs to {fname}...")
+    documented = query_ollama(prompt)
+
+    os.makedirs(output_dir, exist_ok=True)
+    outname = fname + f".documented{os.path.splitext(fname)[1]}"
+    outpath = os.path.join(output_dir, outname)
+    with open(outpath, 'w') as f:
+        # Try to strip markdown fences
+        clean = documented
+        if clean.startswith("```"):
+            lines = clean.split('\n')
+            clean = '\n'.join(l for l in lines if not l.startswith("```"))
+        f.write(clean)
+    print(f"✅ Saved: {outpath}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Documentation Generator")
+    parser.add_argument("target", help="File or directory to document")
+    parser.add_argument("--readme", action="store_true", help="Generate README.md")
+    parser.add_argument("--api", action="store_true", help="Generate API documentation")
+    parser.add_argument("--format", "-f", default="md", choices=["md", "html", "rst"])
+    parser.add_argument("--output", "-o", default="./docs", help="Output directory")
+
+    args = parser.parse_args()
+    target = os.path.abspath(args.target)
+
+    if args.readme:
+        generate_readme(target, args.output)
+    elif args.api:
+        generate_api_docs(target, args.output, args.format)
+    elif os.path.isfile(target):
+        generate_file_docs(target, args.output, args.format)
+    elif os.path.isdir(target):
+        generate_api_docs(target, args.output, args.format)
+    else:
+        print(f"Error: {target} not found.")
+
+if __name__ == "__main__":
+    main()

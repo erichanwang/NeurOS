@@ -97,8 +97,8 @@ check_executable "config/includes.chroot/usr/local/bin/neuros-welcome" "neuros-w
 check_content "config/includes.chroot/usr/local/bin/neuros-welcome" "Gtk.Window" "welcome: GTK window"
 
 echo ""
-echo "--- New AI Tools ---"
-NEW_TOOLS=(
+echo "--- Core Tools ---"
+ALL_TOOLS=(
     "neuros-chat"
     "neuros-model"
     "neuros-snippets"
@@ -107,8 +107,46 @@ NEW_TOOLS=(
     "neuros-voice"
     "neuros-speak"
     "neuros-mcp"
+    "neuros-code"
+    "neuros-docs"
+    "neuros-translate"
+    "neuros-shell"
+    "neuros-learn"
+    "neuros-analyze"
+    "neuros-watch"
+    "neuros-daemon"
+    "neuros-knowledge"
+    "neuros-memory"
+    "neuros-summarize"
+    "neuros-brief"
+    "neuros-docker"
+    "neuros-test"
+    "neuros-debug"
+    "neuros-sql"
+    "neuros-network"
+    "neuros-security"
+    "neuros-image"
+    "neuros-workflow"
+    "neuros-pipe"
+    "neuros-batch"
+    "neuros-notify"
+    "neuros-schedule"
+    "neuros-backup"
+    "neuros-profile"
+    "neuros-lint"
+    "neuros-api"
+    "neuros-firewall"
+    "neuros-screenshot"
+    "neuros-ocr"
+    "neuros-template"
+    "neuros-bench"
+    "neuros-health"
+    "neuros-config"
+    "neuros-fix"
+    "neuros-refactor"
+    "neuros-scan"
 )
-for tool in "${NEW_TOOLS[@]}"; do
+for tool in "${ALL_TOOLS[@]}"; do
     TOOL_PATH="config/includes.chroot/usr/local/bin/$tool"
     if [[ -f "$TOOL_PATH" ]]; then
         check_exists "$TOOL_PATH" "$tool"
@@ -118,6 +156,11 @@ done
 
 check_executable "config/includes.chroot/usr/local/bin/neuros-firstboot" "neuros-firstboot"
 check_content "config/includes.chroot/usr/local/bin/neuros-firstboot" "MARKER" "firstboot: done marker"
+
+# Check zshrc has new aliases
+check_content "config/includes.chroot/etc/skel/.zshrc" "nfix" "zshrc: nfix alias"
+check_content "config/includes.chroot/etc/skel/.zshrc" "nhealth" "zshrc: nhealth alias"
+check_content "config/includes.chroot/etc/skel/.zshrc" "nconfig" "zshrc: nconfig alias"
 
 # === Systemd Services ===
 echo ""

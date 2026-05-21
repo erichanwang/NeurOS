@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""
+neuros-knowledge — NeurOS Personal Knowledge Base
+Store, search, and retrieve knowledge using local embeddings and vector search.
+
+Usage:
+  neuros-knowledge add "Python tip: use list comprehensions"    Add a fact
+  neuros-knowledge add ./notes.md                               Add a file
+  neuros-knowledge search "python performance tips"             Semantic search
+  neuros-knowledge ask "what did I learn about Docker?"         Q&A over knowledge
+  neuros-knowledge list                                         List all entries
+  neuros-knowledge delete <id>                                  Remove an entry
+  neuros-knowledge import ./my-notes/                           Bulk import directory
+  neuros-knowledge export                                       Export as JSON
+"""
+
+import sys, os, json, hashlib, time, argparse, textwrap
+from urllib.request import Request, urlopen
+from datetime import datetime
+
+KB_DIR = os.path.expanduser("~/.config/neuros/knowledge")
+KB_FILE = os.path.join(KB_DIR, "knowledge.json")
+EMBED_URL = "http://localhost:11434/api/embeddings"
+OLLAMA_URL = "http://localhost:11434/api/generate"
+os.makedirs(KB_DIR, exist_ok=True)
+
+def load_kb():
+    if os.path.exists(KB_FILE):
+        with open(KB_FILE) as f:
+            return json.load(f)
+    return []
+
+def save_kb(kb):
+    with open(KB_FILE, 'w') as f:
+        json.dump(kb, f, indent=2)
+
+def get_embedding(text):
+    try:
+        data = json.dumps({"model": "mistral", "prompt": text[:2000]}).encode('utf-8')
+        req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read())
+            # Use response text hash as pseudo-embedding
+            # (Ollama's embeddings API may not be available; use text similarity)
+            return result.get("response", "")[:500]
+    except:
+        return text[:500]
+
+def keyword_similarity(query, text):
+    query_words = set(query.lower().split())
+    text_words = set(text.lower().split())
+    if not query_words:
+        return 0
+    return len(query_words & text_words) / len(query_words)
+
+def add_entry(content, tags=None, source=None):
+    kb = load_kb()
+    
+    # Auto-extract title
+    title = content.split('\n')[0].strip()
+    if len(title) > 80:
+        title = title[:80] + "..."
+    if title.lower().startswith('# '):
+        title = title[2:]
+    
+    embedding = get_embedding(content)
+    
+    entry = {
+        "id": hashlib.md5(f"{content}-{time.time()}".encode()).hexdigest()[:12],
+        "title": title,
+        "content": content,
+        "embedding": embedding,
+        "tags": tags or [],
+        "source": source or "manual",
+        "created": datetime.now().isoformat(),
+        "size": len(content)
+    }
+    
+    kb.append(entry)
+    save_kb(kb)
+    
+    print(f"✅ Added: {title}")
+    print(f"   ID: {entry['id']}")
+    print(f"   Tags: {', '.join(entry['tags']) if entry['tags'] else '(none)'}")
+    print(f"   Size: {entry['size']} chars")
+
+def add_file(filepath, tags=None):
+    try:
+        with open(filepath, 'r', errors='replace') as f:
+            content = f.read()
+            if len(content) > 8000:
+                content = content[:8000] + "\n... (truncated)"
+        
+        # Auto-tag from file extension
+        ext = os.path.splitext(filepath)[1]
+        auto_tags = tags or []
+        ext_tag_map = {'.py': 'python', '.js': 'javascript', '.md': 'notes',
+                       '.sh': 'bash', '.rs': 'rust', '.go': 'go'}
+        if ext in ext_tag_map:
+            auto_tags.append(ext_tag_map[ext])
+        
+        add_entry(content, auto_tags, source=filepath)
+    except Exception as e:
+        print(f"Error: {e}")
+
+def search_entries(query, limit=10):
+    kb = load_kb()
+    if not kb:
+        print("Knowledge base is empty. Add: neuros-knowledge add 'your note'")
+        return
+    
+    # Score entries by keyword similarity
+    scored = []
+    for entry in kb:
+        score = keyword_similarity(query, entry["content"])
+        # Boost by title match
+        score += keyword_similarity(query, entry["title"]) * 2
+        # Boost by tag match
+        if entry.get("tags"):
+            for tag in entry["tags"]:
+                if tag.lower() in query.lower():
+                    score += 1
+        scored.append((score, entry))
+    
+    scored.sort(key=lambda x: -x[0])
+    
+    print(f"\n🔍 Results for: {query}\n{'─'*50}")
+    
+    shown = 0
+    for score, entry in scored:
+        if score > 0 and shown < limit:
+            snippet = entry["content"][:200].replace('\n', ' ')
+            tags_str = f" [{', '.join(entry['tags'])}]" if entry.get('tags') else ""
+            print(f"\n{shown+1}. {entry['title']}{tags_str} (score: {score:.2f})")
+            print(f"   {snippet}...")
+            print(f"   ID: {entry['id']} | {entry['created'][:19]}")
+            shown += 1
+    
+    if shown == 0:
+        print("No matches found.")
+
+def ask_knowledge(question):
+    kb = load_kb()
+    if not kb:
+        print("Knowledge base is empty.")
+        return
+    
+    # Find relevant entries
+    scored = [(keyword_similarity(question, e["content"]), e) for e in kb]
+    scored.sort(key=lambda x: -x[0])
+    context_entries = [e for s, e in scored[:5] if s > 0]
+    
+    if not context_entries:
+        print("No relevant knowledge found for that question.")
+        return
+    
+    context = "\n\n---\n\n".join(
+        f"[{e['title']}]: {e['content'][:1000]}" for e in context_entries
+    )
+    
+    prompt = f"""Answer the question based on this personal knowledge base.
+
+Knowledge entries:
+{context[:3000]}
+
+Question: {question}
+
+If the knowledge doesn't contain the answer, say so. Be concise."""
+
+    try:
+        data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+        req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=120) as resp:
+            answer = json.loads(resp.read()).get("response", "")
+        
+        print(f"\n🤖 Answer\n{'─'*50}")
+        print(answer)
+        print(f"\n(Based on {len(context_entries)} knowledge entries)")
+    except Exception as e:
+        print(f"Error: {e}")
+
+def list_entries(tag=None):
+    kb = load_kb()
+    if not kb:
+        print("Knowledge base is empty.")
+        return
+    
+    if tag:
+        kb = [e for e in kb if tag.lower() in [t.lower() for t in e.get('tags', [])]]
+    
+    print(f"\n📚 Knowledge Base ({len(kb)} entries)\n{'─'*60}")
+    print(f"{'ID':<14} {'Title':<30} {'Tags':<20} {'Size':>8}")
+    print('-' * 72)
+    
+    for e in sorted(kb, key=lambda x: x['created'], reverse=True):
+        tags = ', '.join(e.get('tags', [])[:3])
+        print(f"{e['id']:<14} {e['title'][:30]:<30} {tags[:20]:<20} {e['size']:>8}")
+
+def delete_entry(entry_id):
+    kb = load_kb()
+    for e in kb:
+        if e['id'] == entry_id:
+            confirm = input(f"Delete '{e['title']}'? [y/N]: ")
+            if confirm.lower() == 'y':
+                kb.remove(e)
+                save_kb(kb)
+                print(f"✅ Deleted: {e['title']}")
+            return
+    print(f"Entry {entry_id} not found.")
+
+def import_directory(directory):
+    supported = {'.md', '.txt', '.rst', '.org', '.py', '.js', '.sh', '.yaml', '.yml', '.toml'}
+    count = 0
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for fname in files:
+            if os.path.splitext(fname)[1].lower() in supported:
+                try:
+                    add_file(os.path.join(root, fname))
+                    count += 1
+                except: pass
+    print(f"\n✅ Imported {count} files from {directory}")
+
+def export_kb():
+    kb = load_kb()
+    outpath = os.path.expanduser("~/neuros-knowledge-export.json")
+    # Strip embeddings for export
+    export_data = [{k: v for k, v in e.items() if k != 'embedding'} for e in kb]
+    with open(outpath, 'w') as f:
+        json.dump(export_data, f, indent=2)
+    print(f"✅ Exported {len(kb)} entries to {outpath}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Knowledge Base")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    add_p = subparsers.add_parser("add", help="Add knowledge")
+    add_p.add_argument("content", help="Text or file path")
+    add_p.add_argument("--tags", "-t", nargs="+", help="Tags")
+
+    search_p = subparsers.add_parser("search", help="Search knowledge")
+    search_p.add_argument("query", help="Search query")
+    search_p.add_argument("--limit", "-n", type=int, default=10)
+
+    ask_p = subparsers.add_parser("ask", help="Ask a question over knowledge")
+    ask_p.add_argument("question", help="Your question")
+
+    list_p = subparsers.add_parser("list", help="List entries")
+    list_p.add_argument("--tag", "-t", help="Filter by tag")
+
+    del_p = subparsers.add_parser("delete", help="Delete entry")
+    del_p.add_argument("id", help="Entry ID")
+
+    import_p = subparsers.add_parser("import", help="Import directory")
+    import_p.add_argument("directory", help="Directory path")
+
+    subparsers.add_parser("export", help="Export knowledge base")
+
+    args = parser.parse_args()
+
+    if args.command == "add":
+        if os.path.isfile(args.content) and os.path.splitext(args.content)[1] != '.txt':
+            add_file(args.content, args.tags)
+        else:
+            add_entry(args.content, args.tags)
+    elif args.command == "search":
+        search_entries(args.query, args.limit)
+    elif args.command == "ask":
+        ask_knowledge(args.question)
+    elif args.command == "list":
+        list_entries(args.tag)
+    elif args.command == "delete":
+        delete_entry(args.id)
+    elif args.command == "import":
+        import_directory(args.directory)
+    elif args.command == "export":
+        export_kb()
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

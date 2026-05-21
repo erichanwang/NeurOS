@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""
+neuros-health — NeurOS Health Monitor
+Comprehensive system health dashboard with AI anomaly detection.
+
+Usage:
+  neuros-health                        Interactive health dashboard
+  neuros-health --once                  Single health check
+  neuros-health --watch [interval]       Continuous monitoring
+  neuros-health --alert <threshold>      Set alert thresholds
+"""
+
+import sys
+import os
+import json
+import time
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+HEALTH_DIR = os.path.expanduser("~/.local/share/neuros/health")
+HISTORY_FILE = os.path.join(HEALTH_DIR, "health_history.json")
+
+
+def ensure_dirs():
+    os.makedirs(HEALTH_DIR, exist_ok=True)
+
+
+def get_cpu_usage():
+    try:
+        idle = float(subprocess.check_output(
+            "top -bn1 | grep 'Cpu' | awk '{print $8}'", shell=True, text=True
+        ).strip())
+        return round(100 - idle, 1)
+    except Exception:
+        return 0.0
+
+
+def get_memory_usage():
+    try:
+        out = subprocess.check_output(
+            "free | grep Mem | awk '{print $3,$2}'", shell=True, text=True
+        ).strip().split()
+        used = int(out[0])
+        total = int(out[1])
+        return round(used / total * 100, 1), used, total
+    except Exception:
+        return 0.0, 0, 0
+
+
+def get_disk_usage():
+    try:
+        out = subprocess.check_output(
+            "df / | tail -1 | awk '{print $5,$3,$2}'", shell=True, text=True
+        ).strip().split()
+        pct = float(out[0].replace("%", ""))
+        return pct, out[1], out[2]
+    except Exception:
+        return 0.0, "?", "?"
+
+
+def get_uptime():
+    try:
+        return subprocess.check_output("uptime -p", shell=True, text=True).strip()
+    except Exception:
+        return "unknown"
+
+
+def get_load_avg():
+    try:
+        return subprocess.check_output(
+            "cat /proc/loadavg | awk '{print $1,$2,$3}'", shell=True, text=True
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def get_temperature():
+    try:
+        return subprocess.check_output(
+            "sensors 2>/dev/null | grep -E 'Core|temp1' | head -3",
+            shell=True, text=True
+        ).strip() or "N/A"
+    except Exception:
+        return "N/A"
+
+
+def get_network_stats():
+    try:
+        rx = subprocess.check_output(
+            "cat /sys/class/net/$(ip route show default | awk '/default/ {print $5}')/statistics/rx_bytes",
+            shell=True, text=True
+        ).strip()
+        tx = subprocess.check_output(
+            "cat /sys/class/net/$(ip route show default | awk '/default/ {print $5}')/statistics/tx_bytes",
+            shell=True, text=True
+        ).strip()
+        return int(rx), int(tx)
+    except Exception:
+        return 0, 0
+
+
+def get_top_processes(n=5):
+    try:
+        return subprocess.check_output(
+            f"ps aux --sort=-%cpu | head -{n+1} | tail -{n} | "
+            "awk '{printf \"%s|%.1f|%.1f\\n\", $11, $3, $4}'",
+            shell=True, text=True
+        ).strip()
+    except Exception:
+        return ""
+
+
+def get_docker_status():
+    try:
+        running = subprocess.check_output(
+            "docker ps --format '{{.Names}}' 2>/dev/null | wc -l",
+            shell=True, text=True
+        ).strip()
+        total = subprocess.check_output(
+            "docker ps -a --format '{{.Names}}' 2>/dev/null | wc -l",
+            shell=True, text=True
+        ).strip()
+        return int(running), int(total)
+    except Exception:
+        return 0, 0
+
+
+def ai_health_check(metrics):
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    prompt = (
+        f"Analyze these system metrics and identify any potential issues. "
+        f"If everything looks normal, say 'All systems healthy'. "
+        f"Otherwise, list specific concerns and recommendations.\n\n"
+        f"Metrics:\n{json.dumps(metrics, indent=2)}\n\nAnalysis:"
+    )
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        return json.loads(resp.read().decode()).get("response", "AI unavailable")
+    except Exception:
+        return "AI health check unavailable"
+
+
+def collect_metrics():
+    cpu = get_cpu_usage()
+    mem_pct, mem_used, mem_total = get_memory_usage()
+    disk_pct, disk_used, disk_total = get_disk_usage()
+    rx, tx = get_network_stats()
+    docker_running, docker_total = get_docker_status()
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "cpu_percent": cpu,
+        "memory_percent": mem_pct,
+        "disk_percent": disk_pct,
+        "load_avg": get_load_avg(),
+        "uptime": get_uptime(),
+        "temperature": get_temperature(),
+        "network_rx_bytes": rx,
+        "network_tx_bytes": tx,
+        "docker_running": docker_running,
+        "top_processes": get_top_processes(5)
+    }
+
+
+def status_icon(value, warn=80, crit=90):
+    if value >= crit:
+        return "🔴"
+    elif value >= warn:
+        return "🟡"
+    return "🟢"
+
+
+def display_health(metrics, ai_analysis=None):
+    print("╔══════════════════════════════════════════╗")
+    print("║       🧠 NeurOS Health Dashboard        ║")
+    print("╠══════════════════════════════════════════╣")
+    cpu = metrics["cpu_percent"]
+    mem = metrics["memory_percent"]
+    disk = metrics["disk_percent"]
+    print(f"║ CPU:  {status_icon(cpu)} {cpu:>5.1f}%                     ║")
+    print(f"║ RAM:  {status_icon(mem)} {mem:>5.1f}%                     ║")
+    print(f"║ Disk: {status_icon(disk)}{disk:>5.1f}%                     ║")
+    print(f"║ Load: {metrics['load_avg']:<24}║")
+    print(f"║ Up:   {metrics['uptime']:<24}║")
+    if metrics.get("docker_running", 0) > 0:
+        print(f"║ Docker: {metrics['docker_running']} running                ║")
+    if metrics.get("top_processes"):
+        top = metrics["top_processes"].splitlines()[:3]
+        for i, proc in enumerate(top):
+            parts = proc.split("|")
+            if len(parts) >= 3:
+                name = os.path.basename(parts[0])[:20]
+                print(f"║ Top{i+1}: {name:<20} CPU{parts[1]:>6}%║")
+    print("╚══════════════════════════════════════════╝")
+    if ai_analysis:
+        print(f"\nAI Analysis: {ai_analysis}")
+
+
+def save_metrics(metrics):
+    history = []
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE) as f:
+            history = json.load(f)
+    history.append(metrics)
+    if len(history) > 1000:
+        history = history[-1000:]
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f)
+
+
+def watch_health(interval=5):
+    print("NeurOS Health Monitor (Ctrl+C to stop)")
+    try:
+        while True:
+            metrics = collect_metrics()
+            display_health(metrics)
+            save_metrics(metrics)
+            time.sleep(interval)
+            subprocess.run(["clear"])
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped.")
+
+
+def main():
+    ensure_dirs()
+    parser = argparse.ArgumentParser(description="NeurOS Health Monitor")
+    parser.add_argument("--once", "-1", action="store_true",
+                        help="Single health check")
+    parser.add_argument("--watch", "-w", type=int, nargs="?", const=5,
+                        help="Watch mode with interval (default: 5s)")
+    parser.add_argument("--ai", "-a", action="store_true",
+                        help="Include AI analysis")
+
+    args = parser.parse_args()
+
+    if args.watch is not None:
+        watch_health(args.watch)
+    else:
+        metrics = collect_metrics()
+        ai_analysis = None
+        if args.ai:
+            print("Running AI health analysis...")
+            ai_analysis = ai_health_check(metrics)
+        display_health(metrics, ai_analysis)
+        save_metrics(metrics)
+
+
+if __name__ == "__main__":
+    main()

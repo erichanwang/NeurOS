@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+neuros-watch — NeurOS File Watcher
+Watch files/directories and trigger AI actions on changes.
+
+Usage:
+  neuros-watch ./src                    Watch directory, auto-document new files
+  neuros-watch --lint ./src             Auto-lint on file changes
+  neuros-watch --test ./src             Auto-run tests on changes
+  neuros-watch --review ./src           AI code review on each commit
+  neuros-watch --translate ./docs --to es  Auto-translate changed files
+  neuros-watch --command "echo changed" --path ./src   Run custom command
+"""
+
+import sys, os, json, subprocess, argparse, time, threading, fnmatch
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+WATCH_DIR = os.path.expanduser("~/.config/neuros/watcher")
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except:
+        return None
+
+class FileWatcher:
+    def __init__(self, path, action, pattern="*", debounce=2.0):
+        self.path = os.path.abspath(path)
+        self.action = action
+        self.pattern = pattern
+        self.debounce = debounce
+        self.last_mtimes = {}
+        self.running = True
+
+    def scan(self):
+        """Scan directory and return set of files."""
+        files = set()
+        if os.path.isfile(self.path):
+            files.add(self.path)
+        else:
+            for root, dirs, filenames in os.walk(self.path):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
+                          ('node_modules', '__pycache__', '.git', 'dist', 'build')]
+                for fname in filenames:
+                    if fnmatch.fnmatch(fname, self.pattern):
+                        files.add(os.path.join(root, fname))
+        return files
+
+    def get_changed(self):
+        """Find files that have been modified since last check."""
+        changed = []
+        current = self.scan()
+        for f in current:
+            try:
+                mtime = os.path.getmtime(f)
+                if f not in self.last_mtimes or self.last_mtimes[f] < mtime:
+                    changed.append((f, mtime))
+                    self.last_mtimes[f] = mtime
+            except OSError: pass
+        # Remove deleted files
+        for f in list(self.last_mtimes.keys()):
+            if f not in current:
+                del self.last_mtimes[f]
+        return changed
+
+    def on_change(self, filepath, action):
+        if action == "lint":
+            self.lint_file(filepath)
+        elif action == "test":
+            self.run_tests(filepath)
+        elif action == "review":
+            self.review_file(filepath)
+        elif action == "document":
+            self.document_file(filepath)
+        elif action == "translate":
+            self.translate_file(filepath)
+        elif action == "format":
+            self.format_file(filepath)
+
+    def lint_file(self, filepath):
+        ext = os.path.splitext(filepath)[1]
+        cmd = None
+        if ext == '.py':
+            cmd = f"python3 -m py_compile {filepath} && echo OK"
+        elif ext in ('.js', '.jsx', '.ts', '.tsx'):
+            cmd = f"npx eslint {filepath} 2>/dev/null || echo lint-not-installed"
+        elif ext == '.rs':
+            cmd = f"cargo check --manifest-path {filepath}/Cargo.toml 2>/dev/null || rustc --edition 2021 {filepath} --check 2>&1 | head -5"
+        elif ext == '.go':
+            cmd = f"go vet {filepath} 2>/dev/null"
+
+        if cmd:
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+            output = result.stdout.strip() or result.stderr.strip()
+            if output:
+                rel = os.path.relpath(filepath, self.path)
+                print(f"  🔍 {rel}: {output[:200]}")
+
+    def review_file(self, filepath):
+        try:
+            with open(filepath, 'r', errors='replace') as f:
+                content = f.read()[:4000]
+            prompt = f"Brief code review of this file. Find 1-3 most important issues.\n\n{content}\n\nBe extremely concise."
+            result = query_ollama(prompt)
+            if result:
+                rel = os.path.relpath(filepath, self.path)
+                print(f"\n  📋 Review: {rel}")
+                print(f"  {'─'*40}")
+                for line in result.strip().split('\n')[:5]:
+                    print(f"  {line}")
+                print()
+        except: pass
+
+    def document_file(self, filepath):
+        try:
+            with open(filepath, 'r', errors='replace') as f:
+                content = f.read()[:3000]
+            prompt = f"Add brief docstring to this file. Return ONLY the first 5 lines of the file with docstring added.\n\n{content}"
+            result = query_ollama(prompt)
+            if result:
+                rel = os.path.relpath(filepath, self.path)
+                print(f"  📝 {rel}: documentation suggested")
+        except: pass
+
+    def translate_file(self, filepath):
+        # Implemented in neuros-translate, throttle here
+        pass
+
+    def format_file(self, filepath):
+        ext = os.path.splitext(filepath)[1]
+        if ext == '.py':
+            subprocess.run(["python3", "-m", "black", filepath],
+                         capture_output=True, timeout=30)
+            subprocess.run(["python3", "-m", "isort", filepath],
+                         capture_output=True, timeout=30)
+
+    def run_tests(self, filepath):
+        ext = os.path.splitext(filepath)[1]
+        if ext == '.py':
+            result = subprocess.run(
+                ["python3", "-m", "pytest", filepath, "-q"],
+                capture_output=True, text=True, timeout=60
+            )
+            if result.returncode == 0:
+                print(f"  ✅ Tests passed: {os.path.basename(filepath)}")
+            else:
+                print(f"  ❌ Tests failed: {os.path.basename(filepath)}")
+                print(f"  {result.stdout.strip()[:200]}")
+
+    def run(self):
+        print(f"👁️  Watching: {self.path}")
+        print(f"   Action: {self.action}")
+        print(f"   Pattern: {self.pattern}")
+        print(f"   Press Ctrl+C to stop.\n")
+
+        # Initial scan
+        self.scan()
+
+        while self.running:
+            try:
+                changed = self.get_changed()
+                for filepath, mtime in changed:
+                    rel = os.path.relpath(filepath, self.path)
+                    print(f"  📄 Changed: {rel}")
+                    self.on_change(filepath, self.action)
+
+                time.sleep(self.debounce)
+            except KeyboardInterrupt:
+                print("\n👋 Watcher stopped.")
+                break
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS File Watcher")
+    parser.add_argument("path", nargs="?", default=".", help="Path to watch")
+    parser.add_argument("--lint", action="store_true", help="Auto-lint on changes")
+    parser.add_argument("--test", action="store_true", help="Auto-run tests on changes")
+    parser.add_argument("--review", action="store_true", help="AI code review on changes")
+    parser.add_argument("--document", action="store_true", help="Auto-document changed files")
+    parser.add_argument("--pattern", "-p", default="*", help="File pattern (default: *)")
+    parser.add_argument("--debounce", "-d", type=float, default=2.0, help="Debounce seconds")
+
+    args = parser.parse_args()
+
+    if args.lint: action = "lint"
+    elif args.test: action = "test"
+    elif args.review: action = "review"
+    elif args.document: action = "document"
+    else:
+        print("Select an action: --lint, --test, --review, or --document")
+        return
+
+    watcher = FileWatcher(args.path, action, args.pattern, args.debounce)
+    watcher.run()
+
+if __name__ == "__main__":
+    main()

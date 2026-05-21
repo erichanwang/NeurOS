@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""
+neuros-firewall — NeurOS Firewall Manager
+AI-powered UFW management with smart rule suggestions and audit.
+
+Usage:
+  neuros-firewall status                 Show firewall status
+  neuros-firewall allow 8080             Allow port
+  neuros-firewall deny 22                Deny port
+  neuros-firewall audit                  Audit and suggest improvements
+  neuros-firewall profile web-server     Apply a predefined profile
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+
+PROFILES = {
+    "web-server": {
+        "allow": [80, 443],
+        "deny": [22, 3306, 5432, 6379, 27017],
+        "description": "Public web server (HTTP/HTTPS only)"
+    },
+    "development": {
+        "allow": [22, 3000, 4000, 5000, 8000, 8080, 11434, 11435],
+        "deny": [],
+        "description": "Dev workstation with common dev ports"
+    },
+    "minimal": {
+        "allow": [22],
+        "deny": [],
+        "description": "Minimal access (SSH only)"
+    },
+    "stealth": {
+        "allow": [],
+        "deny": [],
+        "default_deny": True,
+        "description": "Deny all incoming, no open ports"
+    }
+}
+
+
+def run_sudo(cmd_list):
+    try:
+        return subprocess.check_output(
+            ["sudo"] + cmd_list, text=True, stderr=subprocess.STDOUT
+        ).strip()
+    except subprocess.CalledProcessError as e:
+        return e.output.strip()
+
+
+def get_status():
+    return run_sudo(["ufw", "status", "verbose"])
+
+
+def allow_port(port, proto="tcp", comment=""):
+    rule = f"{port}/{proto}"
+    cmd = ["ufw", "allow", rule]
+    if comment:
+        cmd.extend(["comment", comment])
+    result = run_sudo(cmd)
+    print(result)
+
+
+def deny_port(port, proto="tcp"):
+    rule = f"{port}/{proto}"
+    result = run_sudo(["ufw", "deny", rule])
+    print(result)
+
+
+def allow_service(service):
+    result = run_sudo(["ufw", "allow", service])
+    print(result)
+
+
+def apply_profile(name):
+    profile = PROFILES.get(name)
+    if not profile:
+        print(f"Unknown profile: {name}")
+        print(f"Available: {', '.join(PROFILES.keys())}")
+        return
+
+    print(f"Applying profile: {name} - {profile['description']}")
+    if profile.get("default_deny"):
+        print(run_sudo(["ufw", "default", "deny", "incoming"]))
+    for port in profile.get("allow", []):
+        allow_port(port)
+    for port in profile.get("deny", []):
+        deny_port(port)
+    print(f"Profile '{name}' applied.")
+
+
+def ai_audit():
+    """Use AI to audit firewall rules and suggest improvements."""
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    status = get_status()
+    listening = subprocess.check_output(
+        "ss -tlnp 2>/dev/null | grep LISTEN", shell=True, text=True
+    )
+
+    prompt = (
+        f"Audit these firewall rules and listening ports. Suggest 3-5 specific "
+        f"improvements for security hardening. Be concise.\n\n"
+        f"UFW Status:\n{status}\n\nListening ports:\n{listening}\n\n"
+        f"Audit recommendations:"
+    )
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        data = json.loads(resp.read().decode())
+        print("AI Firewall Audit:\n")
+        print(data.get("response", "No recommendations."))
+    except Exception as e:
+        print(f"Audit error: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Firewall Manager")
+    sub = parser.add_subparsers(dest="cmd")
+
+    sub.add_parser("status", help="Show firewall status")
+    sub.add_parser("audit", help="AI audit of firewall rules")
+
+    allow_p = sub.add_parser("allow", help="Allow a port or service")
+    allow_p.add_argument("port", help="Port number or service name")
+    allow_p.add_argument("--proto", "-p", default="tcp", help="Protocol")
+
+    deny_p = sub.add_parser("deny", help="Deny a port or service")
+    deny_p.add_argument("port", help="Port number or service name")
+
+    profile_p = sub.add_parser("profile", help="Apply a firewall profile")
+    profile_p.add_argument("name", choices=list(PROFILES.keys()),
+                           help="Profile name")
+
+    enable_p = sub.add_parser("enable", help="Enable firewall")
+    disable_p = sub.add_parser("disable", help="Disable firewall")
+    reset_p = sub.add_parser("reset", help="Reset all rules")
+
+    args = parser.parse_args()
+
+    if args.cmd == "status":
+        print(get_status())
+    elif args.cmd == "audit":
+        ai_audit()
+    elif args.cmd == "allow":
+        allow_port(args.port, args.proto)
+    elif args.cmd == "deny":
+        deny_port(args.port)
+    elif args.cmd == "profile":
+        apply_profile(args.name)
+    elif args.cmd == "enable":
+        print(run_sudo(["ufw", "--force", "enable"]))
+    elif args.cmd == "disable":
+        print(run_sudo(["ufw", "disable"]))
+    elif args.cmd == "reset":
+        print(run_sudo(["ufw", "--force", "reset"]))
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

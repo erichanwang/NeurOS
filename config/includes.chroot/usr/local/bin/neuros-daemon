@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""
+neuros-daemon — NeurOS Background AI Monitor
+Monitors system health, provides AI insights, and sends desktop notifications.
+
+Usage:
+  neuros-daemon start                    Start background monitoring
+  neuros-daemon stop                     Stop the daemon
+  neuros-daemon status                   Show daemon status
+  neuros-daemon config                   Configure monitoring thresholds
+"""
+
+import sys, os, json, subprocess, time, threading, signal, argparse
+from urllib.request import Request, urlopen
+from datetime import datetime, timedelta
+
+DAEMON_DIR = os.path.expanduser("~/.config/neuros/daemon")
+PID_FILE = os.path.join(DAEMON_DIR, "daemon.pid")
+STATE_FILE = os.path.join(DAEMON_DIR, "state.json")
+LOG_FILE = os.path.join(DAEMON_DIR, "insights.log")
+CONFIG_FILE = os.path.join(DAEMON_DIR, "config.json")
+OLLAMA_URL = "http://localhost:11434/api/generate"
+os.makedirs(DAEMON_DIR, exist_ok=True)
+
+DEFAULT_CONFIG = {
+    "check_interval": 60,
+    "insight_interval": 300,
+    "ram_warning_percent": 85,
+    "disk_warning_percent": 90,
+    "cpu_warning_percent": 80,
+    "ollama_restart": True,
+    "notify": True,
+    "log_retention_days": 7,
+}
+
+def get_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            return {**DEFAULT_CONFIG, **json.load(f)}
+    return DEFAULT_CONFIG
+
+def get_system_stats():
+    stats = {"timestamp": datetime.now().isoformat()}
+
+    # CPU
+    try:
+        with open("/proc/loadavg") as f:
+            load = f.read().split()
+            stats["cpu_load_1m"] = float(load[0])
+            stats["cpu_load_5m"] = float(load[1])
+    except: pass
+
+    # Memory
+    try:
+        result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n'):
+            if "Mem:" in line:
+                parts = line.split()
+                stats["ram_total_mb"] = int(parts[1])
+                stats["ram_used_mb"] = int(parts[2])
+                stats["ram_percent"] = round(int(parts[2]) / int(parts[1]) * 100, 1)
+    except: pass
+
+    # Disk
+    try:
+        result = subprocess.run(["df", "-m", "/"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n')[1:]:
+            parts = line.split()
+            if len(parts) >= 5:
+                stats["disk_total_mb"] = int(parts[1])
+                stats["disk_used_mb"] = int(parts[2])
+                stats["disk_percent"] = int(parts[4].rstrip('%'))
+    except: pass
+
+    # Temperature
+    try:
+        for i in range(5):
+            tfile = f"/sys/class/thermal/thermal_zone{i}/temp"
+            if os.path.exists(tfile):
+                with open(tfile) as f:
+                    temp = int(f.read().strip()) / 1000
+                    stats[f"temp_{i}_c"] = round(temp, 1)
+    except: pass
+
+    # Network
+    try:
+        result = subprocess.run(["ss", "-tunap"], capture_output=True, text=True, timeout=5)
+        stats["network_connections"] = len([l for l in result.stdout.split('\n') if l.strip()]) - 1
+    except: pass
+
+    # Ollama
+    try:
+        req = Request("http://localhost:11434/api/tags")
+        with urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            stats["ollama_running"] = True
+            stats["ollama_models"] = len(data.get("models", []))
+    except:
+        stats["ollama_running"] = False
+
+    # Processes
+    try:
+        result = subprocess.run(["ps", "aux", "--no-headers"], capture_output=True, text=True, timeout=5)
+        stats["total_processes"] = len(result.stdout.strip().split('\n'))
+        zombies = len([l for l in result.stdout.split('\n') if 'Z' in l])
+        stats["zombie_processes"] = zombies
+    except: pass
+
+    return stats
+
+def get_ai_insight(stats_history):
+    last_n = stats_history[-3:]
+    stats_str = json.dumps(last_n, indent=2)
+
+    prompt = f"""You are a system administrator. Review these system stats and provide brief insights.
+
+Stats (last {len(last_n)} readings):
+{stats_str[:2000]}
+
+Provide 2-4 bullet points about:
+- Trends (increasing memory, cpu)
+- Warnings (anything approaching limits)
+- Recommendations
+
+Be extremely concise. 2-3 sentences max."""
+
+    try:
+        data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+        req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except:
+        return None
+
+def send_notification(title, body, urgency="normal"):
+    try:
+        cmd = ["notify-send", "-a", "NeurOS", "-u", urgency, title, body]
+        subprocess.run(cmd, timeout=5)
+    except: pass
+
+def check_thresholds(stats, config):
+    alerts = []
+    if stats.get("ram_percent", 0) > config["ram_warning_percent"]:
+        alerts.append(f"⚠️ RAM at {stats['ram_percent']}%")
+    if stats.get("disk_percent", 0) > config["disk_warning_percent"]:
+        alerts.append(f"⚠️ Disk at {stats['disk_percent']}%")
+    if stats.get("cpu_load_5m", 0) > config["cpu_warning_percent"] / 10:
+        alerts.append(f"⚠️ CPU load: {stats['cpu_load_5m']:.1f}")
+
+    # Restart Ollama if down
+    if not stats.get("ollama_running") and config.get("ollama_restart"):
+        alerts.append("🔄 Restarting Ollama...")
+        subprocess.run(["systemctl", "start", "neuros-llm"], capture_output=True)
+
+    return alerts
+
+def daemon_loop():
+    config = get_config()
+    stats_history = []
+    last_insight_time = 0
+    last_check_time = 0
+
+    print(f"🧠 NeurOS Daemon started (PID: {os.getpid()})")
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+    while True:
+        now = time.time()
+
+        # Collect stats
+        if now - last_check_time >= config["check_interval"]:
+            stats = get_system_stats()
+            stats_history.append(stats)
+
+            # Keep only last 100 readings
+            stats_history = stats_history[-100:]
+
+            # Save state
+            with open(STATE_FILE, 'w') as f:
+                json.dump(stats, f, indent=2)
+
+            # Check thresholds
+            alerts = check_thresholds(stats, config)
+            for alert in alerts:
+                log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] {alert}"
+                print(log_entry)
+                with open(LOG_FILE, 'a') as f:
+                    f.write(log_entry + '\n')
+                if config["notify"]:
+                    send_notification("NeurOS Monitor", alert)
+
+            last_check_time = now
+
+        # AI insights
+        if now - last_insight_time >= config["insight_interval"]:
+            if len(stats_history) >= 2:
+                insight = get_ai_insight(stats_history)
+                if insight:
+                    log_entry = f"\n[🤖 AI Insight {datetime.now().strftime('%H:%M:%S')}]\n{insight}\n"
+                    print(log_entry)
+                    with open(LOG_FILE, 'a') as f:
+                        f.write(log_entry)
+            last_insight_time = now
+
+        # Rotate log
+        if os.path.exists(LOG_FILE):
+            log_age = time.time() - os.path.getmtime(LOG_FILE)
+            if log_age > config["log_retention_days"] * 86400:
+                os.rename(LOG_FILE, LOG_FILE + ".old")
+
+        time.sleep(5)
+
+def stop_daemon():
+    if os.path.exists(PID_FILE):
+        with open(PID_FILE) as f:
+            pid = int(f.read().strip())
+        try:
+            os.kill(pid, signal.SIGTERM)
+            os.remove(PID_FILE)
+            print(f"Daemon stopped (PID: {pid})")
+        except ProcessLookupError:
+            os.remove(PID_FILE)
+            print("Daemon was not running.")
+        except Exception as e:
+            print(f"Error stopping daemon: {e}")
+    else:
+        print("No daemon running (no PID file).")
+
+def daemon_status():
+    if os.path.exists(PID_FILE):
+        with open(PID_FILE) as f:
+            pid = f.read().strip()
+        try:
+            os.kill(int(pid), 0)
+            print(f"✅ Daemon running (PID: {pid})")
+
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE) as f:
+                    state = json.load(f)
+                print(f"   RAM: {state.get('ram_percent', '?')}%")
+                print(f"   Disk: {state.get('disk_percent', '?')}%")
+                print(f"   CPU: {state.get('cpu_load_1m', '?')}")
+                print(f"   Ollama: {'🟢' if state.get('ollama_running') else '🔴'}")
+                print(f"   Processes: {state.get('total_processes', '?')}")
+
+            if os.path.exists(LOG_FILE):
+                with open(LOG_FILE) as f:
+                    lines = f.readlines()
+                    for line in lines[-5:]:
+                        print(f"   {line.strip()}")
+
+        except ProcessLookupError:
+            print("❌ Daemon not running (stale PID file)")
+            os.remove(PID_FILE)
+    else:
+        print("❌ Daemon not running")
+
+def configure():
+    config = get_config()
+    print("Configure NeurOS Daemon (leave blank to keep current):\n")
+
+    for key, default in DEFAULT_CONFIG.items():
+        current = config.get(key, default)
+        val = input(f"  {key} [{current}]: ").strip()
+        if val:
+            if isinstance(default, bool):
+                config[key] = val.lower() in ('true', 'yes', '1', 'on')
+            elif isinstance(default, int):
+                config[key] = int(val)
+            elif isinstance(default, float):
+                config[key] = float(val)
+            else:
+                config[key] = val
+
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+    print(f"\n✅ Config saved: {CONFIG_FILE}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Background Monitor")
+    parser.add_argument("action", nargs="?", choices=["start", "stop", "status", "config"],
+                       default="status", help="Action")
+    parser.add_argument("--foreground", action="store_true", help="Run in foreground (for debugging)")
+
+    args = parser.parse_args()
+
+    if args.action == "start":
+        if os.path.exists(PID_FILE):
+            with open(PID_FILE) as f:
+                pid = f.read().strip()
+            try:
+                os.kill(int(pid), 0)
+                print(f"Daemon already running (PID: {pid})")
+                return
+            except: pass
+
+        if args.foreground:
+            daemon_loop()
+        else:
+            log_path = os.path.join(DAEMON_DIR, "daemon.log")
+            pid = os.fork()
+            if pid == 0:
+                # Child
+                os.setsid()
+                sys.stdout = open(log_path, 'a')
+                sys.stderr = sys.stdout
+                daemon_loop()
+            else:
+                print(f"Daemon started (PID: {pid})")
+
+    elif args.action == "stop":
+        stop_daemon()
+    elif args.action == "config":
+        configure()
+    else:
+        daemon_status()
+
+if __name__ == "__main__":
+    main()

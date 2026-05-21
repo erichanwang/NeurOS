@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+neuros-docker — NeurOS Docker Assistant
+AI-powered Dockerfile, docker-compose generation and container management.
+
+Usage:
+  neuros-docker generate "Python Flask app with PostgreSQL"
+  neuros-docker compose "web + redis + postgres"
+  neuros-docker explain ./Dockerfile
+  neuros-docker optimize ./Dockerfile
+  neuros-docker scan ./Dockerfile           Security best practices check
+"""
+
+import sys, os, json, argparse, subprocess
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        return f"Error: {e}"
+
+def generate_dockerfile(description):
+    prompt = f"""Generate a production-ready Dockerfile based on this description:
+
+{description}
+
+Requirements:
+- Use official base images (slim/alpine when possible)
+- Multi-stage build if beneficial
+- Non-root user
+- Health check
+- Layer optimization (cache deps first)
+- Proper signal handling
+- Labels for metadata
+
+Return ONLY the Dockerfile contents."""
+    return query_ollama(prompt)
+
+def generate_compose(description):
+    prompt = f"""Generate a docker-compose.yml for: {description}
+
+Requirements:
+- Use version '3.8'
+- Named volumes for persistent data
+- Health checks on all services
+- Resource limits
+- Environment file reference (.env)
+- Network configuration
+- Restart policies
+
+Return ONLY the docker-compose.yml."""
+    return query_ollama(prompt)
+
+def explain_dockerfile(filepath):
+    try:
+        with open(filepath, 'r') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error: {e}"); return
+
+    prompt = f"""Explain this Dockerfile line by line. Include:
+- What each instruction does
+- Why it's ordered this way
+- Best practices followed (or missed)
+- Potential issues
+
+{content}
+
+Be educational and thorough."""
+    print(query_ollama(prompt))
+
+def optimize_dockerfile(filepath):
+    try:
+        with open(filepath, 'r') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error: {e}"); return
+
+    prompt = f"""Optimize this Dockerfile. Fix:
+- Layer ordering for caching
+- Multi-stage builds where helpful
+- Image size reduction
+- Security improvements
+- Build speed improvements
+
+Original:
+{content}
+
+Return the optimized Dockerfile."""
+    result = query_ollama(prompt)
+    print(result)
+
+    save = input("\nSave optimized Dockerfile? [y/N]: ")
+    if save.lower() == 'y':
+        with open(filepath + ".optimized", 'w') as f:
+            clean = result
+            if clean.startswith("```"): clean = '\n'.join(l for l in clean.split('\n') if not l.startswith("```"))
+            f.write(clean)
+        print(f"✅ Saved: {filepath}.optimized")
+
+def scan_dockerfile(filepath):
+    try:
+        with open(filepath, 'r') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error: {e}"); return
+
+    prompt = f"""Security audit this Dockerfile. Check for:
+- Running as root
+- Exposed secrets
+- Unpinned versions
+- Unnecessary packages
+- Large base images
+- Missing HEALTHCHECK
+- Improper signal handling
+
+{content}
+
+Rate each issue (HIGH/MED/LOW) and suggest fixes."""
+    print(query_ollama(prompt))
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Docker Assistant")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    gen = subparsers.add_parser("generate", help="Generate Dockerfile")
+    gen.add_argument("description", help="What to containerize")
+
+    comp = subparsers.add_parser("compose", help="Generate docker-compose.yml")
+    comp.add_argument("description", help="Service stack description")
+
+    exp = subparsers.add_parser("explain", help="Explain a Dockerfile")
+    exp.add_argument("file", help="Dockerfile path")
+
+    opt = subparsers.add_parser("optimize", help="Optimize a Dockerfile")
+    opt.add_argument("file", help="Dockerfile path")
+
+    scn = subparsers.add_parser("scan", help="Security scan Dockerfile")
+    scn.add_argument("file", help="Dockerfile path")
+
+    args = parser.parse_args()
+
+    if args.command == "generate":
+        result = generate_dockerfile(args.description)
+        print(result)
+        save = input("\nSave as Dockerfile? [y/N]: ")
+        if save.lower() == 'y':
+            with open("Dockerfile", 'w') as f:
+                clean = result
+                if clean.startswith("```"): clean = '\n'.join(l for l in clean.split('\n') if not l.startswith("```"))
+                f.write(clean)
+            print("✅ Saved: Dockerfile")
+    elif args.command == "compose":
+        result = generate_compose(args.description)
+        print(result)
+    elif args.command == "explain":
+        explain_dockerfile(args.file)
+    elif args.command == "optimize":
+        optimize_dockerfile(args.file)
+    elif args.command == "scan":
+        scan_dockerfile(args.file)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

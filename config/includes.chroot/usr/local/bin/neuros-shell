@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+neuros-shell — NeurOS Shell Assistant
+Convert natural language to shell commands. Explain shell commands in plain English.
+
+Usage:
+  neuros-shell "find all PDF files modified today"       Generate command
+  neuros-shell "create a tar backup of /home excluding node_modules"
+  neuros-shell -e "ls -la | grep foo"                    Explain a command
+  neuros-shell -x "delete all .tmp files"                Explain + execute (with confirmation)
+  neuros-shell -i                                        Interactive mode
+  neuros-shell --safety on                               Safety mode (default: on, requires confirmation)
+"""
+
+import sys, os, json, subprocess, argparse, textwrap, shlex
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+HISTORY_FILE = os.path.expanduser("~/.config/neuros/shell-history.json")
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        print(f"Error: LLM unavailable ({e})")
+        sys.exit(1)
+
+def get_system_context():
+    ctx = []
+    ctx.append(f"OS: Ubuntu 24.04")
+    ctx.append(f"User: {os.environ.get('USER', 'unknown')}")
+    ctx.append(f"CWD: {os.getcwd()}")
+    ctx.append(f"Shell: {os.environ.get('SHELL', '/bin/bash')}")
+
+    try:
+        files = os.listdir('.')[:15]
+        ctx.append(f"Current dir: {', '.join(files)}")
+    except: pass
+
+    return '\n'.join(ctx)
+
+def generate_command(description, safety=True):
+    ctx = get_system_context()
+
+    prompt = f"""You are a Linux shell expert. Convert this natural language request into a safe, correct shell command.
+
+System context:
+{ctx}
+
+Request: {description}
+
+Rules:
+- Return ONLY the shell command, nothing else
+- Use safe patterns (quoting, -- to end options)
+- Prefer modern tools when available (ripgrep over grep, eza over ls, bat over cat)
+- For destructive operations, add safeguards (-i for rm, --dry-run first)
+- If multiple steps needed, use && to chain
+- For complex operations, prefer a one-liner"""
+
+    command = query_ollama(prompt).strip()
+
+    # Clean up common formatting
+    command = command.strip('`').strip()
+    if command.startswith('```'):
+        lines = command.split('\n')
+        command = '\n'.join(l for l in lines if not l.startswith('```')).strip()
+
+    return command
+
+def explain_command(command):
+    prompt = f"""Explain this shell command in plain English. Break down each part.
+
+Command: {command}
+
+Provide:
+1. **What it does** (one sentence)
+2. **Breakdown** (each flag/pipe/redirect explained)
+3. **Safety** (any risks or things to watch for)
+4. **Alternatives** (if there's a better way)"""
+
+    return query_ollama(prompt)
+
+def save_to_history(description, command):
+    os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+    history = []
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE) as f:
+            history = json.load(f)
+    history.append({"description": description, "command": command})
+    with open(HISTORY_FILE, 'w') as f:
+        json.dump(history[-100:], f, indent=2)
+
+def interactive_mode():
+    print("🐚 NeurOS Shell Assistant — describe what you want to do")
+    print("   Commands: 'explain <cmd>', 'history', 'safety on/off', 'exit'\n")
+
+    safety = True
+    while True:
+        try:
+            user_input = input("🐚> ").strip()
+            if not user_input:
+                continue
+            if user_input.lower() == 'exit':
+                break
+            if user_input.lower() == 'history':
+                if os.path.exists(HISTORY_FILE):
+                    with open(HISTORY_FILE) as f:
+                        for h in json.load(f)[-10:]:
+                            print(f"  {h['command']}")
+                else:
+                    print("  No history yet.")
+                continue
+            if user_input.lower().startswith('safety '):
+                safety = user_input[7:].strip().lower() == 'on'
+                print(f"  Safety mode: {'ON' if safety else 'OFF'}")
+                continue
+            if user_input.lower().startswith('explain '):
+                cmd = user_input[8:].strip()
+                print(f"\n{explain_command(cmd)}\n")
+                continue
+
+            print("🤖 Generating...")
+            cmd = generate_command(user_input, safety)
+            print(f"\n  💡 {cmd}\n")
+            save_to_history(user_input, cmd)
+
+            if safety:
+                choice = input("  Execute? [y/N/e(xplain)]: ").strip().lower()
+                if choice == 'e':
+                    print(f"\n{explain_command(cmd)}\n")
+                    choice = input("  Execute now? [y/N]: ").strip().lower()
+                if choice == 'y':
+                    subprocess.run(cmd, shell=True)
+                    print()
+            else:
+                subprocess.run(cmd, shell=True)
+                print()
+
+        except (KeyboardInterrupt, EOFError):
+            break
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Shell Assistant")
+    parser.add_argument("request", nargs="?", help="Natural language description of what to do")
+    parser.add_argument("-e", "--explain", help="Explain a shell command")
+    parser.add_argument("-x", "--execute", action="store_true", help="Explain and offer to execute")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Interactive mode")
+    parser.add_argument("--safety", default="on", choices=["on", "off"], help="Safety confirmation")
+
+    args = parser.parse_args()
+
+    if args.interactive:
+        interactive_mode()
+        return
+
+    if args.explain:
+        print(explain_command(args.explain))
+        return
+
+    if not args.request:
+        parser.print_help()
+        return
+
+    cmd = generate_command(args.request, args.safety == "on")
+    print(f"\n💡 {cmd}\n")
+
+    if args.execute or args.safety == "on":
+        choice = input("Execute? [y/N/e(xplain)]: ").strip().lower()
+        if choice == 'e':
+            print(f"\n{explain_command(cmd)}\n")
+            choice = input("Execute now? [y/N]: ").strip().lower()
+        if choice == 'y':
+            subprocess.run(cmd, shell=True)
+        else:
+            print("Not executed.")
+    else:
+        subprocess.run(cmd, shell=True)
+
+    save_to_history(args.request, cmd)
+
+if __name__ == "__main__":
+    main()
