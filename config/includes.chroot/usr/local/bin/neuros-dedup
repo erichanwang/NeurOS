@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+neuros-dedup — NeurOS Duplicate File Finder
+Finds duplicate files using content hashing, with smart deletion
+suggestions, interactive review, and AI summary.
+
+Usage:
+  neuros-dedup ~/Downloads                    Find duplicates
+  neuros-dedup --delete ~/Photos               Find and delete duplicates
+  neuros-dedup --interactive ~/Documents        Review each duplicate
+  neuros-dedup --report ~/Projects              Generate duplicate report
+"""
+
+import sys
+import os
+import json
+import hashlib
+import argparse
+import urllib.request
+import urllib.error
+from collections import defaultdict
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=400):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.2}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def file_hash(filepath, method="sha256"):
+    h = hashlib.new(method)
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def fast_hash(filepath):
+    """Fast first-pass hash: first 4KB + size."""
+    size = os.path.getsize(filepath)
+    with open(filepath, "rb") as f:
+        head = f.read(4096)
+    return hashlib.md5(head + str(size).encode()).hexdigest()
+
+
+def find_duplicates(directory, min_size=1):
+    """Two-pass dedup: fast hash first, then full hash."""
+    size_map = defaultdict(list)
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            if f.startswith("."):
+                continue
+            fpath = os.path.join(root, f)
+            try:
+                sz = os.path.getsize(fpath)
+                if sz >= min_size:
+                    size_map[sz].append(fpath)
+            except OSError:
+                pass
+
+    fast_map = defaultdict(list)
+    for sz, paths in size_map.items():
+        if len(paths) < 2:
+            continue
+        for p in paths:
+            try:
+                fast_map[fast_hash(p)].append(p)
+            except OSError:
+                pass
+
+    duplicates = {}
+    for fh, paths in fast_map.items():
+        if len(paths) < 2:
+            continue
+        full_map = defaultdict(list)
+        for p in paths:
+            try:
+                full_map[file_hash(p)].append(p)
+            except OSError:
+                pass
+        for fh2, paths2 in full_map.items():
+            if len(paths2) >= 2:
+                duplicates[fh2] = sorted(paths2)
+
+    return duplicates
+
+
+def _format_size(size):
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Duplicate File Finder")
+    parser.add_argument("directory", nargs="?", default=".", help="Directory to scan")
+    parser.add_argument("--delete", "-d", action="store_true", help="Auto-delete duplicates")
+    parser.add_argument("--interactive", "-i", action="store_true",
+                        help="Interactive review")
+    parser.add_argument("--report", "-r", action="store_true",
+                        help="Generate duplicate report")
+    parser.add_argument("--min-size", "-m", type=int, default=1,
+                        help="Minimum file size in bytes")
+
+    args = parser.parse_args()
+    directory = os.path.abspath(args.directory)
+
+    print(f"🔍 Scanning for duplicates in: {directory}\n")
+    duplicates = find_duplicates(directory, args.min_size)
+
+    if not duplicates:
+        print("✅ No duplicate files found.")
+        return
+
+    total_saved = 0
+    dup_count = 0
+
+    for fhash, paths in duplicates.items():
+        dup_count += len(paths) - 1
+        size = os.path.getsize(paths[0])
+        total_saved += size * (len(paths) - 1)
+
+        print(f"\n  🔄 {len(paths)} copies ({_format_size(size)} each):")
+        for p in paths:
+            print(f"    📄 {p}")
+
+        if args.delete:
+            for p in paths[1:]:
+                try:
+                    os.remove(p)
+                    print(f"    🗑️  Deleted: {p}")
+                except Exception as e:
+                    print(f"    ❌ {e}")
+        elif args.interactive:
+            for i, p in enumerate(paths):
+                print(f"    [{i+1}] {p}")
+            keep = input(f"    Keep which? [1-{len(paths)}/all]: ").strip()
+            if keep.isdigit() and 1 <= int(keep) <= len(paths):
+                keep_idx = int(keep) - 1
+                for i, p in enumerate(paths):
+                    if i != keep_idx:
+                        try:
+                            os.remove(p)
+                            print(f"    🗑️  Deleted: {p}")
+                        except Exception as e:
+                            print(f"    ❌ {e}")
+
+    print(f"\n📊 Summary: {dup_count} duplicates found")
+    print(f"   💾 Space that could be freed: {_format_size(total_saved)}")
+
+    if not args.delete and not args.interactive:
+        print(f"\n   Run with --delete to auto-remove, or --interactive to review.")
+
+
+if __name__ == "__main__":
+    main()

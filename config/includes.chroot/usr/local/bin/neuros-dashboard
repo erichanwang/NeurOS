@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""
+neuros-dashboard — NeurOS Remote System Dashboard
+Web-based system monitoring with real-time health metrics, alerts,
+autofix history, and AI-powered insights. Integrates with neuros-health data.
+
+Usage:
+  neuros-dashboard                       Start dashboard on port 11436
+  neuros-dashboard --port 8080            Custom port
+  neuros-dashboard --public               Listen on all interfaces
+"""
+
+import sys
+import os
+import json
+import time
+import threading
+import subprocess
+import argparse
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
+
+DEFAULT_PORT = 11436
+HEALTH_DIR = os.path.expanduser("~/.local/share/neuros/health")
+HEALTH_FILE = os.path.join(HEALTH_DIR, "health_history.json")
+AUTOFIX_DIR = os.path.expanduser("~/.local/share/neuros/autofix")
+AUTOFIX_FILE = os.path.join(AUTOFIX_DIR, "history.json")
+UPDATE_DIR = os.path.expanduser("~/.local/share/neuros/update")
+UPDATE_FILE = os.path.join(UPDATE_DIR, "update_history.json")
+
+os.makedirs(HEALTH_DIR, exist_ok=True)
+
+
+def get_metrics():
+    """Collect current system metrics."""
+    try:
+        cpu_idle = float(subprocess.check_output(
+            ["bash", "-c", "top -bn1 | grep 'Cpu' | awk '{print $8}'"],
+            text=True, timeout=5
+        ).strip())
+    except Exception:
+        cpu_idle = 100.0
+
+    try:
+        mem = subprocess.check_output(
+            ["bash", "-c", "free -m | grep Mem | awk '{print $3,$2}'"],
+            text=True, timeout=5
+        ).strip().split()
+        mem_used = int(mem[0]) if len(mem) >= 1 else 0
+        mem_total = int(mem[1]) if len(mem) >= 2 else 1
+    except Exception:
+        mem_used, mem_total = 0, 1
+
+    try:
+        disk = subprocess.check_output(
+            ["bash", "-c", "df / | tail -1 | awk '{print $5}'"],
+            text=True, timeout=5
+        ).strip().replace("%", "")
+    except Exception:
+        disk = "0"
+
+    try:
+        load = subprocess.check_output(
+            ["bash", "-c", "cat /proc/loadavg | awk '{print $1,$2,$3}'"],
+            text=True, timeout=5
+        ).strip()
+    except Exception:
+        load = "?"
+
+    try:
+        uptime = subprocess.check_output(
+            ["uptime", "-p"], text=True, timeout=5
+        ).strip()
+    except Exception:
+        uptime = "?"
+
+    try:
+        temp = subprocess.check_output(
+            ["bash", "-c", "sensors 2>/dev/null | grep -E 'Package|temp1' | head -1 | awk '{print $2}'"],
+            text=True, timeout=5
+        ).strip()
+    except Exception:
+        temp = "?"
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "cpu": round(100 - cpu_idle, 1),
+        "memory_percent": round(mem_used / mem_total * 100, 1) if mem_total > 0 else 0,
+        "memory_used": mem_used,
+        "memory_total": mem_total,
+        "disk_percent": float(disk) if disk.replace(".", "").isdigit() else 0,
+        "load": load,
+        "uptime": uptime,
+        "temperature": temp,
+    }
+
+
+def get_recent_autofix(n=20):
+    if not os.path.exists(AUTOFIX_FILE):
+        return []
+    try:
+        with open(AUTOFIX_FILE) as f:
+            history = json.load(f)
+        return history[-n:]
+    except Exception:
+        return []
+
+
+def get_recent_updates(n=10):
+    if not os.path.exists(UPDATE_FILE):
+        return []
+    try:
+        with open(UPDATE_FILE) as f:
+            history = json.load(f)
+        return history[-n:]
+    except Exception:
+        return []
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/" or path == "/index.html":
+            self.serve_html()
+        elif path == "/api/metrics":
+            self.serve_json(get_metrics())
+        elif path == "/api/history":
+            self.serve_history()
+        elif path == "/api/autofix":
+            self.serve_json(get_recent_autofix(20))
+        elif path == "/api/updates":
+            self.serve_json(get_recent_updates(10))
+        elif path == "/api/health":
+            self.serve_json({
+                "metrics": get_metrics(),
+                "autofix": get_recent_autofix(5),
+                "updates": get_recent_updates(5)
+            })
+        else:
+            self.send_error(404)
+
+    def serve_json(self, data):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode("utf-8"))
+
+    def serve_history(self):
+        history = []
+        if os.path.exists(HEALTH_FILE):
+            try:
+                with open(HEALTH_FILE) as f:
+                    history = json.load(f)
+            except Exception:
+                pass
+
+        metrics = []
+        for entry in history[-60:]:
+            metrics.append({
+                "t": entry.get("timestamp", ""),
+                "cpu": entry.get("cpu_percent", 0),
+                "mem": entry.get("memory_percent", 0),
+                "disk": entry.get("disk_percent", 0),
+            })
+        self.serve_json(metrics)
+
+    def serve_html(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(DASHBOARD_HTML.encode("utf-8"))
+
+    def log_message(self, format, *args):
+        pass
+
+
+DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NeurOS Dashboard</title>
+<style>
+:root {
+  --bg: #0a0e14; --surface: #12171f; --border: #1e293b;
+  --text: #e6edf3; --text-dim: #8b949e; --accent: #7c5cfc;
+  --accent-hover: #9b7eff; --green: #3fb950; --yellow: #d29922;
+  --red: #f85149; --radius: 12px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text); min-height: 100vh; }
+header { background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+header h1 { font-size: 20px; background: linear-gradient(135deg, var(--accent), #a29bfe);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px; padding: 24px; max-width: 1400px; margin: 0 auto; }
+.card { background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px; }
+.card h3 { font-size: 13px; color: var(--text-dim); margin-bottom: 12px;
+  text-transform: uppercase; letter-spacing: 0.5px; }
+.card .value { font-size: 36px; font-weight: 700; }
+.card .sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.gauge { width: 100%; height: 8px; background: var(--border); border-radius: 4px;
+  margin-top: 12px; overflow: hidden; }
+.gauge-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+.wide { grid-column: span 2; }
+.chart-container { width: 100%; height: 200px; position: relative; margin-top: 8px; }
+.chart-svg { width: 100%; height: 100%; }
+.chart-line { fill: none; stroke-width: 2; }
+.chart-line.cpu { stroke: var(--accent); }
+.chart-line.mem { stroke: var(--green); }
+.chart-line.disk { stroke: var(--yellow); }
+.alerts { padding: 0 24px 24px; max-width: 1400px; margin: 0 auto; display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 16px; }
+.alert-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  border-radius: 8px; font-size: 13px; margin-bottom: 8px; }
+.alert-item.critical { background: #f8514920; border: 1px solid #f8514940; color: var(--red); }
+.alert-item.warning { background: #d2992220; border: 1px solid #d2992240; color: var(--yellow); }
+.alert-item.info { background: #7c5cfc20; border: 1px solid #7c5cfc40; color: var(--accent-hover); }
+.log-entry { font-size: 12px; padding: 8px 0; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px; }
+.log-entry .time { color: var(--text-dim); min-width: 70px; }
+.log-icon { font-size: 14px; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.status-dot.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.status-dot.warn { background: var(--yellow); }
+.status-dot.crit { background: var(--red); animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+@media (max-width: 768px) { .wide { grid-column: span 1; } .grid { padding: 12px; } }
+</style>
+</head>
+<body>
+<header>
+  <span style="font-size:24px;">🧠</span>
+  <h1>NeurOS Dashboard</h1>
+  <span style="margin-left:auto;font-size:13px;color:var(--text-dim);" id="clock"></span>
+</header>
+
+<div class="grid" id="metricsGrid">
+  <div class="card"><h3>CPU</h3><div class="value" id="cpuVal">--</div>
+    <div class="sub" id="cpuSub">Load: --</div>
+    <div class="gauge"><div class="gauge-fill" id="cpuGauge" style="background:var(--accent);width:0%"></div></div></div>
+  <div class="card"><h3>Memory</h3><div class="value" id="memVal">--</div>
+    <div class="sub" id="memSub">-- MB / -- MB</div>
+    <div class="gauge"><div class="gauge-fill" id="memGauge" style="background:var(--green);width:0%"></div></div></div>
+  <div class="card"><h3>Disk</h3><div class="value" id="diskVal">--</div>
+    <div class="sub" id="diskSub">/ partition</div>
+    <div class="gauge"><div class="gauge-fill" id="diskGauge" style="background:var(--yellow);width:0%"></div></div></div>
+  <div class="card"><h3>System</h3>
+    <div class="sub" id="sysUptime">Uptime: --</div>
+    <div class="sub" id="sysTemp" style="margin-top:4px;">Temp: --</div>
+    <div class="sub" style="margin-top:8px;"><span class="status-dot online" id="sysDot"></span> <span id="sysStatus">Healthy</span></div></div>
+</div>
+
+<div class="card" style="margin:0 24px 16px;max-width:1400px;margin-left:auto;margin-right:auto;">
+  <h3>Live Metrics (last 60 samples)</h3>
+  <div class="chart-container">
+    <svg class="chart-svg" id="chartSvg" viewBox="0 0 600 200" preserveAspectRatio="none">
+      <polyline class="chart-line cpu" id="cpuLine" points=""/>
+      <polyline class="chart-line mem" id="memLine" points=""/>
+      <polyline class="chart-line disk" id="diskLine" points=""/>
+    </svg>
+  </div>
+  <div style="display:flex;gap:16px;font-size:11px;color:var(--text-dim);margin-top:8px;">
+    <span>🟣 CPU</span><span>🟢 Memory</span><span>🟡 Disk</span>
+  </div>
+</div>
+
+<div class="alerts">
+  <div class="card">
+    <h3>🔧 Recent Autofix Actions</h3>
+    <div id="autofixLog"><div class="log-entry"><span class="log-icon">✅</span> Loading...</div></div>
+  </div>
+  <div class="card">
+    <h3>📦 Recent Updates</h3>
+    <div id="updateLog"><div class="log-entry"><span class="log-icon">📦</span> Loading...</div></div>
+  </div>
+</div>
+
+<script>
+async function refresh() {
+  try {
+    const [hp, af, up] = await Promise.all([
+      fetch('/api/history').then(r=>r.json()),
+      fetch('/api/autofix').then(r=>r.json()),
+      fetch('/api/updates').then(r=>r.json())
+    ]);
+
+    // Live metrics (last entry)
+    if (hp.length > 0) {
+      const m = hp[hp.length - 1];
+      updateMetric('cpuVal', m.cpu + '%', m.cpu);
+      updateMetric('memVal', m.mem + '%', m.mem);
+      updateMetric('diskVal', m.disk + '%', m.disk);
+      document.getElementById('cpuSub').textContent = 'Load: ' + (m.load || '?');
+      document.getElementById('memSub').textContent = (m.memory_used || '?') + ' MB / ' + (m.memory_total || '?') + ' MB';
+      document.getElementById('sysUptime').textContent = 'Uptime: ' + (m.uptime || '?');
+      document.getElementById('sysTemp').textContent = 'Temp: ' + (m.temperature || '?');
+      updateGauge('cpuGauge', m.cpu, 100);
+      updateGauge('memGauge', m.mem, 100);
+      updateGauge('diskGauge', m.disk, 100);
+
+      const dot = document.getElementById('sysDot');
+      const status = document.getElementById('sysStatus');
+      if (m.cpu > 90 || m.mem > 90 || m.disk > 95) {
+        dot.className = 'status-dot crit'; status.textContent = 'Critical';
+      } else if (m.cpu > 70 || m.mem > 80 || m.disk > 85) {
+        dot.className = 'status-dot warn'; status.textContent = 'Warning';
+      } else {
+        dot.className = 'status-dot online'; status.textContent = 'Healthy';
+      }
+    }
+
+    // Chart
+    if (hp.length > 1) {
+      const maxPts = 60; const w = 600, h = 200;
+      const pts = hp.slice(-maxPts);
+      const scale = (i, max) => 20 + (h - 40) * (1 - i / max);
+      ['cpu','mem','disk'].forEach(k => {
+        const line = document.getElementById(k + 'Line');
+        const points = pts.map((p, i) => {
+          const x = (i / (pts.length - 1)) * w;
+          const y = scale((p[k] || 0), 100);
+          return x + ',' + y;
+        }).join(' ');
+        line.setAttribute('points', points);
+      });
+    }
+
+    // Autofix log
+    const afDiv = document.getElementById('autofixLog');
+    afDiv.innerHTML = af.length === 0
+      ? '<div class="log-entry"><span class="log-icon">✅</span> No autofix actions yet</div>'
+      : af.slice(-10).reverse().map(h => {
+          const icon = h.success ? '✅' : '❌';
+          const ts = (h.timestamp || '').slice(11, 19);
+          return `<div class="log-entry"><span class="log-icon">${icon}</span><span class="time">${ts}</span>${h.action}: ${(h.target || h.command || '').slice(0, 50)}</div>`;
+        }).join('');
+
+    // Update log
+    const upDiv = document.getElementById('updateLog');
+    upDiv.innerHTML = up.length === 0
+      ? '<div class="log-entry"><span class="log-icon">📦</span> No updates yet</div>'
+      : up.slice(-10).reverse().map(h => {
+          const icon = h.success ? '✅' : '❌';
+          const ts = (h.timestamp || '').slice(11, 19);
+          return `<div class="log-entry"><span class="log-icon">${icon}</span><span class="time">${ts}</span>${h.action}: ${(h.details || '').slice(0, 40)}</div>`;
+        }).join('');
+  } catch(e) { console.error(e); }
+
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+}
+
+function updateMetric(id, text, pct) {
+  document.getElementById(id).textContent = text;
+  document.getElementById(id).style.color = pct > 90 ? 'var(--red)' : pct > 70 ? 'var(--yellow)' : 'var(--text)';
+}
+
+function updateGauge(id, pct, max) {
+  document.getElementById(id).style.width = Math.min(pct / max * 100, 100) + '%';
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>"""
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Remote System Dashboard")
+    parser.add_argument("--port", "-p", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--public", action="store_true", help="Listen on all interfaces")
+    args = parser.parse_args()
+
+    host = "0.0.0.0" if args.public else "127.0.0.1"
+    server = HTTPServer((host, args.port), DashboardHandler)
+    url = f"http://{'localhost' if not args.public else host}:{args.port}"
+
+    print(f"""
+╔══════════════════════════════════════════╗
+║       🧠 NeurOS System Dashboard         ║
+║       Real-time system monitoring        ║
+╠══════════════════════════════════════════╣
+║  URL:  {url:<32}║
+╚══════════════════════════════════════════╝
+
+Press Ctrl+C to stop.
+""")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\\nShutting down...")
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()

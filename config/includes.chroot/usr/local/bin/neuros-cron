@@ -1,0 +1,578 @@
+#!/usr/bin/env python3
+"""
+neuros-cron — NeurOS Cron Manager
+AI-powered cron job management with natural language scheduling, validation,
+and smart conflict detection.
+
+Usage:
+  neuros-cron add "every Monday at 6am" --cmd "/usr/local/bin/neuros-backup"
+  neuros-cron list
+  neuros-cron remove <id>
+  neuros-cron edit <id> --schedule "daily at midnight"
+  neuros-cron test <id>                 Dry-run the command
+  neuros-cron validate                  Check all crons for conflicts/issues
+  neuros-cron explain <id>              AI explains what a cron job does
+  neuros-cron import <file>             Import crontab from file
+  neuros-cron export > my-crons.txt     Export all managed crons
+  neuros-cron history                   Show recent execution logs
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+from datetime import datetime, timedelta
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else "/usr/local/bin"
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+CRON_DB = os.path.join(CONFIG_DIR, "crons.json")
+CRON_HISTORY = os.path.join(CONFIG_DIR, "cron-history.json")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+
+def load_config():
+    """Load llm.conf settings."""
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def query_llm(prompt, system="You are a helpful AI assistant."):
+    """Query the local Ollama instance."""
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        data = json.dumps({
+            "model": config["model"],
+            "prompt": prompt,
+            "system": system,
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except Exception as e:
+        return None
+
+
+def load_db():
+    """Load cron database."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    if os.path.exists(CRON_DB):
+        with open(CRON_DB) as f:
+            return json.load(f)
+    return {"crons": [], "version": 1}
+
+
+def save_db(db):
+    """Save cron database."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CRON_DB + ".tmp", "w") as f:
+        json.dump(db, f, indent=2)
+    os.replace(CRON_DB + ".tmp", CRON_DB)
+
+
+def load_history():
+    """Load execution history."""
+    if os.path.exists(CRON_HISTORY):
+        with open(CRON_HISTORY) as f:
+            return json.load(f)
+    return []
+
+
+def save_history(entries):
+    """Save execution history."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CRON_HISTORY, "w") as f:
+        json.dump(entries[-500:], f, indent=2)
+
+
+# Natural language → cron expression patterns
+NL_PATTERNS = [
+    (r"every\s+(\d+)\s+min(?:ute)?s?", r"*/\1 * * * *"),
+    (r"every\s+hour", r"0 * * * *"),
+    (r"every\s+(\d+)\s+hours?", r"0 */\1 * * *"),
+    (r"(?:at\s+)?(\d{1,2}):(\d{2})\s+every\s+day", r"\2 \1 * * *"),
+    (r"(?:at\s+)?midnight", r"0 0 * * *"),
+    (r"(?:at\s+)?noon", r"0 12 * * *"),
+    (r"every\s+(monday|mon)", r"0 0 * * 1"),
+    (r"every\s+(tuesday|tue)", r"0 0 * * 2"),
+    (r"every\s+(wednesday|wed)", r"0 0 * * 3"),
+    (r"every\s+(thursday|thu)", r"0 0 * * 4"),
+    (r"every\s+(friday|fri)", r"0 0 * * 5"),
+    (r"every\s+(saturday|sat)", r"0 0 * * 6"),
+    (r"every\s+(sunday|sun)", r"0 0 * * 0"),
+    (r"every\s+weekday", r"0 0 * * 1-5"),
+    (r"every\s+weekend", r"0 0 * * 0,6"),
+    (r"every\s+month", r"0 0 1 * *"),
+    (r"every\s+year", r"0 0 1 1 *"),
+    (r"hourly", r"0 * * * *"),
+    (r"daily", r"0 0 * * *"),
+    (r"weekly", r"0 0 * * 0"),
+    (r"monthly", r"0 0 1 * *"),
+    (r"@reboot", r"@reboot"),
+    (r"@yearly", r"0 0 1 1 *"),
+    (r"@monthly", r"0 0 1 * *"),
+    (r"@weekly", r"0 0 * * 0"),
+    (r"@daily", r"0 0 * * *"),
+    (r"@hourly", r"0 * * * *"),
+]
+
+DAY_MAP = {
+    "monday": 1, "mon": 1, "tuesday": 2, "tue": 2,
+    "wednesday": 3, "wed": 3, "thursday": 4, "thu": 4,
+    "friday": 5, "fri": 5, "saturday": 6, "sat": 6, "sunday": 0, "sun": 0,
+}
+
+
+def nl_to_cron(text):
+    """Convert natural language to cron expression. Uses AI as fallback."""
+    text = text.lower().strip()
+
+    for pattern, cron in NL_PATTERNS:
+        m = re.match(pattern, text)
+        if m:
+            return cron
+
+    # Try AI fallback
+    ai = query_llm(
+        f'Convert this schedule to a standard cron expression (5 fields: minute hour day month weekday). '
+        f'Return ONLY the cron expression, nothing else.\n\nSchedule: {text}',
+        system="You are a cron expert. Return only the 5-field cron expression."
+    )
+    if ai and re.match(r'^[\d\*,/\-]+\s+[\d\*,/\-]+\s+[\d\*,/\-]+\s+[\d\*,/\-]+\s+[\d\*,/\-]+$', ai.strip()):
+        return ai.strip()
+
+    return None
+
+
+def validate_cron(expr):
+    """Validate a cron expression."""
+    if expr == "@reboot":
+        return True
+    parts = expr.strip().split()
+    if len(parts) != 5:
+        return False
+    for i, part in enumerate(parts):
+        # Allow numbers, *, ranges, steps, lists
+        if not re.match(r'^[\d\*,/\-]+$', part):
+            return False
+    return True
+
+
+def get_current_crontab():
+    """Read current user crontab."""
+    try:
+        result = subprocess.run(
+            ["crontab", "-l"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return result.stdout
+        return ""
+    except Exception:
+        return ""
+
+
+def install_crontab(db):
+    """Install all managed crons into crontab."""
+    lines = [
+        "# === NeurOS Managed Crons ===",
+        "# Generated by neuros-cron",
+        f"# Last updated: {datetime.now().isoformat()}",
+        "# DO NOT EDIT BELOW — use 'neuros-cron' commands instead",
+        "",
+    ]
+
+    for entry in db["crons"]:
+        if not entry.get("disabled"):
+            lines.append(f"# neuros-id:{entry['id']}")
+            lines.append(f"{entry['cron']} {entry['command']} 2>&1 | "
+                         f"tee -a ~/.config/neuros/cron-output.log")
+            lines.append("")
+
+    # Preserve non-neuros entries from existing crontab
+    existing = get_current_crontab()
+    for line in existing.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        if "neuros-id:" not in line:
+            # Check not already in managed lines
+            found = False
+            for entry in db["crons"]:
+                if entry["command"] in line:
+                    found = True
+                    break
+            if not found:
+                lines.insert(0, line)
+
+    content = "\n".join(lines) + "\n"
+
+    try:
+        proc = subprocess.run(
+            ["crontab", "-"],
+            input=content, capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            print(f"Error installing crontab: {proc.stderr}", file=sys.stderr)
+            return False
+        return True
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return False
+
+
+def cmd_add(args):
+    """Add a new cron job."""
+    db = load_db()
+
+    cron_expr = nl_to_cron(args.schedule)
+    if not cron_expr:
+        print(f"❌ Could not parse schedule: '{args.schedule}'")
+        print("   Try: 'every Monday at 6am', 'daily', 'every 30 minutes'")
+        sys.exit(1)
+
+    if not validate_cron(cron_expr):
+        print(f"❌ Invalid cron expression: {cron_expr}")
+        sys.exit(1)
+
+    # Generate deterministic ID
+    hid = hashlib.sha256(f"{cron_expr}:{args.cmd}:{datetime.now().isoformat()}".encode()).hexdigest()[:8]
+
+    entry = {
+        "id": hid,
+        "cron": cron_expr,
+        "command": args.cmd,
+        "schedule_nl": args.schedule,
+        "created": datetime.now().isoformat(),
+        "disabled": False,
+        "tags": args.tag or [],
+    }
+    db["crons"].append(entry)
+    save_db(db)
+
+    if install_crontab(db):
+        print(f"✅ Cron added: {hid}")
+        print(f"   Schedule: {args.schedule} → {cron_expr}")
+        print(f"   Command:  {args.cmd}")
+    else:
+        print(f"⚠️  Cron saved to DB but crontab install failed")
+
+
+def cmd_list(args):
+    """List all managed cron jobs."""
+    db = load_db()
+    if not db["crons"]:
+        print("No managed cron jobs.")
+        return
+
+    print(f"{'ID':<10} {'Status':<8} {'Schedule (NL)':<30} {'Cron':<20} {'Command'}")
+    print("-" * 100)
+    for entry in db["crons"]:
+        status = "⏸ DISABLED" if entry.get("disabled") else "▶ ACTIVE"
+        print(f"{entry['id']:<10} {status:<8} {entry.get('schedule_nl', ''):<30} {entry['cron']:<20} {entry['command']}")
+
+    print(f"\n{len(db['crons'])} cron job(s) managed by NeurOS.")
+
+
+def cmd_remove(args):
+    """Remove a cron job."""
+    db = load_db()
+    match = None
+    for i, entry in enumerate(db["crons"]):
+        if entry["id"].startswith(args.id):
+            match = i
+            break
+
+    if match is None:
+        print(f"❌ No cron found with ID: {args.id}")
+        sys.exit(1)
+
+    removed = db["crons"].pop(match)
+    save_db(db)
+    install_crontab(db)
+    print(f"✅ Removed cron {removed['id']}: {removed['command']}")
+
+
+def cmd_edit(args):
+    """Edit a cron job."""
+    db = load_db()
+    for entry in db["crons"]:
+        if entry["id"].startswith(args.id):
+            if args.schedule:
+                cron_expr = nl_to_cron(args.schedule)
+                if not cron_expr:
+                    print(f"❌ Could not parse: {args.schedule}")
+                    sys.exit(1)
+                entry["cron"] = cron_expr
+                entry["schedule_nl"] = args.schedule
+            if args.cmd:
+                entry["command"] = args.cmd
+            if args.disable:
+                entry["disabled"] = True
+            if args.enable:
+                entry["disabled"] = False
+            save_db(db)
+            install_crontab(db)
+            print(f"✅ Updated cron {entry['id']}")
+            return
+
+    print(f"❌ No cron found: {args.id}")
+    sys.exit(1)
+
+
+def cmd_validate(args):
+    """Validate all cron jobs for conflicts."""
+    db = load_db()
+    issues = []
+
+    for i, a in enumerate(db["crons"]):
+        for b in db["crons"][i + 1:]:
+            # Check for near-identical schedules
+            if a["cron"] == b["cron"] and a["cron"] != "@reboot":
+                issues.append(f"⚠️  {a['id']} and {b['id']} have identical schedule ({a['cron']})")
+            # Check for overlapping execution windows
+            a_min = cron_to_minutes(a["cron"])
+            b_min = cron_to_minutes(b["cron"])
+            if a_min is not None and b_min is not None and abs(a_min - b_min) < 5:
+                issues.append(f"⚠️  {a['id']} and {b['id']} run within 5 min of each other")
+
+    if issues:
+        print("Cron validation issues found:")
+        for issue in issues:
+            print(f"  {issue}")
+    else:
+        print("✅ All cron jobs look good — no conflicts detected.")
+
+    # Check for disabled jobs
+    disabled = [e for e in db["crons"] if e.get("disabled")]
+    if disabled:
+        print(f"\n{len(disabled)} disabled job(s):")
+        for e in disabled:
+            print(f"  ⏸  {e['id']}: {e.get('schedule_nl', e['cron'])}")
+
+
+def cron_to_minutes(cron):
+    """Convert cron expression to approximate minutes-from-midnight for comparison."""
+    try:
+        parts = cron.split()
+        if len(parts) != 5:
+            return None
+        hour = int(parts[1]) if parts[1].isdigit() else 0
+        minute = int(parts[0]) if parts[0].isdigit() else 0
+        return hour * 60 + minute
+    except Exception:
+        return None
+
+
+def cmd_test(args):
+    """Dry-run a cron job's command."""
+    db = load_db()
+    for entry in db["crons"]:
+        if entry["id"].startswith(args.id):
+            print(f"Testing cron {entry['id']}: {entry['command']}")
+            try:
+                result = subprocess.run(
+                    shlex.split(entry["command"]),
+                    capture_output=True, text=True, timeout=30
+                )
+                print(f"Exit code: {result.returncode}")
+                if result.stdout:
+                    print(f"stdout:\n{result.stdout[:500]}")
+                if result.stderr:
+                    print(f"stderr:\n{result.stderr[:500]}")
+                # Log the test
+                history = load_history()
+                history.append({
+                    "id": entry["id"],
+                    "command": entry["command"],
+                    "exit_code": result.returncode,
+                    "timestamp": datetime.now().isoformat(),
+                    "type": "test",
+                })
+                save_history(history)
+            except subprocess.TimeoutExpired:
+                print("⚠️  Command timed out after 30s")
+            except Exception as e:
+                print(f"❌ Error: {e}")
+            return
+
+    print(f"❌ No cron found: {args.id}")
+
+
+def cmd_explain(args):
+    """AI explains what a cron expression does in human language."""
+    db = load_db()
+    for entry in db["crons"]:
+        if entry["id"].startswith(args.id):
+            cron = entry["cron"]
+            prompt = f"Explain this cron expression in plain English: {cron}"
+            explanation = query_llm(prompt, system="You explain technical concepts clearly.")
+            print(f"Cron {entry['id']}:")
+            print(f"  Expression: {cron}")
+            print(f"  Schedule:   {entry.get('schedule_nl', 'N/A')}")
+            print(f"  Command:    {entry['command']}")
+            if explanation:
+                print(f"  Meaning:    {explanation}")
+            else:
+                print(f"  Meaning:    (AI unavailable — cron expression: {cron})")
+            return
+
+    print(f"❌ No cron found: {args.id}")
+
+
+def cmd_import(args):
+    """Import crontab entries from a file."""
+    if not os.path.exists(args.file):
+        print(f"❌ File not found: {args.file}")
+        sys.exit(1)
+
+    db = load_db()
+    imported = 0
+    with open(args.file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Parse crontab line: min hour dom month dow command
+            parts = line.split(None, 5)
+            if len(parts) < 6:
+                continue
+            cron = " ".join(parts[:5])
+            cmd = parts[5]
+            if validate_cron(cron) or cron == "@reboot":
+                hid = hashlib.sha256(f"import:{cron}:{cmd}".encode()).hexdigest()[:8]
+                db["crons"].append({
+                    "id": hid,
+                    "cron": cron,
+                    "command": cmd,
+                    "schedule_nl": f"imported: {cron}",
+                    "created": datetime.now().isoformat(),
+                    "disabled": False,
+                    "tags": ["imported"],
+                })
+                imported += 1
+
+    if imported > 0:
+        save_db(db)
+        install_crontab(db)
+        print(f"✅ Imported {imported} cron job(s) from {args.file}")
+    else:
+        print("No valid cron entries found in file.")
+
+
+def cmd_export(args):
+    """Export managed crons to stdout."""
+    db = load_db()
+    for entry in db["crons"]:
+        if not entry.get("disabled"):
+            print(f"{entry['cron']} {entry['command']}")
+        else:
+            print(f"# DISABLED: {entry['cron']} {entry['command']}")
+
+
+def cmd_history(args):
+    """Show execution history."""
+    history = load_history()
+    if not history:
+        print("No execution history yet.")
+        return
+
+    print(f"{'Timestamp':<22} {'Type':<6} {'ID':<10} {'Exit':<5} {'Command'}")
+    print("-" * 100)
+    for entry in history[-20:]:
+        ts = entry.get("timestamp", "")[:19]
+        print(f"{ts:<22} {entry.get('type', 'run'):<6} {entry.get('id', ''):<10} {entry.get('exit_code', '?'):<5} {entry.get('command', '')}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-cron — AI-powered cron job manager")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    # add
+    p_add = sub.add_parser("add", help="Add a cron job")
+    p_add.add_argument("schedule", help="Natural language schedule (e.g. 'every Monday at 6am')")
+    p_add.add_argument("--cmd", required=True, help="Command to run")
+    p_add.add_argument("--tag", action="append", help="Tags for organization")
+
+    # list
+    sub.add_parser("list", aliases=["ls"], help="List all managed cron jobs")
+
+    # remove
+    p_rm = sub.add_parser("remove", aliases=["rm", "delete"], help="Remove a cron job")
+    p_rm.add_argument("id", help="Cron job ID (or prefix)")
+
+    # edit
+    p_edit = sub.add_parser("edit", help="Edit a cron job")
+    p_edit.add_argument("id", help="Cron job ID (or prefix)")
+    p_edit.add_argument("--schedule", "-s", help="New schedule (natural language)")
+    p_edit.add_argument("--cmd", "-c", help="New command")
+    p_edit.add_argument("--disable", action="store_true", help="Disable this cron")
+    p_edit.add_argument("--enable", action="store_true", help="Enable this cron")
+
+    # validate
+    sub.add_parser("validate", aliases=["check"], help="Validate all crons for conflicts")
+
+    # test
+    p_test = sub.add_parser("test", help="Dry-run a cron job")
+    p_test.add_argument("id", help="Cron job ID (or prefix)")
+
+    # explain
+    p_explain = sub.add_parser("explain", help="AI explains a cron expression")
+    p_explain.add_argument("id", help="Cron job ID (or prefix)")
+
+    # import
+    p_import = sub.add_parser("import", help="Import crontab from file")
+    p_import.add_argument("file", help="File to import from")
+
+    # export
+    sub.add_parser("export", help="Export managed crons to stdout")
+
+    # history
+    sub.add_parser("history", aliases=["log"], help="Show execution history")
+
+    args = parser.parse_args()
+
+    if args.command == "add":
+        cmd_add(args)
+    elif args.command in ("list", "ls"):
+        cmd_list(args)
+    elif args.command in ("remove", "rm", "delete"):
+        cmd_remove(args)
+    elif args.command == "edit":
+        cmd_edit(args)
+    elif args.command in ("validate", "check"):
+        cmd_validate(args)
+    elif args.command == "test":
+        cmd_test(args)
+    elif args.command == "explain":
+        cmd_explain(args)
+    elif args.command == "import":
+        cmd_import(args)
+    elif args.command == "export":
+        cmd_export(args)
+    elif args.command in ("history", "log"):
+        cmd_history(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

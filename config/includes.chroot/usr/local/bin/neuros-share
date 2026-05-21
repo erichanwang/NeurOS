@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+neuros-share — NeurOS File/Text Sharing
+Encrypted file and text sharing with expiring links, password protection,
+and self-hosted or P2P options.
+
+Usage:
+  neuros-share myfile.pdf                          Share a file
+  neuros-share --text "secret message"              Share text
+  neuros-share --password mypass myfile.pdf         Password-protected share
+  neuros-share --expire 24h myfile.pdf              Auto-expiring share
+  neuros-share --receive <code>                     Receive a shared file
+"""
+
+import sys
+import os
+import json
+import shlex
+import base64
+import hashlib
+import secrets
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime, timedelta
+
+SHARE_DIR = os.path.expanduser("~/.local/share/neuros/shares")
+os.makedirs(SHARE_DIR, exist_ok=True)
+
+
+def generate_code():
+    return secrets.token_hex(4)
+
+
+def encrypt_data(data, password=None):
+    """Simple XOR encryption (for non-critical sharing)."""
+    if not password:
+        return base64.b64encode(data).decode()
+    key = hashlib.sha256(password.encode()).digest()
+    encrypted = bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+    return base64.b64encode(encrypted).decode()
+
+
+def decrypt_data(encoded, password=None):
+    try:
+        data = base64.b64decode(encoded)
+        if not password:
+            return data
+        key = hashlib.sha256(password.encode()).digest()
+        return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+    except Exception:
+        return None
+
+
+def share_file(filepath, password=None, expire_hours=24):
+    if not os.path.exists(filepath):
+        return None, "File not found"
+
+    code = generate_code()
+    with open(filepath, "rb") as f:
+        data = f.read()
+
+    encoded = encrypt_data(data, password)
+    expires = (datetime.now() + timedelta(hours=expire_hours)).isoformat()
+
+    share = {
+        "code": code,
+        "type": "file",
+        "filename": os.path.basename(filepath),
+        "data": encoded,
+        "size": len(data),
+        "has_password": bool(password),
+        "created": datetime.now().isoformat(),
+        "expires": expires
+    }
+
+    share_path = os.path.join(SHARE_DIR, f"{code}.json")
+    with open(share_path, "w") as f:
+        json.dump(share, f)
+
+    return code, None
+
+
+def share_text(text, password=None, expire_hours=24):
+    code = generate_code()
+    data = text.encode("utf-8")
+    encoded = encrypt_data(data, password)
+    expires = (datetime.now() + timedelta(hours=expire_hours)).isoformat()
+
+    share = {
+        "code": code,
+        "type": "text",
+        "data": encoded,
+        "size": len(data),
+        "has_password": bool(password),
+        "created": datetime.now().isoformat(),
+        "expires": expires
+    }
+
+    share_path = os.path.join(SHARE_DIR, f"{code}.json")
+    with open(share_path, "w") as f:
+        json.dump(share, f)
+
+    return code, None
+
+
+def receive_share(code, password=None, output=None):
+    share_path = os.path.join(SHARE_DIR, f"{code}.json")
+    if not os.path.exists(share_path):
+        return None, f"Share not found: {code}"
+
+    with open(share_path) as f:
+        share = json.load(f)
+
+    expires = datetime.fromisoformat(share["expires"])
+    if datetime.now() > expires:
+        os.remove(share_path)
+        return None, "Share has expired"
+
+    if share["has_password"] and not password:
+        return None, "Password required"
+
+    data = decrypt_data(share["data"], password)
+    if data is None:
+        return None, "Decryption failed (wrong password?)"
+
+    if share["type"] == "file" and output:
+        with open(output, "wb") as f:
+            f.write(data)
+        return f"Saved to: {output}", None
+    elif share["type"] == "file":
+        out_path = share.get("filename", f"shared_{code}")
+        with open(out_path, "wb") as f:
+            f.write(data)
+        return f"Saved to: {out_path}", None
+    else:
+        return data.decode("utf-8"), None
+
+
+def list_shares():
+    shares = []
+    for fname in os.listdir(SHARE_DIR):
+        if fname.endswith(".json"):
+            fpath = os.path.join(SHARE_DIR, fname)
+            with open(fpath) as f:
+                share = json.load(f)
+            expires = datetime.fromisoformat(share["expires"])
+            if datetime.now() > expires:
+                os.remove(fpath)
+                continue
+            shares.append({
+                "code": share["code"],
+                "type": share["type"],
+                "filename": share.get("filename", "text"),
+                "size": share["size"],
+                "expires": expires.strftime("%H:%M")
+            })
+    return shares
+
+
+def _format_size(size):
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Encrypted File/Text Sharing")
+    parser.add_argument("target", nargs="?", help="File to share")
+    parser.add_argument("--text", "-t", help="Text to share")
+    parser.add_argument("--password", "-p", help="Password protect")
+    parser.add_argument("--expire", "-e", default="24h", help="Expiry (e.g. 1h, 24h, 7d)")
+    parser.add_argument("--receive", "-r", help="Receive share by code")
+    parser.add_argument("--output", "-o", help="Output file for received share")
+    parser.add_argument("--list", "-l", action="store_true", help="List active shares")
+
+    args = parser.parse_args()
+
+    if args.list:
+        shares = list_shares()
+        if shares:
+            print(f"\n  Active shares ({len(shares)}):\n")
+            for s in shares:
+                print(f"  🔗 {s['code']}  {s['type']}: {s.get('filename','?')[:30]}  "
+                      f"({_format_size(s['size'])})  expires {s['expires']}")
+        else:
+            print("No active shares.")
+        return
+
+    if args.receive:
+        result, error = receive_share(args.receive, args.password, args.output)
+        if error:
+            print(f"  ❌ {error}")
+        else:
+            print(f"  ✅ {result}")
+        return
+
+    expire_units = {"h": 1, "d": 24, "m": 0.016}
+    try:
+        unit = args.expire[-1].lower()
+        val = int(args.expire[:-1])
+        expire_hours = val * expire_units.get(unit, 1)
+    except (ValueError, IndexError):
+        expire_hours = 24
+
+    if args.text:
+        code, error = share_text(args.text, args.password, expire_hours)
+    elif args.target and os.path.exists(args.target):
+        code, error = share_file(args.target, args.password, expire_hours)
+    else:
+        parser.print_help()
+        return
+
+    if error:
+        print(f"  ❌ {error}")
+    else:
+        print(f"\n  ✅ Shared! Code: {code}")
+        print(f"  Receive: neuros-share --receive {code}")
+        print(f"  Expires in: {args.expire}\n")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+neuros-rename — NeurOS AI Batch File Renamer
+Intelligently renames files using AI patterns, regex, and smart cleanup.
+Preview before applying, with undo support.
+
+Usage:
+  neuros-rename --clean *.mp4                  Clean up messy filenames
+  neuros-rename --pattern "photo_{date}" *.jpg  Apply naming pattern
+  neuros-rename --ai "make these descriptive" *  AI-powered renaming
+  neuros-rename --undo                          Undo last rename operation
+"""
+
+import sys
+import os
+import json
+import shutil
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+UNDO_DIR = os.path.expanduser("~/.local/share/neuros/rename_undo")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=800):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.3}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def clean_name(name):
+    """Basic filename cleaning."""
+    import re
+    name = os.path.splitext(name)[0]
+    name = re.sub(r'[_\-\s]+', '_', name)
+    name = re.sub(r'[^\w\-]', '', name)
+    name = re.sub(r'_+', '_', name)
+    return name.strip('_')
+
+
+def ai_rename(files):
+    """Use AI to generate descriptive names."""
+    file_list = "\n".join(files[:20])
+    prompt = (
+        f"Suggest concise, descriptive filenames for these files. "
+        f"Return one new name per line, preserving extensions. "
+        f"Use lowercase, hyphens, and descriptive keywords.\n\n{file_list}"
+    )
+    response = ollama_generate(prompt, 1000)
+    if response:
+        return [l.strip() for l in response.splitlines() if l.strip()]
+    return []
+
+
+def apply_pattern(files, pattern):
+    results = []
+    for i, f in enumerate(files):
+        name, ext = os.path.splitext(f)
+        new_name = pattern
+        new_name = new_name.replace("{name}", name)
+        new_name = new_name.replace("{ext}", ext)
+        new_name = new_name.replace("{i}", str(i+1))
+        new_name = new_name.replace("{date}", datetime.now().strftime("%Y%m%d"))
+        if not new_name.endswith(ext):
+            new_name += ext
+        results.append(new_name)
+    return results
+
+
+def save_undo(operations):
+    os.makedirs(UNDO_DIR, exist_ok=True)
+    fpath = os.path.join(UNDO_DIR, f"undo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    with open(fpath, "w") as f:
+        json.dump(operations, f)
+    return fpath
+
+
+def do_undo():
+    if not os.path.exists(UNDO_DIR):
+        print("No undo history found.")
+        return
+    files = sorted(os.listdir(UNDO_DIR))
+    if not files:
+        print("No undo operations available.")
+        return
+    latest = files[-1]
+    fpath = os.path.join(UNDO_DIR, latest)
+    with open(fpath) as f:
+        ops = json.load(f)
+    for op in reversed(ops):
+        try:
+            shutil.move(op["new"], op["old"])
+            print(f"  ↩  {op['new']} -> {op['old']}")
+        except Exception as e:
+            print(f"  ❌ {e}")
+    os.remove(fpath)
+    print(f"  Undid {len(ops)} rename(s)")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS AI Batch File Renamer")
+    parser.add_argument("files", nargs="*", help="Files to rename")
+    parser.add_argument("--clean", "-c", action="store_true", help="Clean filenames")
+    parser.add_argument("--pattern", "-p", help="Apply naming pattern")
+    parser.add_argument("--ai", "-a", metavar="DESC", help="AI-powered rename with description")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview only")
+    parser.add_argument("--undo", "-u", action="store_true", help="Undo last rename")
+
+    args = parser.parse_args()
+
+    if args.undo:
+        do_undo()
+        return
+
+    if not args.files:
+        parser.print_help()
+        return
+
+    operations = []
+    if args.pattern:
+        new_names = apply_pattern(args.files, args.pattern)
+    elif args.ai:
+        new_names = ai_rename(args.files)
+    elif args.clean:
+        new_names = [clean_name(f) + os.path.splitext(f)[1] for f in args.files]
+    else:
+        new_names = apply_pattern(args.files, "{name}_renamed{ext}")
+
+    print(f"\n{'Preview' if args.dry_run else 'Renaming'} {len(args.files)} file(s):\n")
+
+    for old, new in zip(args.files, new_names):
+        if old == new:
+            print(f"  ⏭  {old} (unchanged)")
+            continue
+        operations.append({"old": old, "new": new})
+        icon = "🔍" if args.dry_run else "✅"
+        print(f"  {icon} {old} -> {new}")
+
+    if args.dry_run:
+        print(f"\n  Dry run. Use without --dry-run to apply.")
+        return
+
+    if operations:
+        save_undo(operations)
+        for op in operations:
+            try:
+                shutil.move(op["old"], op["new"])
+            except Exception as e:
+                print(f"  ❌ {op['old']}: {e}")
+        print(f"\n  Renamed {len(operations)} file(s). Undo with: neuros-rename --undo")
+
+
+if __name__ == "__main__":
+    main()

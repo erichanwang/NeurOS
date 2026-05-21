@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+neuros-teach — NeurOS Interactive AI Tutor
+Teaches any topic through structured lessons, quizzes, and adaptive Q&A.
+Tracks learning progress and adapts to your level.
+
+Usage:
+  neuros-teach python                             Start learning Python
+  neuros-teach "machine learning" --level beginner  Set difficulty
+  neuros-teach --quiz                              Take a quiz on current topic
+  neuros-teach --progress                          Show learning progress
+  neuros-teach --lesson 3                          Jump to specific lesson
+"""
+
+import sys
+import os
+import json
+import argparse
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+LEARN_DIR = os.path.expanduser("~/.local/share/neuros/learning")
+PROGRESS_FILE = os.path.join(LEARN_DIR, "progress.json")
+
+os.makedirs(LEARN_DIR, exist_ok=True)
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=1500):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.7}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def load_progress():
+    if os.path.exists(PROGRESS_FILE):
+        with open(PROGRESS_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_progress(data):
+    with open(PROGRESS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def generate_lesson(topic, level, lesson_num):
+    prompt = (
+        f"You are an expert teacher. Create Lesson {lesson_num} about {topic} "
+        f"for a {level} student.\n\n"
+        f"Include:\n"
+        f"1. LESSON TITLE\n"
+        f"2. LEARNING OBJECTIVES (3 bullet points)\n"
+        f"3. CORE CONTENT (well-structured explanation with examples)\n"
+        f"4. KEY TAKEAWAYS (3-4 bullet points)\n"
+        f"5. PRACTICE EXERCISE (1-2 hands-on tasks)\n\n"
+        f"Make it engaging and practical. Use code examples if relevant."
+    )
+    return ollama_generate(prompt, max_tokens=2000)
+
+
+def generate_quiz(topic, level, lessons_completed):
+    prompt = (
+        f"Create a 5-question quiz about {topic} at {level} level.\n"
+        f"The student has completed {lessons_completed} lessons.\n\n"
+        f"For each question:\n"
+        f"- Ask a clear question\n"
+        f"- Provide 4 multiple choice options (A, B, C, D)\n"
+        f"- After all questions, provide the answer key with brief explanations\n\n"
+        f"Format:\n"
+        f"Q1: [question]\n"
+        f"A) ... B) ... C) ... D) ...\n"
+        f"(repeat for all questions)\n"
+        f"---\n"
+        f"ANSWERS:\n"
+        f"1: B - [explanation]"
+    )
+    return ollama_generate(prompt, max_tokens=2000)
+
+
+def interactive_mode(topic, level):
+    progress = load_progress()
+    key = f"{topic}_{level}"
+    lesson = progress.get(key, {}).get("lesson", 1)
+
+    print(f"\n🧑‍🏫 NeurOS Tutor — {topic.upper()} ({level.upper()})\n")
+    print(f"   Commands: 'next' (next lesson), 'quiz', 'ask <question>', 'progress', 'exit'\n")
+
+    while True:
+        try:
+            cmd = input(f"📖 [{topic} L{lesson}]> ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        if cmd == "exit":
+            save_progress(progress)
+            break
+        elif cmd == "next":
+            print(f"\n{'='*60}")
+            print(f"  LESSON {lesson}: {topic}")
+            print(f"{'='*60}\n")
+            content = generate_lesson(topic, level, lesson)
+            if content:
+                print(content)
+                progress[key] = {"lesson": lesson + 1, "last": datetime.now().isoformat()}
+                save_progress(progress)
+                lesson += 1
+            else:
+                print("AI unavailable. Try again later.")
+        elif cmd == "quiz":
+            completed = lesson - 1
+            quiz = generate_quiz(topic, level, completed)
+            if quiz:
+                print(f"\n📝 QUIZ: {topic}\n{quiz}\n")
+            else:
+                print("AI unavailable.")
+        elif cmd == "progress":
+            total = progress.get(key, {}).get("lesson", 1) - 1
+            print(f"  📊 Topic: {topic} | Level: {level} | Lessons: {total}")
+        elif cmd.startswith("ask "):
+            question = cmd[4:]
+            prompt = (
+                f"Answer this student question about {topic}. Be encouraging "
+                f"and educational. Level: {level}.\n\nQUESTION: {question}"
+            )
+            answer = ollama_generate(prompt, 800)
+            if answer:
+                print(f"\n{answer}\n")
+            else:
+                print("AI unavailable.")
+        elif cmd == "":
+            continue
+        else:
+            print("  Commands: next, quiz, ask <q>, progress, exit")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Interactive AI Tutor")
+    parser.add_argument("topic", nargs="?", help="Topic to learn")
+    parser.add_argument("--level", "-l", default="intermediate",
+                        choices=["beginner", "intermediate", "advanced"])
+    parser.add_argument("--lesson", "-n", type=int, help="Start at specific lesson")
+    parser.add_argument("--quiz", "-q", action="store_true",
+                        help="Take a quiz on the current topic")
+    parser.add_argument("--progress", "-p", action="store_true",
+                        help="Show learning progress")
+
+    args = parser.parse_args()
+
+    if args.progress:
+        progress = load_progress()
+        if not progress:
+            print("No learning progress yet. Start with: neuros-teach <topic>")
+        else:
+            for key, data in progress.items():
+                topic, level = key.rsplit("_", 1)
+                print(f"  📚 {topic} ({level}): Lesson {data.get('lesson', 1)-1}")
+        return
+
+    if not args.topic:
+        parser.print_help()
+        return
+
+    if args.quiz:
+        progress = load_progress()
+        key = f"{args.topic}_{args.level}"
+        completed = progress.get(key, {}).get("lesson", 1) - 1
+        quiz = generate_quiz(args.topic, args.level, completed)
+        if quiz:
+            print(f"\n📝 QUIZ: {args.topic}\n\n{quiz}\n")
+        else:
+            print("AI unavailable.")
+        return
+
+    if args.lesson:
+        print(f"\n{'='*60}")
+        print(f"  LESSON {args.lesson}: {args.topic}")
+        print(f"{'='*60}\n")
+        content = generate_lesson(args.topic, args.level, args.lesson)
+        if content:
+            print(content)
+        return
+
+    interactive_mode(args.topic, args.level)
+
+
+if __name__ == "__main__":
+    main()

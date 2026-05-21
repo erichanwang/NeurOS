@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""
+neuros-tunnel — NeurOS Tunnel Manager
+AI-assisted SSH tunnel, reverse tunnel, and port forwarding management.
+
+Usage:
+  neuros-tunnel create local 8080:localhost:3000         Local port forward
+  neuros-tunnel create remote 9000:localhost:22 user@host Remote (reverse) tunnel
+  neuros-tunnel create socks 1080 user@host               SOCKS5 proxy tunnel
+  neuros-tunnel list                                      List active tunnels
+  neuros-tunnel kill <id>                                 Kill a tunnel
+  neuros-tunnel status                                    Show tunnel health
+  neuros-tunnel autossh 8080:localhost:3000               Persistent tunnel via autossh
+  neuros-tunnel expose 3000                               Expose local port via serveo/bore
+  neuros-tunnel diagnose                                  AI diagnoses tunnel issues
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+TUNNEL_DB = os.path.join(CONFIG_DIR, "tunnels.json")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+TUNNELS = {}
+LOCK = threading.Lock()
+
+
+def load_config():
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def query_llm(prompt, system="You are a helpful networking expert."):
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        data = json.dumps({
+            "model": config["model"], "prompt": prompt,
+            "system": system, "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def load_db():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    if os.path.exists(TUNNEL_DB):
+        with open(TUNNEL_DB) as f:
+            return json.load(f)
+    return {"tunnels": []}
+
+
+def save_db(db):
+    with open(TUNNEL_DB + ".tmp", "w") as f:
+        json.dump(db, f, indent=2)
+    os.replace(TUNNEL_DB + ".tmp", TUNNEL_DB)
+
+
+def check_port(port):
+    """Check if a port is in use."""
+    try:
+        result = subprocess.run(
+            ["ss", "-tln"], capture_output=True, text=True
+        )
+        for line in result.stdout.splitlines():
+            if f":{port}" in line:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def create_local_tunnel(local_port, remote_spec):
+    """Create a local SSH tunnel (-L)."""
+    tid = hashlib.sha256(f"L:{local_port}:{remote_spec}:{time.time()}".encode()).hexdigest()[:8]
+
+    # Parse remote_spec: host:port or just port (assume localhost)
+    parts = remote_spec.split(":")
+    if len(parts) == 2:
+        remote_host, remote_port = parts
+    elif len(parts) == 3:
+        ssh_host = parts[0]
+        remote_host = parts[1]
+        remote_port = parts[2]
+    else:
+        remote_host = "localhost"
+        remote_port = parts[0]
+
+    # Determine SSH destination
+    ssh_parts = remote_spec.split(":")
+    ssh_dest = ""
+    if len(ssh_parts) == 3:
+        ssh_dest = ssh_parts[0]
+        remote_host = ssh_parts[1]
+        remote_port = ssh_parts[2]
+        cmd = ["ssh", "-N", "-L", f"{local_port}:{remote_host}:{remote_port}", ssh_dest]
+    else:
+        cmd = ["ssh", "-N", "-L", f"{local_port}:{remote_host}:{remote_port}", "localhost"]
+
+    return tid, cmd
+
+
+def create_remote_tunnel(remote_port, local_spec):
+    """Create a remote/reverse SSH tunnel (-R)."""
+    tid = hashlib.sha256(f"R:{remote_port}:{local_spec}:{time.time()}".encode()).hexdigest()[:8]
+
+    parts = local_spec.split(":", 2)
+    if len(parts) == 2:
+        ssh_host = parts[0]
+        local_endpoint = parts[1]
+    else:
+        ssh_host = "localhost"
+        local_endpoint = local_spec
+
+    cmd = ["ssh", "-N", "-R", f"{remote_port}:{local_endpoint}", ssh_host]
+    return tid, cmd
+
+
+def create_socks_tunnel(port, ssh_dest):
+    """Create a SOCKS5 proxy tunnel (-D)."""
+    tid = hashlib.sha256(f"D:{port}:{ssh_dest}:{time.time()}".encode()).hexdigest()[:8]
+    cmd = ["ssh", "-N", "-D", str(port), ssh_dest]
+    return tid, cmd
+
+
+def cmd_create(args):
+    """Create a new tunnel."""
+    db = load_db()
+
+    if check_port(args.local_port if hasattr(args, 'local_port') else args.port):
+        print(f"⚠️  Port {args.local_port if hasattr(args, 'local_port') else args.port} is already in use")
+        if not args.force:
+            sys.exit(1)
+
+    if args.type == "local":
+        tid, cmd = create_local_tunnel(args.local_port, args.remote)
+    elif args.type == "remote":
+        tid, cmd = create_remote_tunnel(args.remote_port, args.local)
+    elif args.type == "socks":
+        tid, cmd = create_socks_tunnel(args.port, args.host)
+    else:
+        print(f"Unknown tunnel type: {args.type}")
+        sys.exit(1)
+
+    # Start the tunnel
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        time.sleep(0.5)
+
+        if proc.poll() is not None:
+            print(f"❌ Tunnel failed to start (exit code: {proc.returncode})")
+            print(f"   Command: {' '.join(cmd)}")
+            sys.exit(1)
+
+        entry = {
+            "id": tid,
+            "type": args.type,
+            "command": " ".join(cmd),
+            "pid": proc.pid,
+            "created": datetime.now().isoformat(),
+            "status": "active",
+        }
+        db["tunnels"].append(entry)
+        save_db(db)
+
+        with LOCK:
+            TUNNELS[tid] = proc
+
+        print(f"✅ Tunnel created: {tid}")
+        print(f"   Type: {args.type}")
+        print(f"   PID: {proc.pid}")
+        print(f"   Command: {' '.join(cmd)}")
+
+    except FileNotFoundError:
+        print("❌ SSH not found. Install openssh-client.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
+
+
+def cmd_list(args):
+    """List active tunnels."""
+    db = load_db()
+    if not db["tunnels"]:
+        print("No tunnels configured.")
+        return
+
+    print(f"{'ID':<10} {'Type':<8} {'Status':<8} {'PID':<8} {'Command'}")
+    print("-" * 90)
+    for t in db["tunnels"]:
+        # Check if still running
+        status = t["status"]
+        if t.get("pid"):
+            try:
+                os.kill(t["pid"], 0)
+                status = "active"
+            except OSError:
+                status = "dead"
+        print(f"{t['id']:<10} {t['type']:<8} {status:<8} {t.get('pid', ''):<8} {t['command'][:55]}")
+
+
+def cmd_kill(args):
+    """Kill a tunnel."""
+    db = load_db()
+    for i, t in enumerate(db["tunnels"]):
+        if t["id"].startswith(args.id):
+            try:
+                if t.get("pid"):
+                    os.kill(t["pid"], signal.SIGTERM)
+                    time.sleep(0.3)
+                    try:
+                        os.kill(t["pid"], signal.SIGKILL)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+
+            db["tunnels"][i]["status"] = "killed"
+            db["tunnels"][i]["killed_at"] = datetime.now().isoformat()
+            save_db(db)
+
+            with LOCK:
+                if t["id"] in TUNNELS:
+                    del TUNNELS[t["id"]]
+
+            print(f"✅ Killed tunnel {t['id']}: {t['command'][:60]}")
+            return
+
+    print(f"❌ No tunnel found: {args.id}")
+
+
+def cmd_status(args):
+    """Show tunnel status."""
+    db = load_db()
+    active = 0
+    dead = 0
+
+    for t in db["tunnels"]:
+        if t.get("pid"):
+            try:
+                os.kill(t["pid"], 0)
+                active += 1
+            except OSError:
+                dead += 1
+
+    print(f"Tunnels: {active} active, {dead} dead, {len(db['tunnels'])} total")
+
+    # Show port usage
+    try:
+        result = subprocess.run(["ss", "-tln"], capture_output=True, text=True)
+        print("\nListening ports (managed by neuros-tunnel):")
+        for t in db["tunnels"]:
+            if t["status"] == "active":
+                print(f"  {t['id']}: {t['command'][:70]}")
+    except Exception:
+        pass
+
+
+def cmd_autossh(args):
+    """Create a persistent tunnel using autossh."""
+    spec = args.spec  # e.g., 8080:localhost:3000
+    parts = spec.split(":", 2)
+    if len(parts) < 2:
+        print("Error: specify as local_port:host:remote_port")
+        sys.exit(1)
+
+    local_port = parts[0]
+    if len(parts) == 2:
+        remote = f"localhost:{parts[1]}"
+    else:
+        remote = f"{parts[1]}:{parts[2]}"
+
+    tid = hashlib.sha256(f"autossh:{spec}:{time.time()}".encode()).hexdigest()[:8]
+
+    try:
+        # Check autossh exists
+        subprocess.run(["which", "autossh"], capture_output=True, check=True)
+    except Exception:
+        print("autossh not found. Install: sudo apt install autossh")
+        sys.exit(1)
+
+    cmd = [
+        "autossh", "-M", "0", "-N",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+        "-L", f"{local_port}:{remote}",
+        "localhost"
+    ]
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.5)
+
+        db = load_db()
+        db["tunnels"].append({
+            "id": tid, "type": "autossh", "command": " ".join(cmd),
+            "pid": proc.pid, "created": datetime.now().isoformat(),
+            "status": "active", "persistent": True,
+        })
+        save_db(db)
+
+        with LOCK:
+            TUNNELS[tid] = proc
+
+        print(f"✅ Persistent tunnel created: {tid}")
+        print(f"   {local_port} → {remote} (autossh)")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
+
+
+def cmd_expose(args):
+    """Expose a local port publicly."""
+    port = args.port
+
+    print(f"Exposing localhost:{port} to the internet...")
+    print()
+
+    # Try bore first (no external dependency)
+    try:
+        subprocess.run(["which", "bore"], capture_output=True, check=True)
+        cmd = ["bore", "local", str(port), "--to", "bore.pub"]
+        print(f"Using bore: bore local {port} --to bore.pub")
+        proc = subprocess.Popen(cmd)
+        tid = hashlib.sha256(f"expose:{port}:bore:{time.time()}".encode()).hexdigest()[:8]
+        db = load_db()
+        db["tunnels"].append({
+            "id": tid, "type": "expose-bore", "command": " ".join(cmd),
+            "pid": proc.pid, "created": datetime.now().isoformat(),
+            "status": "active",
+        })
+        save_db(db)
+        print(f"✅ Tunnel: {tid} (bore)")
+        print("   Check bore output above for the public URL.")
+        return
+    except Exception:
+        pass
+
+    # Fallback: serveo via SSH
+    print("Trying serveo.net (SSH-based)...")
+    cmd = ["ssh", "-R", f"80:localhost:{port}", "serveo.net"]
+    print(f"Command: {' '.join(cmd)}")
+    print()
+    print("A public URL will be shown in the SSH output.")
+    print("Press Ctrl+C to stop.")
+
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        print("\nExpose stopped.")
+
+
+def cmd_diagnose(args):
+    """AI diagnoses tunnel issues."""
+    db = load_db()
+    issues = []
+
+    for t in db["tunnels"]:
+        if t.get("pid"):
+            try:
+                os.kill(t["pid"], 0)
+            except OSError:
+                issues.append(f"Tunnel {t['id']} (PID {t['pid']}) is dead")
+
+    if check_port(22):
+        pass  # SSH is fine
+    else:
+        issues.append("SSH (port 22) is not listening locally")
+
+    if not issues:
+        print("✅ No issues detected.")
+        return
+
+    print("Issues detected:")
+    for issue in issues:
+        print(f"  • {issue}")
+
+    # AI diagnosis
+    prompt = "Diagnose these SSH tunnel issues and suggest fixes:\n" + "\n".join(issues)
+    diagnosis = query_llm(prompt, "You are a networking and SSH expert. Give concise fixes.")
+    if diagnosis:
+        print(f"\n🧠 AI Diagnosis:\n{diagnosis}")
+
+
+def cmd_cleanup(args):
+    """Clean up dead tunnels from the database."""
+    db = load_db()
+    alive = []
+    cleaned = 0
+
+    for t in db["tunnels"]:
+        if t.get("pid"):
+            try:
+                os.kill(t["pid"], 0)
+                alive.append(t)
+            except OSError:
+                cleaned += 1
+        else:
+            alive.append(t)
+
+    db["tunnels"] = alive
+    save_db(db)
+    print(f"✅ Cleaned {cleaned} dead tunnel(s). {len(alive)} active.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-tunnel — SSH tunnel manager")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    # create
+    p_create = sub.add_parser("create", help="Create a tunnel")
+    p_create.add_argument("type", choices=["local", "remote", "socks"], help="Tunnel type")
+    p_create.add_argument("args", nargs="+", help="Tunnel arguments (depends on type)")
+    p_create.add_argument("--force", "-f", action="store_true", help="Force even if port in use")
+
+    # list
+    sub.add_parser("list", aliases=["ls"], help="List active tunnels")
+
+    # kill
+    p_kill = sub.add_parser("kill", aliases=["rm", "stop"], help="Kill a tunnel")
+    p_kill.add_argument("id", help="Tunnel ID (or prefix)")
+
+    # status
+    sub.add_parser("status", help="Show tunnel status")
+
+    # autossh
+    p_autossh = sub.add_parser("autossh", help="Persistent tunnel via autossh")
+    p_autossh.add_argument("spec", help="Port forward spec (e.g., 8080:localhost:3000)")
+
+    # expose
+    p_expose = sub.add_parser("expose", help="Expose local port publicly")
+    p_expose.add_argument("port", type=int, help="Local port to expose")
+
+    # diagnose
+    sub.add_parser("diagnose", help="AI diagnoses tunnel issues")
+
+    # cleanup
+    sub.add_parser("cleanup", help="Remove dead tunnels from DB")
+
+    args = parser.parse_args()
+
+    if args.command == "create":
+        # Handle variable args for different tunnel types
+        if args.type == "local":
+            if len(args.args) < 1:
+                print("Usage: neuros-tunnel create local <local_port>:<host:port>")
+                sys.exit(1)
+            spec = args.args[0]
+            parts = spec.split(":", 1)
+            args.local_port = parts[0]
+            args.remote = parts[1] if len(parts) > 1 else parts[0]
+            cmd_create(args)
+        elif args.type == "remote":
+            if len(args.args) < 1:
+                print("Usage: neuros-tunnel create remote <remote_port>:<host:local_port>")
+                sys.exit(1)
+            spec = args.args[0]
+            parts = spec.split(":", 1)
+            args.remote_port = parts[0]
+            args.local = parts[1] if len(parts) > 1 else parts[0]
+            cmd_create(args)
+        elif args.type == "socks":
+            if len(args.args) < 1:
+                print("Usage: neuros-tunnel create socks <port> <host>")
+                sys.exit(1)
+            args.port = args.args[0]
+            args.host = args.args[1] if len(args.args) > 1 else "localhost"
+            cmd_create(args)
+    elif args.command in ("list", "ls"):
+        cmd_list(args)
+    elif args.command in ("kill", "rm", "stop"):
+        cmd_kill(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "autossh":
+        cmd_autossh(args)
+    elif args.command == "expose":
+        cmd_expose(args)
+    elif args.command == "diagnose":
+        cmd_diagnose(args)
+    elif args.command == "cleanup":
+        cmd_cleanup(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

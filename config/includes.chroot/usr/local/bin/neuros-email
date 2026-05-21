@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""
+neuros-email — NeurOS Email Assistant
+AI-powered email drafting, summarization, and management.
+
+Usage:
+  neuros-email compose                   AI-draft an email
+  neuros-email reply <email.eml>         AI-draft a reply
+  neuros-email summarize <email.eml>     Summarize a long email
+  neuros-email summarize-inbox           Summarize recent emails
+  neuros-email extract <email.eml>       Extract action items / dates
+  neuros-email templates                 List/manage email templates
+  neuros-email send <file> --to <>       Send email via sendmail/msmtp
+  neuros-email filter <rule>             Create AI-based email filter
+"""
+
+import argparse
+import email
+import email.policy
+import json
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+EMAIL_DIR = os.path.join(CONFIG_DIR, "email-templates")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+
+def load_config():
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def query_llm(prompt, system="You are a professional email assistant."):
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        data = json.dumps({
+            "model": config["model"], "prompt": prompt,
+            "system": system, "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def parse_email_file(filepath):
+    """Parse an .eml file."""
+    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        msg = email.message_from_file(f, policy=email.policy.default)
+    return msg
+
+
+def get_body(msg):
+    """Extract plain text body from email message."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                try:
+                    return part.get_content()
+                except Exception:
+                    return str(part.get_payload(decode=True) or b"", errors="replace")
+    return str(msg.get_payload(decode=True) or b"", errors="replace")
+
+
+def cmd_compose(args):
+    """AI-draft an email."""
+    print("📧 Email Composer")
+    print("-" * 40)
+
+    # Gather context
+    context_parts = []
+    if args.to:
+        context_parts.append(f"To: {args.to}")
+    if args.subject:
+        context_parts.append(f"Subject: {args.subject}")
+    if args.context:
+        context_parts.append(f"Context: {args.context}")
+
+    if not args.context and not args.subject:
+        # Interactive
+        to = input("To: ").strip()
+        subject = input("Subject: ").strip()
+        print("Describe the email you want to write:")
+        print("(Type your description and press Ctrl+D to draft)")
+        description = sys.stdin.read().strip()
+        context_parts = [f"To: {to}", f"Subject: {subject}", f"Description: {description}"]
+    else:
+        description = args.context or ""
+
+    context = "\n".join(context_parts)
+
+    if args.tone:
+        context += f"\nTone: {args.tone}"
+
+    prompt = (
+        f"Write a professional email based on this context. "
+        f"Include subject line, greeting, body, and signature.\n\n{context}"
+    )
+
+    system = "You write professional, concise emails. Output the complete email including headers."
+    draft = query_llm(prompt, system)
+
+    if draft:
+        print()
+        print("─" * 60)
+        print(draft)
+        print("─" * 60)
+        print()
+
+        # Save
+        os.makedirs(EMAIL_DIR, exist_ok=True)
+        fname = f"draft_{datetime.now().strftime('%Y%m%d-%H%M%S')}.eml"
+        fpath = os.path.join(EMAIL_DIR, fname)
+        with open(fpath, "w") as f:
+            f.write(draft)
+        print(f"✅ Saved draft: {fpath}")
+
+        if args.send:
+            cmd_send_internal(fpath, args)
+    else:
+        print("❌ AI draft generation failed.")
+
+
+def cmd_reply(args):
+    """AI-draft a reply to an email."""
+    if not os.path.exists(args.email):
+        print(f"❌ File not found: {args.email}")
+        return
+
+    msg = parse_email_file(args.email)
+    body = get_body(msg)
+
+    context = (
+        f"From: {msg['From']}\n"
+        f"Subject: {msg['Subject']}\n"
+        f"Date: {msg['Date']}\n\n"
+        f"Original email:\n{body[:2000]}"
+    )
+
+    if args.instructions:
+        context += f"\n\nReply instructions: {args.instructions}"
+
+    prompt = f"Draft a reply to this email:\n\n{context}"
+    system = "You write concise, professional email replies. Include the quoted original."
+    reply = query_llm(prompt, system)
+
+    if reply:
+        print()
+        print("─" * 60)
+        print(reply)
+        print("─" * 60)
+        print()
+
+        os.makedirs(EMAIL_DIR, exist_ok=True)
+        fname = f"reply_{datetime.now().strftime('%Y%m%d-%H%M%S')}.eml"
+        fpath = os.path.join(EMAIL_DIR, fname)
+        with open(fpath, "w") as f:
+            f.write(reply)
+        print(f"✅ Saved reply: {fpath}")
+    else:
+        print("❌ AI reply generation failed.")
+
+
+def cmd_summarize(args):
+    """Summarize an email."""
+    if not os.path.exists(args.email):
+        print(f"❌ File not found: {args.email}")
+        return
+
+    msg = parse_email_file(args.email)
+    body = get_body(msg)
+
+    prompt = (
+        f"Summarize this email in 3-4 bullet points. Be concise.\n\n"
+        f"From: {msg['From']}\nSubject: {msg['Subject']}\n\n{body[:3000]}"
+    )
+
+    summary = query_llm(prompt, "You summarize emails concisely.")
+
+    if summary:
+        print(f"📧 {msg['Subject']}")
+        print(f"   From: {msg['From']}")
+        print(f"   Date: {msg['Date']}")
+        print()
+        print(summary)
+    else:
+        print("❌ Summarization failed.")
+
+
+def cmd_summarize_inbox(args):
+    """Summarize recent emails from a maildir or mbox."""
+    mail_dir = args.maildir or os.path.expanduser("~/Mail")
+    if not os.path.exists(mail_dir):
+        print(f"❌ Mail directory not found: {mail_dir}")
+        print("   Specify with --maildir or set up ~/Mail")
+        return
+
+    # Find recent .eml files
+    emails = []
+    for root, _, files in os.walk(mail_dir):
+        for f in files:
+            if f.endswith(".eml") or not ("." in f):
+                fpath = os.path.join(root, f)
+                try:
+                    msg = parse_email_file(fpath)
+                    emails.append({
+                        "path": fpath,
+                        "subject": str(msg["Subject"] or ""),
+                        "from": str(msg["From"] or ""),
+                        "date": str(msg["Date"] or ""),
+                        "body": get_body(msg)[:500],
+                    })
+                except Exception:
+                    pass
+
+    # Sort by date (best effort)
+    emails = emails[-30:]  # Last 30
+
+    if not emails:
+        print("No emails found.")
+        return
+
+    # Batch summarize
+    email_text = "\n\n---\n\n".join([
+        f"Subject: {e['subject']}\nFrom: {e['from']}\n{e['body']}"
+        for e in emails
+    ])
+
+    prompt = f"Summarize these {len(emails)} recent emails. Group by priority and list action items:\n\n{email_text[:4000]}"
+
+    summary = query_llm(prompt, "You summarize inboxes efficiently. List key items and action items.")
+
+    if summary:
+        print(f"📬 Inbox Summary ({len(emails)} recent emails)")
+        print("─" * 40)
+        print(summary)
+    else:
+        print("❌ Summarization failed.")
+
+
+def cmd_extract(args):
+    """Extract action items, dates, contacts from email."""
+    if not os.path.exists(args.email):
+        print(f"❌ File not found: {args.email}")
+        return
+
+    msg = parse_email_file(args.email)
+    body = get_body(msg)
+
+    prompt = (
+        f"Extract from this email:\n"
+        f"1. Action items (tasks I need to do)\n"
+        f"2. Dates and deadlines\n"
+        f"3. People/contacts mentioned\n"
+        f"4. Key decisions\n\n"
+        f"Email:\nFrom: {msg['From']}\nSubject: {msg['Subject']}\n\n{body[:3000]}"
+    )
+
+    extracted = query_llm(prompt)
+
+    if extracted:
+        print(f"📧 {msg['Subject']}")
+        print("─" * 40)
+        print(extracted)
+    else:
+        print("❌ Extraction failed.")
+
+
+def cmd_templates(args):
+    """Manage email templates."""
+    os.makedirs(EMAIL_DIR, exist_ok=True)
+
+    if args.list:
+        templates = [f for f in os.listdir(EMAIL_DIR) if f.endswith(".eml")]
+        if not templates:
+            print("No templates saved.")
+            return
+        print("Email templates:")
+        for t in sorted(templates):
+            print(f"  📧 {t}")
+        return
+
+    if args.show:
+        fpath = os.path.join(EMAIL_DIR, args.show)
+        if os.path.exists(fpath):
+            with open(fpath) as f:
+                print(f.read())
+        else:
+            print(f"Template not found: {args.show}")
+        return
+
+
+def cmd_send_internal(filepath, args):
+    """Send an email file."""
+    if not args.to:
+        print("❌ --to required for sending")
+        return
+
+    # Try msmtp first
+    for sendmail in ["msmtp", "sendmail", "ssmtp"]:
+        try:
+            subprocess.run(["which", sendmail], capture_output=True, check=True)
+            cmd = [sendmail, args.to]
+            with open(filepath, "r") as f:
+                subprocess.run(cmd, input=f.read(), text=True, check=True)
+            print(f"✅ Email sent to {args.to} via {sendmail}")
+            return
+        except subprocess.CalledProcessError:
+            pass
+        except FileNotFoundError:
+            pass
+
+    print("❌ No mail transport found. Install msmtp or sendmail.")
+    print(f"   Draft saved: {filepath}")
+
+
+def cmd_send(args):
+    """Send a draft email."""
+    if not os.path.exists(args.file):
+        print(f"❌ File not found: {args.file}")
+        return
+    cmd_send_internal(args.file, args)
+
+
+def cmd_filter(args):
+    """Create AI-based email filter rule."""
+    print("🤖 AI Email Filter")
+    print(f"Rule: {args.rule}")
+    print()
+
+    prompt = f"Create a sieve/procmail filter rule for: {args.rule}. Return only the filter code."
+    rule = query_llm(prompt, "You are an email filtering expert. Output sieve or procmail rules.")
+
+    if rule:
+        print(rule)
+        if args.save:
+            fpath = os.path.join(CONFIG_DIR, "email-filters.txt")
+            with open(fpath, "a") as f:
+                f.write(f"\n# {args.rule}\n{rule}\n\n")
+            print(f"\n✅ Filter appended to {fpath}")
+    else:
+        print("❌ Filter generation failed.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-email — AI email assistant")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    p_compose = sub.add_parser("compose", help="AI-draft an email")
+    p_compose.add_argument("--to", help="Recipient")
+    p_compose.add_argument("--subject", "-s", help="Subject line")
+    p_compose.add_argument("--context", "-c", help="Email context/description")
+    p_compose.add_argument("--tone", choices=["formal", "casual", "friendly", "urgent", "apologetic"], help="Email tone")
+    p_compose.add_argument("--send", action="store_true", help="Send after drafting")
+
+    p_reply = sub.add_parser("reply", help="AI-draft a reply")
+    p_reply.add_argument("email", help="Email file (.eml) to reply to")
+    p_reply.add_argument("--instructions", "-i", help="Reply instructions")
+
+    p_summarize = sub.add_parser("summarize", help="Summarize an email")
+    p_summarize.add_argument("email", help="Email file to summarize")
+
+    p_inbox = sub.add_parser("summarize-inbox", help="Summarize recent inbox emails")
+    p_inbox.add_argument("--maildir", help="Maildir path (default: ~/Mail)")
+
+    p_extract = sub.add_parser("extract", help="Extract action items from email")
+    p_extract.add_argument("email", help="Email file to analyze")
+
+    p_templates = sub.add_parser("templates", aliases=["template"], help="Manage templates")
+    p_templates.add_argument("--list", "-l", action="store_true", help="List templates")
+    p_templates.add_argument("--show", metavar="NAME", help="Show template content")
+
+    p_send = sub.add_parser("send", help="Send an email draft")
+    p_send.add_argument("file", help="Draft file to send")
+    p_send.add_argument("--to", required=True, help="Recipient address")
+
+    p_filter = sub.add_parser("filter", help="Create AI email filter")
+    p_filter.add_argument("rule", help="Filter description")
+    p_filter.add_argument("--save", action="store_true", help="Save to filter file")
+
+    args = parser.parse_args()
+
+    if args.command == "compose":
+        cmd_compose(args)
+    elif args.command == "reply":
+        cmd_reply(args)
+    elif args.command == "summarize":
+        cmd_summarize(args)
+    elif args.command == "summarize-inbox":
+        cmd_summarize_inbox(args)
+    elif args.command == "extract":
+        cmd_extract(args)
+    elif args.command in ("templates", "template"):
+        cmd_templates(args)
+    elif args.command == "send":
+        cmd_send(args)
+    elif args.command == "filter":
+        cmd_filter(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+"""
+neuros-trigger — NeurOS Trigger System
+Event-driven automation: watch files, processes, network, and system events,
+then trigger actions when conditions are met.
+
+Usage:
+  neuros-trigger watch <path> --on-change "<cmd>"
+  neuros-trigger watch <path> --on-create "<cmd>" --on-delete "<cmd>"
+  neuros-trigger process <name> --on-start "<cmd>" --on-stop "<cmd>"
+  neuros-trigger port <port> --on-connect "<cmd>"
+  neuros-trigger resource cpu --above 90 --then "<cmd>"
+  neuros-trigger resource mem --above 95 --then "<cmd>"
+  neuros-trigger list                    List active triggers
+  neuros-trigger remove <id>             Stop and remove a trigger
+  neuros-trigger log                     Show trigger history
+  neuros-trigger daemon                  Run all triggers as daemon
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+TRIGGER_DB = os.path.join(CONFIG_DIR, "triggers.json")
+TRIGGER_LOG = os.path.join(CONFIG_DIR, "trigger-log.json")
+PID_DIR = os.path.join(CONFIG_DIR, "triggers")
+
+LOCK = threading.Lock()
+RUNNING = True
+TRIGGERS = {}
+
+
+class Trigger:
+    def __init__(self, tid, ttype, config, action_cmd, action_on):
+        self.id = tid
+        self.type = ttype
+        self.config = config
+        self.action_cmd = action_cmd
+        self.action_on = action_on
+        self.created = datetime.now().isoformat()
+        self.last_fired = None
+        self.fire_count = 0
+
+    def to_dict(self):
+        return {
+            "id": self.id, "type": self.type, "config": self.config,
+            "action_cmd": self.action_cmd, "action_on": self.action_on,
+            "created": self.created, "last_fired": self.last_fired,
+            "fire_count": self.fire_count,
+        }
+
+
+def load_db():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    if os.path.exists(TRIGGER_DB):
+        with open(TRIGGER_DB) as f:
+            return json.load(f)
+    return {"triggers": []}
+
+
+def save_db(db):
+    with open(TRIGGER_DB + ".tmp", "w") as f:
+        json.dump(db, f, indent=2)
+    os.replace(TRIGGER_DB + ".tmp", TRIGGER_DB)
+
+
+def log_event(tid, event_type, detail=""):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    log = []
+    if os.path.exists(TRIGGER_LOG):
+        with open(TRIGGER_LOG) as f:
+            log = json.load(f)
+    log.append({
+        "trigger_id": tid, "type": event_type,
+        "detail": detail, "timestamp": datetime.now().isoformat(),
+    })
+    with open(TRIGGER_LOG, "w") as f:
+        json.dump(log[-500:], f, indent=2)
+
+
+def execute_action(trigger):
+    """Execute the trigger's action command."""
+    try:
+        env = os.environ.copy()
+        env["NEUROS_TRIGGER_ID"] = trigger.id
+        env["NEUROS_TRIGGER_TYPE"] = trigger.type
+        env["NEUROS_TRIGGER_ON"] = trigger.action_on
+
+        proc = subprocess.run(
+            shlex.split(trigger.action_cmd),
+            capture_output=True, text=True, timeout=60,
+            env=env,
+        )
+        trigger.last_fired = datetime.now().isoformat()
+        trigger.fire_count += 1
+        log_event(trigger.id, "fired", f"exit={proc.returncode}")
+        return proc.returncode, proc.stdout
+    except subprocess.TimeoutExpired:
+        log_event(trigger.id, "timeout")
+        return -1, "TIMEOUT"
+    except Exception as e:
+        log_event(trigger.id, "error", str(e))
+        return -1, str(e)
+
+
+# === File Watcher ===
+def watch_file(trigger):
+    """Watch a file or directory for changes."""
+    path = trigger.config["path"]
+    on_change = trigger.action_on == "change"
+    on_create = trigger.action_on == "create"
+    on_delete = trigger.action_on == "delete"
+
+    if not os.path.exists(path):
+        log_event(trigger.id, "error", f"path not found: {path}")
+        return
+
+    if os.path.isfile(path):
+        last_mtime = os.path.getmtime(path)
+        last_size = os.path.getsize(path)
+    else:
+        # Directory: track contents
+        try:
+            last_snapshot = set(os.listdir(path))
+        except Exception:
+            last_snapshot = set()
+
+    while RUNNING and trigger.id in TRIGGERS:
+        time.sleep(1)
+
+        if os.path.isfile(path):
+            try:
+                mtime = os.path.getmtime(path)
+                size = os.path.getsize(path)
+            except OSError:
+                if on_delete:
+                    execute_action(trigger)
+                    # Path gone — stop watching
+                    break
+                time.sleep(5)
+                continue
+
+            if on_change and (mtime != last_mtime or size != last_size):
+                execute_action(trigger)
+                last_mtime = mtime
+                last_size = size
+        else:
+            try:
+                current = set(os.listdir(path))
+            except Exception:
+                time.sleep(5)
+                continue
+
+            if on_create:
+                new_files = current - last_snapshot
+                for f in new_files:
+                    trigger.config["new_file"] = f
+                    execute_action(trigger)
+
+            if on_delete:
+                removed = last_snapshot - current
+                for f in removed:
+                    trigger.config["removed_file"] = f
+                    execute_action(trigger)
+
+            if on_change and current != last_snapshot:
+                execute_action(trigger)
+
+            last_snapshot = current
+
+
+# === Process Watcher ===
+def watch_process(trigger):
+    """Watch for a process starting or stopping."""
+    proc_name = trigger.config["process"]
+    was_running = False
+
+    while RUNNING and trigger.id in TRIGGERS:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-x", proc_name],
+                capture_output=True, text=True
+            )
+            is_running = result.returncode == 0
+        except Exception:
+            is_running = False
+
+        if trigger.action_on == "start" and is_running and not was_running:
+            execute_action(trigger)
+        elif trigger.action_on == "stop" and not is_running and was_running:
+            execute_action(trigger)
+
+        was_running = is_running
+        time.sleep(2)
+
+
+# === Port Watcher ===
+def watch_port(trigger):
+    """Watch for connections on a port."""
+    port = str(trigger.config["port"])
+    last_connections = set()
+
+    while RUNNING and trigger.id in TRIGGERS:
+        try:
+            result = subprocess.run(
+                ["ss", "-tn", f"sport = :{port}"],
+                capture_output=True, text=True
+            )
+            current = set()
+            for line in result.stdout.splitlines():
+                if "ESTAB" in line:
+                    current.add(line.strip())
+            new = current - last_connections
+            if new and trigger.action_on == "connect":
+                execute_action(trigger)
+            last_connections = current
+        except Exception:
+            pass
+        time.sleep(1)
+
+
+# === Resource Watcher ===
+def watch_resource(trigger):
+    """Watch CPU/memory/disk usage."""
+    resource = trigger.config["resource"]
+    threshold = trigger.config["threshold"]
+    fired = False  # Only fire once per threshold crossing
+
+    while RUNNING and trigger.id in TRIGGERS:
+        usage = None
+
+        if resource == "cpu":
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2+$4}'"],
+                    capture_output=True, text=True
+                )
+                usage = float(result.stdout.strip())
+            except Exception:
+                pass
+        elif resource == "mem":
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", "free | grep Mem | awk '{print ($3/$2)*100}'"],
+                    capture_output=True, text=True
+                )
+                usage = float(result.stdout.strip())
+            except Exception:
+                pass
+        elif resource == "disk":
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", "df / | tail -1 | awk '{print $5}' | tr -d '%'"],
+                    capture_output=True, text=True
+                )
+                usage = float(result.stdout.strip())
+            except Exception:
+                pass
+
+        if usage is not None:
+            above = usage >= threshold
+            if above and not fired:
+                trigger.config["current_value"] = usage
+                execute_action(trigger)
+                fired = True
+            elif not above:
+                fired = False  # Reset when below threshold
+
+        time.sleep(5)
+
+
+def start_trigger(trigger):
+    """Start a trigger's watcher thread."""
+    watchers = {
+        "file": watch_file,
+        "process": watch_process,
+        "port": watch_port,
+        "resource": watch_resource,
+    }
+    watcher = watchers.get(trigger.type)
+    if watcher:
+        t = threading.Thread(target=watcher, args=(trigger,), daemon=True)
+        t.start()
+        TRIGGERS[trigger.id] = t
+        log_event(trigger.id, "started")
+        return True
+    return False
+
+
+def cmd_watch(args):
+    """Add a file watcher trigger."""
+    db = load_db()
+    tid = hashlib.sha256(f"{args.path}:{args.cmd}:{datetime.now().isoformat()}".encode()).hexdigest()[:8]
+
+    if args.on_change:
+        trigger = Trigger(tid, "file", {"path": os.path.abspath(args.path)},
+                          args.on_change, "change")
+    elif args.on_create:
+        trigger = Trigger(tid, "file", {"path": os.path.abspath(args.path)},
+                          args.on_create, "create")
+    elif args.on_delete:
+        trigger = Trigger(tid, "file", {"path": os.path.abspath(args.path)},
+                          args.on_delete, "delete")
+    else:
+        trigger = Trigger(tid, "file", {"path": os.path.abspath(args.path)},
+                          args.cmd, "change")
+
+    db["triggers"].append(trigger.to_dict())
+    save_db(db)
+
+    if start_trigger(trigger):
+        print(f"✅ File watcher started: {tid}")
+        print(f"   Path: {args.path}")
+        print(f"   On: {trigger.action_on} → {trigger.action_cmd}")
+
+
+def cmd_process(args):
+    """Add a process watcher trigger."""
+    db = load_db()
+    tid = hashlib.sha256(f"proc:{args.name}:{args.cmd}:{datetime.now().isoformat()}".encode()).hexdigest()[:8]
+
+    action_on = "start" if args.on_start else "stop"
+    cmd = args.on_start or args.on_stop
+
+    trigger = Trigger(tid, "process", {"process": args.name}, cmd, action_on)
+    db["triggers"].append(trigger.to_dict())
+    save_db(db)
+
+    if start_trigger(trigger):
+        print(f"✅ Process watcher started: {tid}")
+        print(f"   Process: {args.name}")
+        print(f"   On {action_on} → {cmd}")
+
+
+def cmd_port(args):
+    """Add a port watcher trigger."""
+    db = load_db()
+    tid = hashlib.sha256(f"port:{args.port}:{args.cmd}:{datetime.now().isoformat()}".encode()).hexdigest()[:8]
+
+    trigger = Trigger(tid, "port", {"port": args.port}, args.cmd, "connect")
+    db["triggers"].append(trigger.to_dict())
+    save_db(db)
+
+    if start_trigger(trigger):
+        print(f"✅ Port watcher started: {tid}")
+        print(f"   Port: {args.port}")
+        print(f"   On connect → {args.cmd}")
+
+
+def cmd_resource(args):
+    """Add a resource watcher trigger."""
+    db = load_db()
+    tid = hashlib.sha256(f"resource:{args.resource}:{args.threshold}:{datetime.now().isoformat()}".encode()).hexdigest()[:8]
+
+    trigger = Trigger(tid, "resource",
+                      {"resource": args.resource, "threshold": args.threshold},
+                      args.then, "threshold")
+    db["triggers"].append(trigger.to_dict())
+    save_db(db)
+
+    if start_trigger(trigger):
+        print(f"✅ Resource watcher started: {tid}")
+        print(f"   {args.resource} ≥ {args.threshold}% → {args.then}")
+
+
+def cmd_list(args):
+    """List active triggers."""
+    db = load_db()
+    if not db["triggers"]:
+        print("No active triggers.")
+        return
+
+    print(f"{'ID':<10} {'Type':<10} {'On':<12} {'Fires':<6} {'Command'}")
+    print("-" * 90)
+    for t in db["triggers"]:
+        config = t.get("config", {})
+        detail = config.get("path") or config.get("process") or str(config.get("port", "")) or f"{config.get('resource','')}>{config.get('threshold','')}"
+        print(f"{t['id']:<10} {t['type']:<10} {t['action_on']:<12} {t.get('fire_count',0):<6} {t['action_cmd'][:50]}")
+
+
+def cmd_remove(args):
+    """Remove a trigger."""
+    db = load_db()
+    for i, t in enumerate(db["triggers"]):
+        if t["id"].startswith(args.id):
+            removed = db["triggers"].pop(i)
+            save_db(db)
+            # Stop the thread
+            if removed["id"] in TRIGGERS:
+                del TRIGGERS[removed["id"]]
+            log_event(removed["id"], "removed")
+            print(f"✅ Removed trigger {removed['id']}: {removed['action_cmd'][:60]}")
+            return
+
+    print(f"❌ No trigger found: {args.id}")
+
+
+def cmd_log(args):
+    """Show trigger history."""
+    if not os.path.exists(TRIGGER_LOG):
+        print("No trigger history yet.")
+        return
+
+    with open(TRIGGER_LOG) as f:
+        log = json.load(f)
+
+    if not log:
+        print("No trigger events logged.")
+        return
+
+    print(f"{'Timestamp':<22} {'ID':<10} {'Event':<10} {'Detail'}")
+    print("-" * 80)
+    for entry in log[-30:]:
+        ts = entry.get("timestamp", "")[:19]
+        print(f"{ts:<22} {entry.get('trigger_id',''):<10} {entry.get('type',''):<10} {entry.get('detail','')[:40]}")
+
+
+def cmd_daemon(args):
+    """Start all triggers as daemon."""
+    db = load_db()
+    if not db["triggers"]:
+        print("No triggers configured. Use 'neuros-trigger watch/process/port/resource' to add.")
+        return
+
+    print(f"Starting {len(db['triggers'])} trigger(s) as daemon...")
+    for tdata in db["triggers"]:
+        trigger = Trigger(
+            tdata["id"], tdata["type"], tdata["config"],
+            tdata["action_cmd"], tdata["action_on"]
+        )
+        trigger.fire_count = tdata.get("fire_count", 0)
+        start_trigger(trigger)
+        print(f"  ▶ {trigger.id}: {trigger.type}/{trigger.action_on}")
+
+    print("\nTriggers running. Press Ctrl+C to stop.")
+
+    def sig_handler(sig, frame):
+        global RUNNING
+        RUNNING = False
+        print("\nShutting down triggers...")
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+
+    while RUNNING and TRIGGERS:
+        time.sleep(1)
+
+    print("All triggers stopped.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-trigger — event-driven automation")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    # watch (file)
+    p_watch = sub.add_parser("watch", help="Watch file/directory for changes")
+    p_watch.add_argument("path", help="Path to watch")
+    p_watch.add_argument("--cmd", help="Command to run (shorthand; defaults to on-change)")
+    p_watch.add_argument("--on-change", "--change", help="Command on file change")
+    p_watch.add_argument("--on-create", "--create", help="Command on file creation")
+    p_watch.add_argument("--on-delete", "--delete", help="Command on file deletion")
+
+    # process
+    p_proc = sub.add_parser("process", help="Watch for process start/stop")
+    p_proc.add_argument("name", help="Process name (exact)")
+    p_proc.add_argument("--cmd", help="Command to run (shorthand)")
+    p_proc.add_argument("--on-start", help="Command when process starts")
+    p_proc.add_argument("--on-stop", help="Command when process stops")
+
+    # port
+    p_port = sub.add_parser("port", help="Watch for port connections")
+    p_port.add_argument("port", type=int, help="Port number")
+    p_port.add_argument("--cmd", required=True, help="Command when connection detected")
+
+    # resource
+    p_res = sub.add_parser("resource", help="Watch system resource usage")
+    p_res.add_argument("resource", choices=["cpu", "mem", "disk"], help="Resource to monitor")
+    p_res.add_argument("--above", type=float, required=True, dest="threshold", help="Threshold percentage")
+    p_res.add_argument("--then", required=True, help="Command when above threshold")
+
+    # list
+    sub.add_parser("list", aliases=["ls"], help="List active triggers")
+
+    # remove
+    p_rm = sub.add_parser("remove", aliases=["rm"], help="Remove a trigger")
+    p_rm.add_argument("id", help="Trigger ID (or prefix)")
+
+    # log
+    sub.add_parser("log", help="Show trigger history")
+
+    # daemon
+    sub.add_parser("daemon", help="Run all triggers as daemon")
+
+    args = parser.parse_args()
+
+    if args.command == "watch":
+        cmd_watch(args)
+    elif args.command == "process":
+        cmd_process(args)
+    elif args.command == "port":
+        cmd_port(args)
+    elif args.command == "resource":
+        cmd_resource(args)
+    elif args.command in ("list", "ls"):
+        cmd_list(args)
+    elif args.command in ("remove", "rm"):
+        cmd_remove(args)
+    elif args.command == "log":
+        cmd_log(args)
+    elif args.command == "daemon":
+        cmd_daemon(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

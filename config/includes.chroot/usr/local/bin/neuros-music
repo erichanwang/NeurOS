@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""
+neuros-music — NeurOS Music Assistant
+AI-powered music generation, playlist creation, and audio management.
+
+Usage:
+  neuros-music generate "lofi jazz"             Generate AI music (via Ollama + audio tools)
+  neuros-music playlist "coding focus"           AI-curated playlist from local files
+  neuros-music discover "like daft punk"         Discover similar music
+  neuros-music organize <dir>                    AI-organize music library by genre/mood
+  neuros-music mood "energetic"                  Generate playlist for a mood
+  neuros-music analyze <file>                    AI music analysis (key, tempo, mood)
+  neuros-music radio <genre>                     Internet radio stream finder
+"""
+
+import argparse
+import json
+import os
+import random
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+MUSIC_CACHE = os.path.join(CONFIG_DIR, "music-cache.json")
+LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+
+GENRES = [
+    "lofi", "jazz", "classical", "electronic", "ambient", "rock",
+    "hip-hop", "pop", "metal", "folk", "blues", "funk", "soul",
+    "reggae", "punk", "indie", "synthwave", "vaporwave", "chiptune",
+    "orchestral", "cinematic", "acoustic", "experimental",
+]
+
+MOODS = [
+    "energetic", "calm", "focused", "happy", "melancholic",
+    "romantic", "dark", "uplifting", "nostalgic", "dreamy",
+    "aggressive", "peaceful", "mysterious", "epic",
+]
+
+INTERNET_RADIOS = {
+    "lofi": "https://www.youtube.com/watch?v=jfKfPfyJRdk",
+    "jazz": "https://www.youtube.com/watch?v=HuFYqnbVbzY",
+    "classical": "https://www.youtube.com/watch?v=WvMc1ZP3uCY",
+    "ambient": "https://www.youtube.com/watch?v=vNwYtllyt3Q",
+    "electronic": "https://www.youtube.com/watch?v=36YnV9STBqc",
+    "synthwave": "https://www.youtube.com/watch?v=MVPTGgC-b0E",
+}
+
+
+def load_config():
+    cfg = {"model": "mistral", "host": "localhost", "port": "11434"}
+    try:
+        if os.path.exists(LLM_CONF):
+            with open(LLM_CONF) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def query_llm(prompt, system="You are a music expert and curator."):
+    config = load_config()
+    try:
+        import urllib.request
+        url = f"http://{config['host']}:{config['port']}/api/generate"
+        data = json.dumps({
+            "model": config["model"], "prompt": prompt,
+            "system": system, "stream": False,
+        }).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def load_cache():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    if os.path.exists(MUSIC_CACHE):
+        with open(MUSIC_CACHE) as f:
+            return json.load(f)
+    return {"library": {}, "playlists": []}
+
+
+def save_cache(cache):
+    with open(MUSIC_CACHE + ".tmp", "w") as f:
+        json.dump(cache, f, indent=2)
+    os.replace(MUSIC_CACHE + ".tmp", MUSIC_CACHE)
+
+
+def find_music_files(directory):
+    """Find all music files in a directory."""
+    extensions = {".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".wma", ".opus"}
+    music = []
+    for root, _, files in os.walk(directory):
+        for f in files:
+            if Path(f).suffix.lower() in extensions:
+                music.append(os.path.join(root, f))
+    return music
+
+
+def get_audio_info(filepath):
+    """Get audio file metadata using ffprobe."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", filepath],
+            capture_output=True, text=True, timeout=10
+        )
+        info = json.loads(result.stdout)
+        fmt = info.get("format", {})
+        return {
+            "duration": float(fmt.get("duration", 0)),
+            "bitrate": int(fmt.get("bit_rate", 0)),
+            "tags": fmt.get("tags", {}),
+        }
+    except Exception:
+        return {"duration": 0, "bitrate": 0, "tags": {}}
+
+
+def cmd_generate(args):
+    """Generate AI music description/notation."""
+    prompt = args.prompt
+
+    print(f"🎵 Generating: {prompt}")
+
+    # AI creates musical notation or description
+    system = "You are a music composer. Create musical descriptions or ABC notation."
+    result = query_llm(
+        f"Create a musical composition for: {prompt}. "
+        f"Provide ABC notation if you know it, or a detailed musical description "
+        f"with tempo, key, chord progression, and melody notes.",
+        system
+    )
+
+    if result:
+        print()
+        print(result)
+
+        # Save to file
+        os.makedirs(os.path.expanduser("~/Music/NeurOS"), exist_ok=True)
+        fname = prompt[:30].replace(" ", "_").replace("/", "_")
+        fpath = os.path.expanduser(f"~/Music/NeurOS/{fname}_{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt")
+        with open(fpath, "w") as f:
+            f.write(f"Prompt: {prompt}\n")
+            f.write(f"Generated: {datetime.now().isoformat()}\n\n")
+            f.write(result)
+        print(f"\nSaved: {fpath}")
+
+        # Check if ABC notation, offer to play
+        if "X:" in result and "K:" in result:
+            print("\n(ABC notation detected — install 'abcmidi' to render as MIDI)")
+    else:
+        print("❌ Generation failed. Ollama not available.")
+
+
+def cmd_playlist(args):
+    """Create an AI-curated playlist from local files."""
+    music_dir = args.dir or os.path.expanduser("~/Music")
+
+    if not os.path.exists(music_dir):
+        print(f"❌ Directory not found: {music_dir}")
+        return
+
+    files = find_music_files(music_dir)
+    if not files:
+        print(f"No music files found in {music_dir}")
+        print("Supported: .mp3, .flac, .wav, .ogg, .m4a, .aac")
+        return
+
+    print(f"Found {len(files)} music file(s)")
+
+    # Sample and analyze
+    sample = random.sample(files, min(20, len(files)))
+    file_list = "\n".join([os.path.basename(f) for f in sample])
+
+    prompt = f"From this list of songs, select the best ones for a playlist themed: '{args.theme}'. "
+    prompt += f"Return ONLY the filenames, one per line, no explanations.\n\n{file_list}"
+
+    selection = query_llm(prompt)
+    if not selection:
+        print("❌ AI playlist generation failed.")
+        return
+
+    # Match back to full paths
+    playlist = []
+    for line in selection.strip().split("\n"):
+        line = line.strip().strip("0123456789. -")
+        for f in files:
+            if line.lower() in os.path.basename(f).lower():
+                if f not in playlist:
+                    playlist.append(f)
+                break
+
+    print(f"\n🎧 Playlist: '{args.theme}'")
+    print(f"   {len(playlist)} track(s)")
+    print()
+
+    for i, track in enumerate(playlist, 1):
+        info = get_audio_info(track)
+        mins = int(info["duration"] // 60) if info["duration"] else 0
+        secs = int(info["duration"] % 60) if info["duration"] else 0
+        title = info["tags"].get("title") or info["tags"].get("TITLE") or os.path.basename(track)
+        artist = info["tags"].get("artist") or info["tags"].get("ARTIST") or "Unknown"
+        print(f"  {i}. {title} — {artist} ({mins}:{secs:02d})")
+
+    # Save playlist
+    playlist_name = args.theme.replace(" ", "_")[:40]
+    cache = load_cache()
+    cache["playlists"].append({
+        "name": playlist_name,
+        "theme": args.theme,
+        "tracks": playlist,
+        "created": datetime.now().isoformat(),
+    })
+    save_cache(cache)
+    print(f"\n✅ Playlist saved: {playlist_name}")
+
+
+def cmd_discover(args):
+    """Discover similar music using AI recommendations."""
+    query = args.query
+
+    prompt = f"Recommend 10 songs similar to '{query}'. For each, provide: Artist — Song Title (Year). Be specific with real music."
+    recommendations = query_llm(prompt, "You are a music recommendation expert.")
+
+    if recommendations:
+        print(f"🎧 Similar to: {query}")
+        print()
+        print(recommendations)
+    else:
+        print("❌ Recommendation failed.")
+
+
+def cmd_organize(args):
+    """AI-organize music library by genre/mood."""
+    music_dir = args.dir
+    if not os.path.exists(music_dir):
+        print(f"❌ Directory not found: {music_dir}")
+        return
+
+    files = find_music_files(music_dir)
+    if not files:
+        print(f"No music files found in {music_dir}")
+        return
+
+    print(f"Found {len(files)} file(s) to organize")
+
+    # Analyze each file
+    analyzed = []
+    for f in files:
+        info = get_audio_info(f)
+        title = info["tags"].get("title") or info["tags"].get("TITLE") or os.path.basename(f)
+        artist = info["tags"].get("artist") or info["tags"].get("ARTIST") or ""
+        analyzed.append(f"{os.path.basename(f)} | {artist} — {title}")
+
+    # Batch AI classification
+    batch = "\n".join(analyzed[:30])
+    prompt = f"Classify each song into ONE genre from: {', '.join(GENRES)}. "
+    prompt += f"Format: 'filename | genre'. Return one per line.\n\n{batch}"
+
+    classifications = query_llm(prompt, "You are a music classifier. Be precise.")
+    if not classifications:
+        print("❌ Classification failed.")
+        return
+
+    # Parse and organize
+    genre_map = {}
+    for line in classifications.strip().split("\n"):
+        if "|" in line:
+            parts = line.split("|")
+            if len(parts) >= 2:
+                fname = parts[0].strip()
+                genre = parts[-1].strip().lower()
+                for g in GENRES:
+                    if g in genre:
+                        genre_map[fname] = g
+                        break
+                if fname not in genre_map:
+                    genre_map[fname] = "other"
+
+    moved = 0
+    if not args.dry_run:
+        for f in files:
+            fname = os.path.basename(f)
+            genre = genre_map.get(fname, "other")
+            genre_dir = os.path.join(music_dir, genre.capitalize())
+            os.makedirs(genre_dir, exist_ok=True)
+            dest = os.path.join(genre_dir, fname)
+            if f != dest:
+                os.rename(f, dest)
+                moved += 1
+
+    # Show summary
+    from collections import Counter
+    genres = Counter(genre_map.get(os.path.basename(f), "unknown") for f in files)
+    print()
+    print("Genre distribution:")
+    for genre, count in genres.most_common():
+        print(f"  {genre.capitalize():<15} {count} files")
+
+    if args.dry_run:
+        print(f"\n(Dry run — {len(files)} files would be organized)")
+    else:
+        print(f"\n✅ Organized {moved} file(s) into genre folders")
+
+
+def cmd_mood(args):
+    """Generate playlist for a specific mood."""
+    mood = args.mood.lower()
+
+    if mood not in MOODS:
+        closest = min(MOODS, key=lambda m: len(set(m) & set(mood)))
+        print(f"Unknown mood: '{mood}'. Did you mean '{closest}'?")
+        return
+
+    print(f"🎭 Mood: {mood}")
+
+    prompt = f"Suggest 15 songs for a '{mood}' mood playlist. Include artist and title for each."
+    result = query_llm(prompt)
+    if result:
+        print()
+        print(result)
+    else:
+        print("❌ Mood playlist generation failed.")
+
+
+def cmd_analyze(args):
+    """Analyze a music file."""
+    if not os.path.exists(args.file):
+        print(f"❌ File not found: {args.file}")
+        return
+
+    info = get_audio_info(args.file)
+    print(f"🎵 {os.path.basename(args.file)}")
+    print(f"   Duration: {info['duration']:.0f}s ({info['duration']/60:.1f} min)")
+    print(f"   Bitrate: {info['bitrate']/1000:.0f} kbps")
+
+    tags = info.get("tags", {})
+    for key in ["title", "artist", "album", "genre", "date", "track"]:
+        val = tags.get(key) or tags.get(key.upper())
+        if val:
+            print(f"   {key.capitalize()}: {val}")
+
+
+def cmd_radio(args):
+    """Stream internet radio."""
+    genre = args.genre.lower()
+
+    if genre not in INTERNET_RADIOS:
+        print(f"Genre '{genre}' not found. Available: {', '.join(INTERNET_RADIOS.keys())}")
+        return
+
+    url = INTERNET_RADIOS[genre]
+    print(f"📻 Streaming {genre} radio...")
+    print(f"   URL: {url}")
+
+    # Try to open in browser or stream with mpv
+    for player in ["mpv", "vlc", "xdg-open"]:
+        try:
+            subprocess.run(["which", player], capture_output=True, check=True)
+            subprocess.Popen([player, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"   Launched with {player}")
+            return
+        except Exception:
+            pass
+
+    print(f"   Open manually: {url}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="neuros-music — AI music assistant")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    p_gen = sub.add_parser("generate", help="Generate AI music notation")
+    p_gen.add_argument("prompt", help="Music description")
+
+    p_playlist = sub.add_parser("playlist", help="AI-curated playlist")
+    p_playlist.add_argument("theme", help="Playlist theme")
+    p_playlist.add_argument("--dir", help="Music directory (default: ~/Music)")
+
+    p_discover = sub.add_parser("discover", help="Discover similar music")
+    p_discover.add_argument("query", help="Artist or song reference")
+
+    p_org = sub.add_parser("organize", help="Organize music library")
+    p_org.add_argument("dir", help="Music directory")
+    p_org.add_argument("--dry-run", "-n", action="store_true", help="Preview only")
+
+    p_mood = sub.add_parser("mood", help="Generate mood playlist")
+    p_mood.add_argument("mood", help="Mood (e.g., energetic, calm, focused)")
+
+    p_analyze = sub.add_parser("analyze", help="Analyze music file")
+    p_analyze.add_argument("file", help="Music file path")
+
+    p_radio = sub.add_parser("radio", help="Stream internet radio")
+    p_radio.add_argument("genre", help="Genre (lofi, jazz, classical, etc.)")
+
+    args = parser.parse_args()
+
+    if args.command == "generate":
+        cmd_generate(args)
+    elif args.command == "playlist":
+        cmd_playlist(args)
+    elif args.command == "discover":
+        cmd_discover(args)
+    elif args.command == "organize":
+        cmd_organize(args)
+    elif args.command == "mood":
+        cmd_mood(args)
+    elif args.command == "analyze":
+        cmd_analyze(args)
+    elif args.command == "radio":
+        cmd_radio(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""
+neuros-deploy — NeurOS One-Click Deployer
+Deploys projects to VPS, cloud, Docker, or local server with AI-powered
+config generation and environment setup.
+
+Usage:
+  neuros-deploy ./myapp                           Deploy current project
+  neuros-deploy --docker ./myapp                  Deploy via Docker
+  neuros-deploy --host user@vps ./myapp           Deploy to remote server
+  neuros-deploy --config deploy.json              Deploy from config
+  neuros-deploy --generate "python fastapi app"   Generate deploy config
+"""
+
+import sys
+import os
+import json
+import shlex
+import subprocess
+import argparse
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+
+def read_config():
+    config = {"model": "mistral", "ollama_url": "http://localhost:11434"}
+    config_path = os.path.join(CONFIG_DIR, "llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    return config
+
+
+def ollama_generate(prompt, max_tokens=1000):
+    config = read_config()
+    try:
+        req = urllib.request.Request(
+            f"{config['ollama_url']}/api/generate",
+            data=json.dumps({
+                "model": config["model"], "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": 0.2}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read().decode()).get("response", "").strip()
+    except Exception:
+        return None
+
+
+def detect_project(path):
+    """Detect project type and build commands."""
+    info = {"type": "static", "build": None, "run": None, "port": 3000}
+    files = set(os.listdir(path))
+    if "package.json" in files:
+        info["type"] = "node"
+        info["build"] = "npm install && npm run build"
+        info["run"] = "npm start"
+        info["port"] = 3000
+    elif "requirements.txt" in files:
+        info["type"] = "python"
+        info["build"] = "pip install -r requirements.txt"
+        info["run"] = "python app.py"
+        info["port"] = 8000
+    elif "go.mod" in files:
+        info["type"] = "go"
+        info["build"] = "go build"
+        info["port"] = 8080
+    elif "Cargo.toml" in files:
+        info["type"] = "rust"
+        info["build"] = "cargo build --release"
+        info["run"] = "./target/release/app"
+    elif "Makefile" in files:
+        info["type"] = "make"
+        info["build"] = "make"
+        info["run"] = "make run"
+    elif "docker-compose.yml" in files:
+        info["type"] = "docker-compose"
+        info["run"] = "docker-compose up -d"
+    return info
+
+
+def generate_config(description):
+    prompt = (
+        f"Generate a deploy configuration for this project in JSON format. "
+        f"Include: type, build command, run command, port, env vars, "
+        f"health check URL.\n\nProject: {description}\n\nReturn only valid JSON."
+    )
+    response = ollama_generate(prompt, 800)
+    if response:
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def deploy_docker(path, info):
+    dockerfile = os.path.join(path, "Dockerfile")
+    if not os.path.exists(dockerfile):
+        generate_dockerfile(path, info)
+    print("🐳 Building Docker image...")
+    result = subprocess.run(
+        ["docker", "build", "-t", os.path.basename(path), path],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"  ❌ Docker build failed:\n{result.stderr[:500]}")
+        return False
+    print("  ✅ Built")
+    return True
+
+
+def deploy_ssh(host, path, info):
+    name = os.path.basename(path)
+    remote_path = f"/opt/{name}"
+    print(f"🚀 Deploying to {host}...")
+
+    cmds = [
+        (["rsync", "-avz", "--exclude=.git", "--exclude=node_modules",
+          "--exclude=__pycache__", "--exclude=.venv",
+          path.rstrip("/") + "/", f"{host}:{remote_path}/"], "Sync files"),
+        (["ssh", host, f"cd {remote_path} && {info['build']}"], "Build"),
+        (["ssh", host, f"cd {remote_path} && nohup {info['run']} &"], "Start"),
+    ]
+
+    for cmd, desc in cmds:
+        print(f"  {desc}...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  ❌ {desc} failed: {result.stderr[:200]}")
+            return False
+        print(f"  ✅ {desc}")
+    return True
+
+
+def generate_dockerfile(path, info):
+    templates = {
+        "node": "FROM node:20\nWORKDIR /app\nCOPY package.json ./\nRUN npm install\nCOPY . .\nEXPOSE 3000\nCMD [\"npm\", \"start\"]",
+        "python": "FROM python:3.12\nWORKDIR /app\nCOPY requirements.txt ./\nRUN pip install -r requirements.txt\nCOPY . .\nEXPOSE 8000\nCMD [\"python\", \"app.py\"]",
+        "go": "FROM golang:1.22\nWORKDIR /app\nCOPY . .\nRUN go build\nEXPOSE 8080\nCMD [\"./app\"]",
+    }
+    content = templates.get(info["type"], templates["node"])
+    with open(os.path.join(path, "Dockerfile"), "w") as f:
+        f.write(content)
+    print(f"  📄 Generated Dockerfile")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS One-Click Deployer")
+    parser.add_argument("target", nargs="?", help="Project directory to deploy")
+    parser.add_argument("--docker", "-d", action="store_true", help="Deploy via Docker")
+    parser.add_argument("--host", "-H", help="SSH host (user@host)")
+    parser.add_argument("--config", "-c", help="Deploy from config file")
+    parser.add_argument("--generate", "-g", help="Generate deploy config from description")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Show plan only")
+
+    args = parser.parse_args()
+
+    if args.generate:
+        config = generate_config(args.generate)
+        if config:
+            print(json.dumps(config, indent=2))
+        else:
+            print("Failed to generate config.")
+        return
+
+    if not args.target:
+        parser.print_help()
+        return
+
+    path = os.path.abspath(args.target)
+    if not os.path.isdir(path):
+        print(f"Not a directory: {args.target}")
+        return
+
+    info = detect_project(path)
+    print(f"\n📦 Detected: {info['type']} project")
+    print(f"   Build: {info['build']}")
+    print(f"   Run:   {info['run']}")
+    print(f"   Port:  {info['port']}")
+
+    if args.dry_run:
+        print("\n  Dry run — no deployment performed.")
+        return
+
+    if args.docker:
+        deploy_docker(path, info)
+    elif args.host:
+        deploy_ssh(args.host, path, info)
+    else:
+        deploy_docker(path, info)
+
+
+if __name__ == "__main__":
+    main()
