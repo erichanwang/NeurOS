@@ -1,0 +1,14 @@
+{
+  "telemetry.telemetryLevel": "off",
+  "extensions.autoUpdate": false,
+  "update.mode": "none",
+  "workbench.colorTheme": "Default Dark+",
+  "editor.fontFamily": "'Ubuntu Mono', monospace",
+  "editor.fontSize": 14,
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "editor.renderWhitespace": "boundary",
+  "files.trimTrailingWhitespace": true,
+  "window.titleBarStyle": "custom",
+  "extensions.ignoreRecommendations": true
+}

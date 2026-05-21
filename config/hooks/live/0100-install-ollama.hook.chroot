@@ -1,0 +1,18 @@
+#!/bin/bash
+set -e
+# Hook: Install Ollama and pre-pull Mistral 7B model
+# Runs in the live-build chroot environment during ISO creation
+
+echo "[NeurOS] Installing Ollama..."
+
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pre-pull Mistral 7B model (quantized, ~4GB)
+echo "[NeurOS] Pulling Mistral 7B model (this will take a while)..."
+ollama pull mistral
+
+# Enable the systemd service so Ollama starts on boot
+systemctl enable neuros-llm.service
+
+echo "[NeurOS] Ollama installation complete."

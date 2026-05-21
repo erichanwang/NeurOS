@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NeurOS Tray
+Comment=NeurOS System Tray Applet
+Exec=/usr/local/bin/neuros-tray
+Icon=neuros
+Terminal=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true

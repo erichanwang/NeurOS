@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""
+nn — NeurOS Terminal Assistant
+Usage:
+  nn "your question"
+  nn "explain this" ./path/to/file
+  nn -i   (interactive mode)
+"""
+
+import sys, os, subprocess, json
+try:
+    import requests
+except ImportError:
+    print("requests not installed. Run: pip3 install requests")
+    sys.exit(1)
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+CONFIG_PATH = os.path.expanduser("~/.config/neuros/llm.conf")
+DEFAULT_MODEL = "mistral"
+
+def get_model():
+    try:
+        with open(CONFIG_PATH) as f:
+            for line in f:
+                line = line.strip()
+                # Parse both flat key=value and TOML-style key = "value"
+                if '=' in line and not line.startswith('['):
+                    key, val = line.split('=', 1)
+                    if key.strip() == "model":
+                        return val.strip().strip('"').strip("'")
+    except:
+        pass
+    return DEFAULT_MODEL
+
+def get_system_context():
+    ctx = [f"OS: NeurOS (Ubuntu 24.04)", f"CWD: {os.getcwd()}"]
+    try:
+        files = os.listdir(".")
+        ctx.append(f"Directory contents: {', '.join(files[:20])}")
+    except:
+        pass
+    try:
+        branch = subprocess.check_output(
+            ["git", "branch", "--show-current"],
+            stderr=subprocess.DEVNULL, text=True).strip()
+        if branch:
+            ctx.append(f"Git branch: {branch}")
+    except:
+        pass
+    return "\n".join(ctx)
+
+def read_file_safe(path):
+    try:
+        with open(path, 'r', errors='replace') as f:
+            content = f.read()
+            # Truncate very large files
+            if len(content) > 8000:
+                content = content[:8000] + "\n... (truncated)"
+            return content
+    except Exception as e:
+        return f"(Could not read file: {e})"
+
+def stream_response(prompt, model):
+    try:
+        resp = requests.post(OLLAMA_URL, json={
+            "model": model,
+            "prompt": prompt,
+            "stream": True
+        }, stream=True, timeout=120)
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if line:
+                data = json.loads(line)
+                print(data.get("response", ""), end="", flush=True)
+                if data.get("done"):
+                    print()
+                    break
+    except requests.exceptions.ConnectionError:
+        print("Error: NeurOS LLM daemon is not running.")
+        print("Start it with: sudo systemctl start neuros-llm")
+    except Exception as e:
+        print(f"Error: {e}")
+
+def interactive_mode(model):
+    print(f"NeurOS Assistant (model: {model}) — type 'exit' to quit\n")
+    history = []
+    while True:
+        try:
+            user_input = input(">> ").strip()
+            if user_input.lower() in ("exit", "quit"):
+                break
+            if not user_input:
+                continue
+            history.append(user_input)
+            ctx = get_system_context()
+            history_str = "\n".join(f"User: {h}" for h in history[-5:])
+            prompt = f"""You are a helpful Linux terminal assistant on NeurOS.
+System context:
+{ctx}
+
+Conversation history:
+{history_str}
+
+Current question: {user_input}
+Be concise. Wrap shell commands in backticks."""
+            stream_response(prompt, model)
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting.")
+            break
+
+def main():
+    args = sys.argv[1:]
+    model = get_model()
+
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0)
+
+    if args[0] == "-i":
+        interactive_mode(model)
+        return
+
+    question = args[0]
+    file_content = ""
+    if len(args) > 1:
+        file_content = read_file_safe(args[1])
+
+    ctx = get_system_context()
+    prompt = f"""You are a helpful Linux terminal assistant on NeurOS.
+System context:
+{ctx}
+{"File content:\\n" + file_content if file_content else ""}
+User question: {question}
+Be concise. If suggesting shell commands, wrap them in backticks."""
+
+    stream_response(prompt, model)
+
+if __name__ == "__main__":
+    main()

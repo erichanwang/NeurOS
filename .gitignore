@@ -1,7 +1,22 @@
 #edit from here.
 
+# Build artifacts
+*.iso
+*.log
+build.log
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
 
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
 
 # do not edit this - author made it
 *.md
