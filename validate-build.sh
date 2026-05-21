@@ -145,6 +145,7 @@ ALL_TOOLS=(
     "neuros-fix"
     "neuros-refactor"
     "neuros-scan"
+    "neuros-autofix"
 )
 for tool in "${ALL_TOOLS[@]}"; do
     TOOL_PATH="config/includes.chroot/usr/local/bin/$tool"
@@ -172,6 +173,10 @@ check_content "config/includes.chroot/etc/systemd/system/neuros-llm.service" "11
 
 check_exists "config/includes.chroot/etc/systemd/user/neuros-firstboot.service" "firstboot user service"
 check_content "config/includes.chroot/etc/systemd/user/neuros-firstboot.service" "ConditionFirstBoot" "firstboot: condition set"
+
+check_exists "config/includes.chroot/etc/systemd/system/neuros-autofix.service" "neuros-autofix service"
+check_content "config/includes.chroot/etc/systemd/system/neuros-autofix.service" "neuros-autofix" "autofix service: exec correct"
+check_content "config/includes.chroot/etc/systemd/system/neuros-autofix.service" "Restart=on-failure" "autofix service: restart policy"
 
 # === Hooks ===
 echo ""

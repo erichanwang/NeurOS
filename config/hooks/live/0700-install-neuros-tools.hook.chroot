@@ -58,6 +58,7 @@ NEUROS_TOOLS=(
     "/usr/local/bin/neuros-fix"
     "/usr/local/bin/neuros-refactor"
     "/usr/local/bin/neuros-scan"
+    "/usr/local/bin/neuros-autofix"
 )
 
 for tool in "${NEUROS_TOOLS[@]}"; do
@@ -117,5 +118,13 @@ Exec=/usr/local/bin/neuros-mcp
 Hidden=true
 X-GNOME-Autostart-enabled=false
 DESKTOP
+
+# Install and enable neuros-autofix systemd service
+if [ -f /etc/systemd/system/neuros-autofix.service ]; then
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable neuros-autofix.service 2>/dev/null && \
+        echo "  ✅ neuros-autofix service enabled" || \
+        echo "  ⚠️  neuros-autofix service enable skipped (no systemd)"
+fi
 
 echo "[NeurOS] Tools installation complete."
