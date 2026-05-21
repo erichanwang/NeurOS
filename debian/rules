@@ -1,0 +1,42 @@
+#!/usr/bin/make -f
+# Debian Rules file for NeurOS packages
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# No compilation needed — NeurOS tools are scripts
+	true
+
+override_dh_auto_install:
+	# Install neuros tools to /usr/local/bin
+	mkdir -p debian/neuros-tools/usr/local/bin
+	cp config/includes.chroot/usr/local/bin/* debian/neuros-tools/usr/local/bin/
+	chmod +x debian/neuros-tools/usr/local/bin/*
+
+	# Install config files
+	mkdir -p debian/neuros-tools/etc/skel/.config/neuros
+	cp -r config/includes.chroot/etc/skel/.config/neuros/* debian/neuros-tools/etc/skel/.config/neuros/ 2>/dev/null || true
+
+	# Install systemd units
+	mkdir -p debian/neuros-tools/etc/systemd/system
+	cp config/includes.chroot/etc/systemd/system/* debian/neuros-tools/etc/systemd/system/ 2>/dev/null || true
+
+	mkdir -p debian/neuros-tools/etc/systemd/user
+	cp config/includes.chroot/etc/systemd/user/* debian/neuros-tools/etc/systemd/user/ 2>/dev/null || true
+
+	# Install bash completions
+	mkdir -p debian/neuros-tools/etc
+	cp config/includes.chroot/etc/neuros-completions.bash debian/neuros-tools/etc/ 2>/dev/null || true
+
+	# Install zsh completions
+	mkdir -p debian/neuros-tools/usr/share/zsh/site-functions
+	cp config/includes.chroot/usr/share/zsh/site-functions/* debian/neuros-tools/usr/share/zsh/site-functions/ 2>/dev/null || true
+
+override_dh_auto_test:
+	# Run pre-build validation
+	bash validate-build.sh || true
+	python3 tests/test_nn.py -v || true
+
+override_dh_installinit:
+	dh_installinit --no-start

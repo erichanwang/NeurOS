@@ -37,8 +37,40 @@ alias gl="git log --oneline --graph"
 alias gd="git diff"
 
 # NeurOS
+# AI Assistants
 alias ai="nn"
 alias ask="nn"
+alias chat="neuros-chat"
+alias nchat="neuros-chat"
+
+# Model Management
+alias nm="neuros-model"
+alias models="neuros-model list"
+alias nmpull="neuros-model pull"
+alias nmswitch="neuros-model switch"
+
+# Code Tools
+alias snippets="neuros-snippets"
+alias ns="neuros-snippets"
+alias ngen="neuros-snippets generate"
+
+# Git Assistant
+alias ng="neuros-git"
+alias ncommit="neuros-git commit"
+alias nreview="neuros-git review"
+alias npr="neuros-git pr"
+
+# System Agent
+alias nagent="neuros-agent"
+alias nctx="neuros-agent context"
+alias nstatus="neuros-agent status"
+
+# Voice
+alias nsay="neuros-speak"
+alias nhear="neuros-voice"
+
+# MCP Server
+alias nmcp="neuros-mcp"
 
 # === nn shell integration ===
 # Ctrl+Space for quick nn access

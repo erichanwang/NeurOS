@@ -1,0 +1,13 @@
+neuros (1.0.0) noble; urgency=medium
+
+  * Initial release of NeurOS — Ubuntu 24.04 LTS with local LLM integration.
+  * Core tools: nn (terminal assistant), neuros-tray, neuros-welcome
+  * Build system: live-build configs, hooks, package lists
+  * AI features: neuros-chat (web GUI), neuros-model (model manager)
+  * Dev tools: neuros-git (AI git assistant), neuros-snippets (code manager)
+  * System: neuros-agent (context agent), neuros-mcp (MCP server)
+  * Voice: neuros-voice (STT), neuros-speak (TTS)
+  * Privacy: No telemetry, UFW firewall, local-only AI
+  * Desktop: GNOME 46 dark theme, dash-to-dock, zsh, neovim
+
+ -- NeurOS Team <dev@neuros.local>  Mon, 22 Dec 2024 00:00:00 +0000

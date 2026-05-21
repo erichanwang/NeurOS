@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  build:
+    build: .
+    container_name: neuros-build
+    privileged: true
+    volumes:
+      - .:/workspace
+      - /dev:/dev
+      - /proc:/proc
+      - /sys:/sys
+    working_dir: /workspace
+    entrypoint: ["/opt/neuros/build.sh"]
+
+  shell:
+    build: .
+    container_name: neuros-shell
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    entrypoint: ["/bin/bash"]
+
+  validate:
+    build: .
+    container_name: neuros-validate
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    entrypoint: ["bash", "validate-build.sh"]

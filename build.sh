@@ -105,12 +105,22 @@ verify_structure() {
         "config/package-lists/remove.list.chroot"
         "config/includes.chroot/usr/local/bin/nn"
         "config/includes.chroot/usr/local/bin/neuros-tray"
+        "config/includes.chroot/usr/local/bin/neuros-chat"
+        "config/includes.chroot/usr/local/bin/neuros-model"
+        "config/includes.chroot/usr/local/bin/neuros-snippets"
+        "config/includes.chroot/usr/local/bin/neuros-git"
+        "config/includes.chroot/usr/local/bin/neuros-agent"
+        "config/includes.chroot/usr/local/bin/neuros-voice"
+        "config/includes.chroot/usr/local/bin/neuros-speak"
+        "config/includes.chroot/usr/local/bin/neuros-mcp"
         "config/includes.chroot/etc/systemd/system/neuros-llm.service"
         "config/hooks/live/0100-install-ollama.hook.chroot"
         "config/hooks/live/0200-install-vscode.hook.chroot"
         "config/hooks/live/0300-configure-gnome.hook.chroot"
         "config/hooks/live/0400-remove-telemetry.hook.chroot"
         "config/hooks/live/0500-configure-system.hook.chroot"
+        "config/hooks/live/0600-install-gnome-extensions.hook.chroot"
+        "config/hooks/live/0700-install-neuros-tools.hook.chroot"
     )
 
     local missing=0

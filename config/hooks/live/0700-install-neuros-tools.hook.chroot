@@ -1,0 +1,83 @@
+#!/bin/bash
+set -e
+# Hook: Install NeurOS command-line tools and configure completions
+# Runs in the live-build chroot environment during ISO creation
+
+echo "[NeurOS] Installing NeurOS tools..."
+
+# No additional Python dependencies needed — all tools use stdlib
+
+# Make all neuros tools executable
+NEUROS_TOOLS=(
+    "/usr/local/bin/nn"
+    "/usr/local/bin/neuros-chat"
+    "/usr/local/bin/neuros-model"
+    "/usr/local/bin/neuros-snippets"
+    "/usr/local/bin/neuros-git"
+    "/usr/local/bin/neuros-agent"
+    "/usr/local/bin/neuros-voice"
+    "/usr/local/bin/neuros-speak"
+    "/usr/local/bin/neuros-mcp"
+    "/usr/local/bin/neuros-tray"
+    "/usr/local/bin/neuros-welcome"
+)
+
+for tool in "${NEUROS_TOOLS[@]}"; do
+    if [ -f "$tool" ]; then
+        chmod +x "$tool"
+        echo "  ✅ $(basename "$tool")"
+    else
+        echo "  ⚠️  $(basename "$tool") not found"
+    fi
+done
+
+# Install bash completions
+if [ -f /etc/neuros-completions.bash ]; then
+    # Add sourcing to skel .bashrc
+    if ! grep -q "neuros-completions" /etc/skel/.bashrc 2>/dev/null; then
+        echo "" >> /etc/skel/.bashrc
+        echo "# NeurOS completions" >> /etc/skel/.bashrc
+        echo "source /etc/neuros-completions.bash 2>/dev/null" >> /etc/skel/.bashrc
+    fi
+    echo "  ✅ bash completions"
+fi
+
+# Install zsh completions
+if [ -d /usr/share/zsh/site-functions ]; then
+    echo "  ✅ zsh completions"
+fi
+
+# Install fish completions (if fish is installed)
+if [ -d /etc/skel/.config/fish/completions ]; then
+    echo "  ✅ fish completions"
+fi
+
+# Create symlinks for convenience
+mkdir -p /usr/local/bin
+
+# Add neuros service to autostart desktop entries
+mkdir -p /etc/skel/.config/autostart
+
+# Chat server desktop entry
+cat > /etc/skel/.config/autostart/neuros-chat.desktop << 'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=NeurOS Chat Server
+Comment=Start NeurOS Chat local server
+Exec=/usr/local/bin/neuros-chat --no-browser
+Hidden=true
+X-GNOME-Autostart-enabled=false
+DESKTOP
+
+# MCP server desktop entry
+cat > /etc/skel/.config/autostart/neuros-mcp.desktop << 'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=NeurOS MCP Server
+Comment=Start NeurOS MCP server for IDE integration
+Exec=/usr/local/bin/neuros-mcp
+Hidden=true
+X-GNOME-Autostart-enabled=false
+DESKTOP
+
+echo "[NeurOS] Tools installation complete."

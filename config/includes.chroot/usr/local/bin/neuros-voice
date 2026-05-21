@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""
+neuros-voice — NeurOS Voice Input (Speech-to-Text)
+Records audio from microphone and transcribes using local Whisper model via Ollama.
+
+Usage:
+  neuros-voice                Record and transcribe (5 second default)
+  neuros-voice --duration 10  Record for 10 seconds
+  neuros-voice --file audio.wav  Transcribe an existing audio file
+  neuros-voice --continuous   Continuous dictation mode (Ctrl+C to stop)
+  neuros-voice --list         List available audio devices
+"""
+
+import sys
+import os
+import subprocess
+import json
+import argparse
+import tempfile
+import time
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+WHISPER_MODEL = "whisper"  # Ollama doesn't have whisper natively, use API workaround
+
+
+def record_audio(duration=5, output_file=None):
+    """Record audio from microphone using arecord or parec."""
+    if output_file is None:
+        output_file = tempfile.mktemp(suffix=".wav")
+
+    print(f"🎤 Recording for {duration} seconds...")
+
+    try:
+        # Try arecord (ALSA) first with 16000Hz mono for STT compatibility
+        subprocess.run(
+            ["arecord", "-d", str(duration), "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav", output_file],
+            capture_output=True, timeout=duration + 5
+        )
+    except FileNotFoundError:
+        try:
+            # Try parec (PulseAudio)
+            result = subprocess.run(
+                ["parec", "--format=s16le", "--rate=16000", "--channels=1"],
+                capture_output=True, timeout=duration + 5
+            )
+            with open(output_file, 'wb') as f:
+                f.write(result.stdout)
+        except FileNotFoundError:
+            print("Error: No audio input tool found. Install: sudo apt install alsa-utils")
+            sys.exit(1)
+
+    if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+        print(f"✅ Recorded to {output_file}")
+        return output_file
+    else:
+        print("Error: Recording failed or produced empty file")
+        return None
+
+
+def transcribe_audio(audio_file):
+    """Transcribe audio using local LLM with audio description approach."""
+    # Since Ollama may not run Whisper, we use a workaround:
+    # Convert audio to text using a local STT engine if available,
+    # otherwise provide instructions.
+
+    # Try Vosk first (lightweight offline STT)
+    try:
+        result = subprocess.run(
+            ["vosk-transcriber", audio_file],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except FileNotFoundError:
+        pass
+
+    # Try whisper CLI
+    try:
+        result = subprocess.run(
+            ["whisper", audio_file, "--model", "tiny", "--output_format", "txt",
+             "--output_dir", "/tmp"],
+            capture_output=True, text=True, timeout=60
+        )
+        txt_file = audio_file.rsplit('.', 1)[0] + '.txt'
+        if os.path.exists(txt_file):
+            with open(txt_file) as f:
+                return f.read().strip()
+    except FileNotFoundError:
+        pass
+
+    # Try speech_recognition (offline mode only, no Google)
+    # Note: We intentionally do NOT use Google STT (recognize_google) because
+    # NeurOS is designed to keep all data local. Use Vosk or Whisper instead.
+    return None
+
+
+def send_to_llm(text):
+    """Send transcribed text to Ollama for response."""
+    if not text:
+        return "No text to process."
+
+    try:
+        import urllib.request
+        data = json.dumps({
+            "model": "mistral",
+            "prompt": f"User said: {text}\n\nRespond helpfully and concisely.",
+            "stream": False
+        }).encode('utf-8')
+
+        req = urllib.request.Request(OLLAMA_URL, data=data,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read())
+            return result.get("response", "No response.")
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def continuous_mode():
+    """Continuous dictation mode."""
+    print("🎙️  Continuous dictation mode")
+    print("   Speak into your microphone. Press Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            audio_file = record_audio(duration=5)
+            if not audio_file:
+                time.sleep(1)
+                continue
+
+            text = transcribe_audio(audio_file)
+            if text:
+                print(f"\n📝 You said: {text}")
+
+                response = send_to_llm(text)
+                print(f"🤖 NeurOS: {response}\n")
+            else:
+                print("   (no speech detected)")
+
+            # Clean up temp file
+            try:
+                os.remove(audio_file)
+            except Exception:
+                pass
+
+    except KeyboardInterrupt:
+        print("\n👋 Dictation stopped.")
+
+
+def list_devices():
+    """List available audio input devices."""
+    print("Audio input devices:\n")
+
+    try:
+        result = subprocess.run(["arecord", "-l"], capture_output=True, text=True, timeout=5)
+        print(result.stdout)
+    except FileNotFoundError:
+        pass
+
+    try:
+        result = subprocess.run(["pactl", "list", "sources", "short"],
+                               capture_output=True, text=True, timeout=5)
+        print(result.stdout)
+    except FileNotFoundError:
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Voice Input (Speech-to-Text)")
+    parser.add_argument("--duration", "-d", type=int, default=5, help="Recording duration in seconds")
+    parser.add_argument("--file", "-f", help="Transcribe an existing audio file")
+    parser.add_argument("--continuous", "-c", action="store_true", help="Continuous dictation mode")
+    parser.add_argument("--list", "-l", action="store_true", help="List audio devices")
+    parser.add_argument("--no-response", "-n", action="store_true", help="Only transcribe, don't get AI response")
+
+    args = parser.parse_args()
+
+    if args.list:
+        list_devices()
+        return
+
+    if args.continuous:
+        continuous_mode()
+        return
+
+    if args.file:
+        audio_file = args.file
+    else:
+        audio_file = record_audio(duration=args.duration)
+
+    if not audio_file or not os.path.exists(audio_file):
+        print("No audio to transcribe.")
+        sys.exit(1)
+
+    print("🔊 Transcribing...")
+    text = transcribe_audio(audio_file)
+
+    if text:
+        print(f"\n📝 Transcription: {text}")
+
+        if not args.no_response:
+            print("\n🤖 NeurOS response:")
+            response = send_to_llm(text)
+            print(response)
+    else:
+        print("Could not transcribe audio.")
+        print("\nInstall a speech-to-text engine:")
+        print("  pip3 install vosk            # Offline, lightweight")
+        print("  pip3 install openai-whisper  # Offline, more accurate")
+        print("  sudo apt install alsa-utils  # Audio recording")
+
+    # Cleanup
+    if not args.file and audio_file:
+        try:
+            os.remove(audio_file)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

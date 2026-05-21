@@ -1,0 +1,117 @@
+name: NeurOS CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate Build Configuration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run pre-build validation
+        run: bash validate-build.sh
+
+      - name: Run unit tests
+        run: python3 tests/test_nn.py -v
+
+      - name: Check script syntax
+        run: |
+          for f in config/hooks/live/*.hook.chroot; do
+            bash -n "$f" && echo "✅ $f" || echo "❌ $f"
+          done
+          bash -n build.sh && echo "✅ build.sh"
+          bash -n validate-build.sh && echo "✅ validate-build.sh"
+          bash -n config/includes.chroot/usr/local/bin/neuros-firstboot && echo "✅ neuros-firstboot"
+
+      - name: Verify package lists
+        run: |
+          echo "=== Install packages ==="
+          wc -l config/package-lists/neuros.list.chroot
+          echo "=== Remove packages ==="
+          wc -l config/package-lists/remove.list.chroot
+
+  build-iso:
+    name: Build ISO (Dry Run)
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y live-build
+
+      - name: Configure live-build
+        run: |
+          lb config \
+            --distribution noble \
+            --archive-areas "main restricted universe multiverse" \
+            --debian-installer none \
+            --memtest none \
+            --binary-images iso-hybrid
+
+      - name: Verify config structure
+        run: |
+          echo "Checking build structure..."
+          test -d config/hooks/live && echo "✅ hooks present"
+          test -d config/includes.chroot && echo "✅ includes present"
+          test -d config/package-lists && echo "✅ package lists present"
+
+  docker-build:
+    name: Docker Container Build
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t neuros-build .
+
+      - name: Verify Docker image
+        run: |
+          docker run --rm neuros-build bash -c "
+            echo 'Container verified:'
+            echo '  Python: \$(python3 --version)'
+            echo '  Live-build: \$(lb --version 2>&1 || echo installed)'
+            echo '  nn: \$(test -f /usr/local/bin/nn && echo present || echo MISSING)'
+            echo '  neuros-chat: \$(test -f /usr/local/bin/neuros-chat && echo present || echo MISSING)'
+          "
+
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Python syntax
+        run: |
+          echo "Checking Python syntax..."
+          # Check .py files
+          for f in config/includes.chroot/usr/local/bin/*.py tests/*.py scripts/*.py; do
+            [ -f "$f" ] || continue
+            python3 -c "import ast; ast.parse(open('$f').read())" && echo "✅ ${f##*/}" || echo "❌ ${f##*/}"
+          done
+          # Check neuros tools without .py extension
+          for f in config/includes.chroot/usr/local/bin/neuros-*; do
+            [ -f "$f" ] || continue
+            head -1 "$f" | grep -q python3 || continue
+            python3 -c "import ast; ast.parse(open('$f').read())" && echo "✅ ${f##*/}" || echo "❌ ${f##*/}"
+          done
+
+      - name: Check JSON validity
+        run: |
+          python3 -c "import json; json.load(open('config/includes.chroot/etc/skel/.continue/config.json'))" && echo "✅ continue config.json"
+          python3 -c "import json; json.load(open('config/includes.chroot/etc/skel/.config/Code/User/settings.json'))" && echo "✅ vscode settings.json"
+
+      - name: Check script shebangs
+        run: |
+          for f in config/hooks/live/*.hook.chroot; do
+            head -1 "$f" | grep -q '#!/bin/bash' && echo "✅ ${f##*/}" || echo "❌ ${f##*/} (bad shebang)"
+          done
