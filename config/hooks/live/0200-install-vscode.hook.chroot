@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+# Hook: Install VS Code and Continue.dev extension
+# Runs in the live-build chroot environment during ISO creation
+
+echo "[NeurOS] Installing VS Code..."
+
+# Add Microsoft GPG key and repository
+wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list
+
+apt-get update
+apt-get install -y code
+
+# Install Continue.dev extension (pre-configured for local Ollama)
+echo "[NeurOS] Installing Continue.dev extension..."
+code --install-extension Continue.continue --user-data-dir /etc/skel/.vscode
+
+echo "[NeurOS] VS Code installation complete."

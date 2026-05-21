@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+neuros-welcome — First-boot welcome screen for NeurOS.
+Launched on first login to show key information and features.
+"""
+
+import sys
+import os
+import subprocess
+
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk, Gdk, Pango
+except ImportError:
+    print("GTK3 not available. Welcome screen requires python3-gi gir1.2-gtk-3.0")
+    sys.exit(1)
+
+WELCOME_MARKER = os.path.expanduser("~/.config/neuros/.welcome-shown")
+
+class WelcomeWindow(Gtk.Window):
+    def __init__(self):
+        Gtk.Window.__init__(self, title="Welcome to NeurOS")
+        self.set_default_size(700, 500)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        # Main vertical box
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        vbox.set_margin_start(40)
+        vbox.set_margin_end(40)
+        vbox.set_margin_top(30)
+        vbox.set_margin_bottom(30)
+
+        # Title
+        title = Gtk.Label()
+        title.set_markup('<span size="xx-large" weight="bold">🧠 Welcome to NeurOS</span>')
+        title.set_halign(Gtk.Align.CENTER)
+        vbox.pack_start(title, False, False, 0)
+
+        # Subtitle
+        subtitle = Gtk.Label(label="Linux with a brain. Fully local. Fully yours.")
+        subtitle.set_halign(Gtk.Align.CENTER)
+        subtitle.get_style_context().add_class("dim-label")
+        vbox.pack_start(subtitle, False, False, 0)
+
+        # Separator
+        sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        vbox.pack_start(sep, False, False, 0)
+
+        # Feature grid
+        grid = Gtk.Grid()
+        grid.set_column_spacing(20)
+        grid.set_row_spacing(15)
+        grid.set_halign(Gtk.Align.CENTER)
+
+        features = [
+            ("💻", "Terminal Assistant", "Type 'nn \"your question\"'\nin any terminal"),
+            ("🔒", "100% Local AI", "Your data never leaves\nthis machine"),
+            ("📝", "Code Completion", "Continue.dev + Neovim\npre-configured"),
+            ("⚡", "Quick Ask", "Click the brain icon in\nyour system tray"),
+            ("🛡️", "Privacy First", "No telemetry. No cloud.\nFirewall enabled."),
+            ("🎨", "Dev Ready", "Zsh, Neovim, Git, Python\npre-installed"),
+        ]
+
+        for i, (emoji, feat_title, feat_desc) in enumerate(features):
+            col = i % 3
+            row = i // 3
+
+            feat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            feat_box.set_margin_start(10)
+            feat_box.set_margin_end(10)
+
+            emoji_label = Gtk.Label()
+            emoji_label.set_markup(f'<span size="xx-large">{emoji}</span>')
+            emoji_label.set_halign(Gtk.Align.CENTER)
+
+            name_label = Gtk.Label()
+            name_label.set_markup(f'<span weight="bold">{feat_title}</span>')
+            name_label.set_halign(Gtk.Align.CENTER)
+
+            desc_label = Gtk.Label(label=feat_desc)
+            desc_label.set_halign(Gtk.Align.CENTER)
+            desc_label.get_style_context().add_class("dim-label")
+
+            feat_box.pack_start(emoji_label, False, False, 0)
+            feat_box.pack_start(name_label, False, False, 0)
+            feat_box.pack_start(desc_label, False, False, 0)
+
+            grid.attach(feat_box, col, row, 1, 1)
+
+        vbox.pack_start(grid, False, False, 0)
+
+        # Keyboard shortcuts section
+        shortcuts_label = Gtk.Label()
+        shortcuts_label.set_markup(
+            '<span size="large" weight="bold">Keyboard Shortcuts</span>'
+        )
+        shortcuts_label.set_halign(Gtk.Align.CENTER)
+        shortcuts_label.set_margin_top(10)
+        vbox.pack_start(shortcuts_label, False, False, 0)
+
+        shortcuts_box = Gtk.Box(spacing=30)
+        shortcuts_box.set_halign(Gtk.Align.CENTER)
+
+        shortcuts_text = [
+            ("Ctrl+Space", "Open nn in terminal"),
+            ("Super+A", "Quick Ask from tray"),
+            ("Super+Shift+A", "Pause/Resume LLM"),
+        ]
+
+        for key, action in shortcuts_text:
+            sc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            key_label = Gtk.Label()
+            key_label.set_markup(f'<tt><b>{key}</b></tt>')
+            key_label.set_halign(Gtk.Align.CENTER)
+            action_label = Gtk.Label(label=action)
+            action_label.set_halign(Gtk.Align.CENTER)
+            action_label.get_style_context().add_class("dim-label")
+            sc_box.pack_start(key_label, False, False, 0)
+            sc_box.pack_start(action_label, False, False, 0)
+            shortcuts_box.pack_start(sc_box, False, False, 0)
+
+        vbox.pack_start(shortcuts_box, False, False, 0)
+
+        # Close button
+        close_button = Gtk.Button(label="Let's Go!")
+        close_button.set_margin_top(15)
+        close_button.connect("clicked", self.on_close)
+        close_button.set_halign(Gtk.Align.CENTER)
+        vbox.pack_start(close_button, False, False, 0)
+
+        self.add(vbox)
+
+    def on_close(self, widget):
+        # Mark welcome as shown
+        os.makedirs(os.path.dirname(WELCOME_MARKER), exist_ok=True)
+        with open(WELCOME_MARKER, 'w') as f:
+            f.write("shown")
+        self.destroy()
+        Gtk.main_quit()
+
+
+def main():
+    # Only show once
+    if os.path.exists(WELCOME_MARKER):
+        sys.exit(0)
+
+    win = WelcomeWindow()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

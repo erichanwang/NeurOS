@@ -1,0 +1,30 @@
+# Core
+gnome-shell
+gnome-terminal
+nautilus
+ufw
+
+# Dev tools
+git
+curl
+wget
+python3
+python3-pip
+python3-requests
+zsh
+neovim
+fzf
+ripgrep
+bat
+eza
+btop
+
+# GTK for tray applet
+python3-gi
+gir1.2-gtk-3.0
+gir1.2-appindicator3-0.1
+
+# Remove these (add to remove list)
+# ubuntu-report
+# apport
+# whoopsie

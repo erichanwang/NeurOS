@@ -1,0 +1,17 @@
+{
+  "models": [
+    {
+      "title": "NeurOS — Mistral",
+      "provider": "ollama",
+      "model": "mistral",
+      "apiBase": "http://localhost:11434"
+    }
+  ],
+  "tabAutocompleteModel": {
+    "title": "NeurOS Autocomplete",
+    "provider": "ollama",
+    "model": "mistral",
+    "apiBase": "http://localhost:11434"
+  },
+  "allowAnonymousTelemetry": false
+}

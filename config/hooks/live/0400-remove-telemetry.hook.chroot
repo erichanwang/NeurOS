@@ -1,0 +1,41 @@
+#!/bin/bash
+set -e
+# Hook: Remove all telemetry services and packages
+# Runs in the live-build chroot environment during ISO creation
+
+echo "[NeurOS] Removing telemetry and bloat..."
+
+# Disable telemetry services
+systemctl disable apport.service 2>/dev/null || true
+systemctl disable whoopsie.service 2>/dev/null || true
+systemctl disable ubuntu-report.service 2>/dev/null || true
+systemctl disable popularity-contest.service 2>/dev/null || true
+
+# Stop them if running
+systemctl stop apport.service 2>/dev/null || true
+systemctl stop whoopsie.service 2>/dev/null || true
+systemctl stop ubuntu-report.service 2>/dev/null || true
+
+# Disable VS Code telemetry globally
+mkdir -p /etc/skel/.config/Code/User
+cat > /etc/skel/.config/Code/User/settings.json << 'SETTINGS'
+{
+  "telemetry.telemetryLevel": "off",
+  "extensions.autoUpdate": false,
+  "update.mode": "none",
+  "workbench.colorTheme": "Default Dark+",
+  "editor.fontFamily": "'Ubuntu Mono', monospace",
+  "editor.fontSize": 14,
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "editor.renderWhitespace": "boundary",
+  "files.trimTrailingWhitespace": true,
+  "window.titleBarStyle": "custom"
+}
+SETTINGS
+
+# Also apply to root
+mkdir -p /root/.config/Code/User
+cp /etc/skel/.config/Code/User/settings.json /root/.config/Code/User/settings.json
+
+echo "[NeurOS] Telemetry removal complete."

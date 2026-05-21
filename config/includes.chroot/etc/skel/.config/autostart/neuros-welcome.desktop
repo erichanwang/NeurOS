@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NeurOS Welcome
+Comment=First-boot welcome screen
+Exec=/usr/local/bin/neuros-welcome
+Icon=neuros
+Terminal=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""
+neuros-tray — NeurOS System Tray Applet
+Shows model status, RAM usage, and provides quick AI access from the GNOME panel.
+
+Requires: python3-gi, gir1.2-gtk-3.0, gir1.2-appindicator3-0.1
+"""
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('AppIndicator3', '0.1')
+from gi.repository import Gtk, AppIndicator3, GLib
+import subprocess
+import json
+import os
+import threading
+
+APP_ID = "neuros-tray"
+CONFIG_PATH = os.path.expanduser("~/.config/neuros/llm.conf")
+OLLAMA_URL = "http://localhost:11434"
+
+class NeurosTray:
+    def __init__(self):
+        self.indicator = AppIndicator3.Indicator.new(
+            APP_ID,
+            "neuros-symbolic",
+            AppIndicator3.IndicatorCategory.APPLICATION_STATUS
+        )
+        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+
+        # Build menu
+        self.menu = Gtk.Menu()
+
+        # Status item (updated periodically)
+        self.status_item = Gtk.MenuItem(label="NeurOS: Checking...")
+        self.status_item.set_sensitive(False)
+        self.menu.append(self.status_item)
+
+        self.separator1 = Gtk.SeparatorMenuItem()
+        self.menu.append(self.separator1)
+
+        # Quick ask
+        self.ask_item = Gtk.MenuItem(label="Quick Ask...")
+        self.ask_item.connect("activate", self.on_quick_ask)
+        self.menu.append(self.ask_item)
+
+        # Pause/Resume
+        self.pause_item = Gtk.MenuItem(label="Pause LLM")
+        self.pause_item.connect("activate", self.on_toggle_pause)
+        self.menu.append(self.pause_item)
+
+        self.separator2 = Gtk.SeparatorMenuItem()
+        self.menu.append(self.separator2)
+
+        # Open terminal assistant
+        self.terminal_item = Gtk.MenuItem(label="Open Terminal Assistant")
+        self.terminal_item.connect("activate", self.on_open_terminal)
+        self.menu.append(self.terminal_item)
+
+        # Settings
+        self.settings_item = Gtk.MenuItem(label="Settings")
+        self.settings_item.connect("activate", self.on_settings)
+        self.menu.append(self.settings_item)
+
+        self.separator3 = Gtk.SeparatorMenuItem()
+        self.menu.append(self.separator3)
+
+        # Quit
+        self.quit_item = Gtk.MenuItem(label="Quit")
+        self.quit_item.connect("activate", self.on_quit)
+        self.menu.append(self.quit_item)
+
+        self.menu.show_all()
+        self.indicator.set_menu(self.menu)
+
+        # Start status updates
+        self.update_status()
+        GLib.timeout_add_seconds(5, self.update_status)
+
+    def check_ollama_status(self):
+        """Check if Ollama is running and get model info."""
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{OLLAMA_URL}/api/tags")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                models = [m.get("name", "unknown") for m in data.get("models", [])]
+                return True, models
+        except Exception:
+            return False, []
+
+    def get_ram_usage(self):
+        """Get Ollama RAM usage in MB."""
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "rss=", "-C", "ollama"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # Sum all RSS values (in KB), convert to MB
+                total_kb = sum(int(line) for line in result.stdout.strip().split('\n') if line)
+                return total_kb // 1024
+        except Exception:
+            pass
+        return 0
+
+    def update_status(self):
+        """Update the status menu item with current model info."""
+        running, models = self.check_ollama_status()
+
+        if running:
+            model_str = ", ".join(models[:2]) if models else "mistral"
+            ram = self.get_ram_usage()
+            ram_str = f" ({ram}MB)" if ram > 0 else ""
+            self.status_item.set_label(f"NeurOS: Running — {model_str}{ram_str}")
+            self.indicator.set_icon_full("neuros-symbolic", "NeurOS Active")
+        else:
+            self.status_item.set_label("NeurOS: LLM stopped")
+            self.indicator.set_icon_full("neuros-symbolic", "NeurOS Inactive")
+
+        return True  # Keep the timeout running
+
+    def on_quick_ask(self, widget):
+        """Open a quick-ask dialog."""
+        dialog = Gtk.Dialog(
+            title="NeurOS Quick Ask",
+            parent=None,
+            flags=0
+        )
+        dialog.set_default_size(500, 300)
+
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+
+        label = Gtk.Label(label="Ask NeurOS:")
+        content.pack_start(label, False, False, 0)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        textview = Gtk.TextView()
+        textview.set_wrap_mode(Gtk.WrapMode.WORD)
+        scrolled.add(textview)
+        content.pack_start(scrolled, True, True, 0)
+
+        response_label = Gtk.Label(label="")
+        response_label.set_line_wrap(True)
+        response_label.set_selectable(True)
+        content.pack_start(response_label, False, False, 0)
+
+        self._pending_thread = None
+
+        def on_ask(button):
+            buf = textview.get_buffer()
+            question = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+            if not question.strip():
+                return
+
+            response_label.set_label("Asking NeurOS...")
+            self._pending_thread = threading.Thread(
+                target=self.process_quick_ask, args=(question, response_label), daemon=True
+            )
+            self._pending_thread.start()
+
+        ask_button = Gtk.Button(label="Ask")
+        ask_button.connect("clicked", on_ask)
+        content.pack_start(ask_button, False, False, 0)
+
+        dialog.connect("destroy", self._on_quick_ask_destroy)
+        dialog.show_all()
+        dialog.run()
+        if dialog.get_realized():
+            dialog.destroy()
+
+    def _on_quick_ask_destroy(self, dialog):
+        """Wait for pending thread before allowing dialog destruction."""
+        if self._pending_thread and self._pending_thread.is_alive():
+            self._pending_thread.join(timeout=2)
+
+    def process_quick_ask(self, question, label):
+        """Send question to Ollama and update label with response."""
+        try:
+            import urllib.request
+            data = json.dumps({
+                "model": "mistral",
+                "prompt": f"You are a helpful AI assistant on NeurOS. Be concise.\n\nUser: {question}",
+                "stream": False
+            }).encode('utf-8')
+
+            req = urllib.request.Request(
+                f"{OLLAMA_URL}/api/generate",
+                data=data,
+                headers={"Content-Type": "application/json"}
+            )
+
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read())
+                GLib.idle_add(label.set_label, result.get("response", "No response."))
+        except Exception as e:
+            GLib.idle_add(label.set_label, f"Error: {e}")
+
+    def on_toggle_pause(self, widget):
+        """Toggle pause/resume of LLM daemon."""
+        running, _ = self.check_ollama_status()
+        if running:
+            subprocess.run(["systemctl", "stop", "neuros-llm"], capture_output=True)
+            self.pause_item.set_label("Resume LLM")
+        else:
+            subprocess.run(["systemctl", "start", "neuros-llm"], capture_output=True)
+            self.pause_item.set_label("Pause LLM")
+        self.update_status()
+
+    def on_open_terminal(self, widget):
+        """Open gnome-terminal with nn interactive mode."""
+        subprocess.Popen(["gnome-terminal", "--", "nn", "-i"])
+
+    def on_settings(self, widget):
+        """Open llm.conf in the default editor."""
+        subprocess.Popen(["xdg-open", CONFIG_PATH])
+
+    def on_quit(self, widget):
+        """Quit the tray applet."""
+        Gtk.main_quit()
+
+
+def main():
+    app = NeurosTray()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,51 @@
+#!/bin/bash
+set -e
+# Hook: Configure GNOME desktop with NeurOS theme and settings
+# Runs in the live-build chroot environment during ISO creation
+# NOTE: gsettings requires a D-Bus session, which may not exist in chroot.
+# We write a dconf override file that applies on first login.
+
+echo "[NeurOS] Configuring GNOME desktop settings..."
+
+# Create dconf profile for system-wide GNOME defaults
+mkdir -p /etc/dconf/db/neuros.d
+mkdir -p /etc/dconf/profile
+
+# Write dconf profile (applied on first login)
+cat > /etc/dconf/profile/user << 'DCONF'
+user-db:user
+system-db:neuros
+DCONF
+
+# Write GNOME settings as dconf overrides
+cat > /etc/dconf/db/neuros.d/00-neuros-desktop << 'DCONF'
+[org/gnome/desktop/interface]
+gtk-theme='Adwaita-dark'
+color-scheme='prefer-dark'
+icon-theme='Adwaita'
+cursor-theme='Adwaita'
+font-name='Ubuntu 11'
+document-font-name='Sans 11'
+monospace-font-name='Ubuntu Mono 13'
+enable-animations=false
+
+[org/gnome/desktop/background]
+picture-uri='file:///usr/share/backgrounds/neuros.png'
+picture-uri-dark='file:///usr/share/backgrounds/neuros.png'
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+
+[org/gnome/shell]
+favorite-apps=['org.gnome.Terminal.desktop', 'org.gnome.Nautilus.desktop', 'code.desktop']
+
+[org/gnome/shell/extensions/dash-to-dock]
+dock-position='BOTTOM'
+dash-max-icon-size=48
+extend-height=false
+DCONF
+
+# Update dconf database
+dconf update 2>/dev/null || echo "[NeurOS] dconf update skipped (no D-Bus in chroot, applied on first boot)"
+
+echo "[NeurOS] GNOME configuration complete."

@@ -1,0 +1,32 @@
+#!/bin/bash
+set -e
+# Hook: Enable system services, firewall, and set default shell
+# Runs in the live-build chroot environment during ISO creation
+
+echo "[NeurOS] Configuring system services..."
+
+# Enable UFW firewall with default-deny incoming
+ufw --force enable
+ufw default deny incoming
+ufw default allow outgoing
+echo "[NeurOS] Firewall enabled (default deny incoming)."
+
+# Set zsh as default shell for root and skel
+chsh -s /usr/bin/zsh root 2>/dev/null || true
+
+# Install oh-my-zsh for the skel user (unattended)
+if [ ! -d /etc/skel/.oh-my-zsh ]; then
+    echo "[NeurOS] Installing oh-my-zsh..."
+    export ZSH=/etc/skel/.oh-my-zsh
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended --keep-zshrc 2>/dev/null || true
+fi
+
+# Ensure nn CLI is executable
+chmod +x /usr/local/bin/nn 2>/dev/null || true
+chmod +x /usr/local/bin/neuros-tray 2>/dev/null || true
+
+# Set hostname
+echo "neuros" > /etc/hostname
+sed -i 's/127.0.1.1.*/127.0.1.1    neuros/' /etc/hosts 2>/dev/null || true
+
+echo "[NeurOS] System configuration complete."
