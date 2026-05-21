@@ -1,0 +1,87 @@
+#compdef nn
+
+_nn() {
+  local -a commands
+  commands=(
+    '-i[Interactive chat mode]'
+    '-h[Show help]'
+    '--help[Show help]'
+  )
+  _arguments $commands
+}
+_nn
+
+#compdef neuros-model
+
+_neuros_model() {
+  local -a commands
+  commands=(
+    'list[List installed models]'
+    'pull[Download a model]'
+    'remove[Remove a model]'
+    'switch[Set default model]'
+    'info[Show model details]'
+    'search[Search available models]'
+    'benchmark[Benchmark inference speed]'
+    'compare[Compare multiple models]'
+  )
+  _arguments '1: :{_describe command commands}'
+}
+_neuros_model
+
+#compdef neuros-snippets
+
+_neuros_snippets() {
+  local -a commands
+  commands=(
+    'save[Save a snippet]'
+    'list[List snippets]'
+    'search[Search snippets]'
+    'show[Show snippet]'
+    'delete[Delete snippet]'
+    'generate[Generate snippet with AI]'
+    'export[Export snippets]'
+  )
+  _arguments '1: :{_describe command commands}'
+}
+_neuros_snippets
+
+#compdef neuros-git
+
+_neuros_git() {
+  local -a commands
+  commands=(
+    'commit[AI commit message]'
+    'review[AI code review]'
+    'pr[Generate PR description]'
+    'changelog[Generate changelog]'
+    'explain[Explain a commit]'
+  )
+  _arguments '1: :{_describe command commands}'
+}
+_neuros_git
+
+#compdef neuros-chat
+
+_neuros_chat() {
+  _arguments \
+    '--port[Server port]:port:' \
+    '--no-browser[Do not open browser]'
+}
+_neuros_chat
+
+#compdef neuros-agent
+
+_neuros_agent() {
+  local -a commands
+  commands=(
+    'context[Dump system context]'
+    'clipboard[Get clipboard contents]'
+    'windows[List active windows]'
+    'index[Index directory for search]'
+    'search[Search indexed documents]'
+    'status[System health overview]'
+  )
+  _arguments '1: :{_describe command commands}'
+}
+_neuros_agent

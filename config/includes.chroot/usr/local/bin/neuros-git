@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""
+neuros-git — NeurOS Git Assistant
+AI-powered git: generate commit messages, PR descriptions, code review summaries.
+
+Usage:
+  neuros-git commit              Generate an AI commit message for staged changes
+  neuros-git review              AI code review of staged/uncommitted changes
+  neuros-git pr                  Generate a PR description from branch diff
+  neuros-git changelog           Generate changelog from recent commits
+  neuros-git explain <commit>    Explain what a commit does in plain English
+"""
+
+import sys
+import os
+import json
+import tempfile
+import subprocess
+import argparse
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+
+def get_git_diff(staged_only=True, base_branch="main"):
+    """Get git diff output."""
+    try:
+        if staged_only:
+            result = subprocess.run(
+                ["git", "diff", "--cached"],
+                capture_output=True, text=True, timeout=30
+            )
+        else:
+            result = subprocess.run(
+                ["git", "diff", f"{base_branch}...HEAD"],
+                capture_output=True, text=True, timeout=30
+            )
+        return result.stdout if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def get_git_diff_stat():
+    """Get git diff --stat output."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--stat"],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def get_recent_commits(n=10):
+    """Get recent commit messages."""
+    try:
+        result = subprocess.run(
+            ["git", "log", f"-{n}", "--oneline"],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def query_ollama(prompt):
+    """Send a prompt to Ollama and get response."""
+    try:
+        import urllib.request
+        data = json.dumps({
+            "model": "mistral",
+            "prompt": prompt,
+            "stream": False
+        }).encode('utf-8')
+
+        req = urllib.request.Request(OLLAMA_URL, data=data,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read())
+            return result.get("response", "").strip()
+    except Exception as e:
+        print(f"Error: LLM not available. Is neuros-llm running? ({e})")
+        sys.exit(1)
+
+
+def generate_commit():
+    """Generate a conventional commit message from staged changes."""
+    diff = get_git_diff(staged_only=True)
+    stat = get_git_diff_stat()
+
+    if not diff.strip():
+        print("No staged changes. Stage files with 'git add' first.")
+        sys.exit(1)
+
+    if len(diff) > 6000:
+        diff = diff[:6000] + "\n... (truncated)"
+
+    recent = get_recent_commits(5)
+
+    prompt = f"""You are a git commit message generator. Write a conventional commit message for these changes.
+
+Rules:
+- Use format: type(scope): brief description
+- Types: feat, fix, refactor, docs, test, chore, perf, style
+- Keep subject line under 72 chars
+- Include a bullet-point body explaining what and why
+- Be specific, not generic
+
+Recent commits (for style reference):
+{recent}
+
+Changed files:
+{stat}
+
+Full diff:
+{diff}
+
+Return ONLY the commit message. No explanations."""
+
+    print("🤖 Generating commit message...\n")
+    message = query_ollama(prompt)
+    print(message)
+    print()
+
+    # Offer to commit
+    commit = input("\nCommit with this message? [Y/n]: ")
+    if commit.lower() != 'n':
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, prefix='neuros-commit-') as f:
+            f.write(message)
+            tmp_path = f.name
+        try:
+            subprocess.run(["git", "commit", "-F", tmp_path])
+            print("✅ Committed!")
+        finally:
+            os.unlink(tmp_path)
+
+
+def review_changes():
+    """AI code review of staged changes."""
+    diff = get_git_diff(staged_only=True)
+
+    if not diff.strip():
+        # Try unstaged
+        diff = subprocess.run(
+            ["git", "diff"],
+            capture_output=True, text=True, timeout=30
+        ).stdout
+        if not diff.strip():
+            print("No changes to review.")
+            return
+        print("Reviewing unstaged changes...\n")
+    else:
+        print("Reviewing staged changes...\n")
+
+    if len(diff) > 6000:
+        diff = diff[:6000] + "\n... (truncated)"
+
+    prompt = f"""You are a senior code reviewer. Review these git changes and provide:
+
+1. Summary (2-3 sentences)
+2. Issues (bugs, security, performance)
+3. Suggestions (improvements)
+4. Rating (1-10)
+
+Be concise but thorough.
+
+Diff:
+{diff}"""
+
+    print("🤖 Analyzing code...\n")
+    review = query_ollama(prompt)
+    print(review)
+
+
+def generate_pr(base="main"):
+    """Generate a PR description from branch diff."""
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        capture_output=True, text=True, timeout=5
+    ).stdout.strip()
+
+    diff = subprocess.run(
+        ["git", "diff", f"{base}...HEAD", "--stat"],
+        capture_output=True, text=True, timeout=30
+    ).stdout.strip()
+
+    full_diff = subprocess.run(
+        ["git", "diff", f"{base}...HEAD"],
+        capture_output=True, text=True, timeout=30
+    ).stdout.strip()
+
+    if len(full_diff) > 6000:
+        full_diff = full_diff[:6000] + "\n... (truncated)"
+
+    commits = subprocess.run(
+        ["git", "log", f"{base}..HEAD", "--oneline"],
+        capture_output=True, text=True, timeout=10
+    ).stdout.strip()
+
+    prompt = f"""Write a pull request description for this branch. Include:
+
+## Summary
+## Changes
+## Testing
+## Screenshots (if applicable)
+
+Branch: {branch}
+Base: {base}
+
+Commits:
+{commits}
+
+File changes:
+{diff}
+
+Diff:
+{full_diff}
+
+Return the PR description in markdown."""
+
+    print("🤖 Generating PR description...\n")
+    pr_desc = query_ollama(prompt)
+    print(pr_desc)
+
+
+def generate_changelog():
+    """Generate changelog from recent commits."""
+    commits = subprocess.run(
+        ["git", "log", "-20", "--oneline"],
+        capture_output=True, text=True, timeout=10
+    ).stdout.strip()
+
+    prompt = f"""Convert these git commits into a clean changelog:
+
+{commits}
+
+Format:
+## [Unreleased]
+### Added
+- ...
+
+### Changed
+- ...
+
+### Fixed
+- ...
+
+Return ONLY the changelog in markdown."""
+
+    print("🤖 Generating changelog...\n")
+    changelog = query_ollama(prompt)
+    print(changelog)
+
+
+def explain_commit(commit_hash):
+    """Explain what a commit does in plain English."""
+    diff = subprocess.run(
+        ["git", "show", commit_hash],
+        capture_output=True, text=True, timeout=30
+    ).stdout
+
+    if len(diff) > 5000:
+        diff = diff[:5000] + "\n... (truncated)"
+
+    prompt = f"""Explain this git commit in plain English. What changed and why?
+Be concise — 2-4 sentences.
+
+Commit:
+{diff[:4000]}
+
+Return ONLY the explanation. No preamble."""
+
+    print(f"🤖 Explaining {commit_hash[:8]}...\n")
+    explanation = query_ollama(prompt)
+    print(explanation)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Git Assistant")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    subparsers.add_parser("commit", help="Generate AI commit message")
+
+    review_p = subparsers.add_parser("review", help="AI code review")
+    review_p.add_argument("--unstaged", action="store_true", help="Review unstaged changes")
+
+    pr_p = subparsers.add_parser("pr", help="Generate PR description")
+    pr_p.add_argument("--base", default="main", help="Base branch (default: main)")
+
+    subparsers.add_parser("changelog", help="Generate changelog")
+
+    explain_p = subparsers.add_parser("explain", help="Explain a commit")
+    explain_p.add_argument("commit", help="Commit hash")
+
+    args = parser.parse_args()
+
+    if args.command == "commit":
+        generate_commit()
+    elif args.command == "review":
+        review_changes()
+    elif args.command == "pr":
+        generate_pr(args.base)
+    elif args.command == "changelog":
+        generate_changelog()
+    elif args.command == "explain":
+        explain_commit(args.commit)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

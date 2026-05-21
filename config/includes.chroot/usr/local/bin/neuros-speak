@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+neuros-speak — NeurOS Text-to-Speech
+Converts text to speech using local Piper TTS or espeak-ng.
+
+Usage:
+  neuros-speak "hello world"          Speak text
+  neuros-speak --file script.txt      Speak a file
+  neuros-speak --pipe                 Read from stdin and speak
+  neuros-speak --list-voices          List available voices
+  neuros-speak --voice en_US-lessac   Select voice
+  echo "hello" | neuros-speak         Pipe text to speech
+"""
+
+import sys
+import os
+import subprocess
+import argparse
+import tempfile
+import time
+
+
+def find_tts_engine():
+    """Find the best available TTS engine."""
+    # Piper (best quality, offline)
+    try:
+        subprocess.run(["piper", "--help"], capture_output=True, timeout=3)
+        return "piper"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # espeak-ng (always available)
+    try:
+        subprocess.run(["espeak-ng", "--version"], capture_output=True, timeout=3)
+        return "espeak"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # espeak (older)
+    try:
+        subprocess.run(["espeak", "--version"], capture_output=True, timeout=3)
+        return "espeak"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    return None
+
+
+def speak_piper(text, voice=None, speed=1.0):
+    """Use Piper TTS for high-quality speech."""
+    output = tempfile.mktemp(suffix=".wav")
+
+    cmd = ["piper", "--output_file", output]
+    if voice:
+        cmd.extend(["--model", voice])
+    cmd.extend(["--length_scale", str(speed)])
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    proc.communicate(input=text.encode('utf-8'))
+    proc.wait()
+
+    if proc.returncode == 0 and os.path.exists(output):
+        subprocess.run(["aplay", output], capture_output=True)
+        os.remove(output)
+        return True
+    return False
+
+
+def speak_espeak(text, voice=None, speed=175):
+    """Use espeak-ng for basic speech synthesis."""
+    cmd = ["espeak-ng"]
+
+    if voice:
+        cmd.extend(["-v", voice])
+    else:
+        cmd.extend(["-v", "en-us"])
+
+    cmd.extend(["-s", str(speed)])
+    cmd.append(text)
+
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=30)
+        return True
+    except (subprocess.TimeoutExpired, Exception):
+        return False
+
+
+def speak(text, engine=None, voice=None, speed=None):
+    """Speak text using the best available engine."""
+    if engine is None:
+        engine = find_tts_engine()
+
+    if engine is None:
+        print("Error: No TTS engine found.")
+        print("Install one: sudo apt install espeak-ng")
+        print("Or for better quality: pip3 install piper-tts")
+        return False
+
+    if engine == "piper":
+        return speak_piper(text, voice=voice, speed=speed or 1.0)
+    else:
+        return speak_espeak(text, voice=voice, speed=speed or 175)
+
+
+def list_voices():
+    """List available TTS voices."""
+    print("Available TTS voices:\n")
+
+    # Piper voices
+    piper_dir = os.path.expanduser("~/.local/share/piper-tts")
+    if os.path.isdir(piper_dir):
+        print("Piper voices:")
+        for f in os.listdir(piper_dir):
+            if f.endswith(".onnx"):
+                print(f"  🎵 {f.replace('.onnx', '')}")
+    else:
+        print("Piper voices: (none installed)")
+        print("  Download: https://github.com/rhasspy/piper/blob/master/VOICES.md")
+
+    # espeak voices
+    try:
+        result = subprocess.run(["espeak-ng", "--voices"], capture_output=True, text=True, timeout=5)
+        print(f"\nespeak-ng voices: {len(result.stdout.splitlines())} available")
+        for line in result.stdout.splitlines()[:10]:
+            if line.strip():
+                print(f"  🎵 {line.strip()}")
+        print(f"  ... and more")
+    except Exception:
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Text-to-Speech")
+    parser.add_argument("text", nargs="?", help="Text to speak")
+    parser.add_argument("--file", "-f", help="Read text from file")
+    parser.add_argument("--pipe", "-p", action="store_true", help="Read from stdin")
+    parser.add_argument("--voice", "-v", help="Voice name (e.g., en_US-lessac)")
+    parser.add_argument("--speed", "-s", type=float, help="Speech speed")
+    parser.add_argument("--engine", "-e", choices=["piper", "espeak"], help="TTS engine")
+    parser.add_argument("--list-voices", "-l", action="store_true", help="List voices")
+
+    args = parser.parse_args()
+
+    if args.list_voices:
+        list_voices()
+        return
+
+    # Get text
+    text = ""
+    if args.pipe or not sys.stdin.isatty():
+        text = sys.stdin.read()
+    elif args.file:
+        try:
+            with open(args.file) as f:
+                text = f.read()
+        except Exception as e:
+            print(f"Error reading file: {e}")
+            sys.exit(1)
+    elif args.text:
+        text = args.text
+    else:
+        print("Error: No text provided.")
+        parser.print_help()
+        sys.exit(1)
+
+    if not text.strip():
+        print("No text to speak.")
+        return
+
+    print(f"🔊 Speaking ({len(text)} chars)...")
+    success = speak(text, engine=args.engine, voice=args.voice, speed=args.speed)
+
+    if not success:
+        print("Failed to produce speech.")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

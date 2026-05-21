@@ -11,6 +11,7 @@ wget
 python3
 python3-pip
 python3-requests
+python3-venv
 zsh
 neovim
 fzf
@@ -18,11 +19,25 @@ ripgrep
 bat
 eza
 btop
+wmctrl
+xdotool
+xclip
 
 # GTK for tray applet
 python3-gi
 gir1.2-gtk-3.0
 gir1.2-appindicator3-0.1
+
+# Audio (for voice/speech)
+also-utils
+espeak-ng
+
+# Shells
+fish
+
+# Build tools (optional, for pip installs)
+build-essential
+python3-dev
 
 # Remove these (add to remove list)
 # ubuntu-report

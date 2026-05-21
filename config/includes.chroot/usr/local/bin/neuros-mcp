@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""
+neuros-mcp — NeurOS Model Context Protocol Server
+Provides system context, file operations, and LLM access via the MCP protocol
+for AI-powered IDEs and tools.
+
+MCP (Model Context Protocol) enables tools to query system state, read files,
+and access the local LLM programmatically.
+
+Start with: neuros-mcp
+Default port: 11436
+"""
+
+import sys
+import os
+import json
+import shlex
+import subprocess
+import argparse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+DEFAULT_PORT = 11436
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+
+class MCPServer(BaseHTTPRequestHandler):
+    """MCP protocol server for NeurOS."""
+
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+
+        try:
+            request = json.loads(body)
+        except json.JSONDecodeError:
+            self.send_error(400, "Invalid JSON")
+            return
+
+        method = request.get("method", "")
+        params = request.get("params", {})
+        req_id = request.get("id")
+
+        if method == "initialize":
+            result = self.handle_initialize(params)
+        elif method == "tools/list":
+            result = self.handle_list_tools()
+        elif method == "tools/call":
+            result = self.handle_call_tool(params)
+        elif method == "resources/list":
+            result = self.handle_list_resources()
+        elif method == "resources/read":
+            result = self.handle_read_resource(params)
+        else:
+            self.send_json({"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": req_id})
+            return
+
+        self.send_json({"jsonrpc": "2.0", "result": result, "id": req_id})
+
+    def send_json(self, data):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_json({"status": "ok", "version": "1.0.0", "ollama": check_ollama()})
+        else:
+            self.send_json({
+                "name": "NeurOS MCP Server",
+                "version": "1.0.0",
+                "description": "Model Context Protocol server for NeurOS system access"
+            })
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def handle_initialize(self, params):
+        return {
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": "NeurOS MCP Server",
+                "version": "1.0.0"
+            },
+            "capabilities": {
+                "tools": {},
+                "resources": {}
+            }
+        }
+
+    def handle_list_tools(self):
+        return {
+            "tools": [
+                {
+                    "name": "read_file",
+                    "description": "Read contents of a file",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "File path"}
+                        },
+                        "required": ["path"]
+                    }
+                },
+                {
+                    "name": "list_directory",
+                    "description": "List files in a directory",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Directory path"}
+                        },
+                        "required": ["path"]
+                    }
+                },
+                {
+                    "name": "run_command",
+                    "description": "Run a shell command (no shell metacharacters for safety)",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Shell command to run"},
+                            "timeout": {"type": "number", "description": "Timeout in seconds"}
+                        },
+                        "required": ["command"]
+                    }
+                },
+                {
+                    "name": "ask_llm",
+                    "description": "Query the local LLM",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "Question for the LLM"},
+                            "model": {"type": "string", "description": "Model name (default: mistral)"}
+                        },
+                        "required": ["prompt"]
+                    }
+                },
+                {
+                    "name": "get_system_info",
+                    "description": "Get system health information",
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "git_status",
+                    "description": "Get git repository status",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Repository path"}
+                        }
+                    }
+                }
+            ]
+        }
+
+    def handle_call_tool(self, params):
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments", {})
+
+        if tool_name == "read_file":
+            return self.tool_read_file(arguments)
+        elif tool_name == "list_directory":
+            return self.tool_list_directory(arguments)
+        elif tool_name == "run_command":
+            return self.tool_run_command(arguments)
+        elif tool_name == "ask_llm":
+            return self.tool_ask_llm(arguments)
+        elif tool_name == "get_system_info":
+            return self.tool_get_system_info(arguments)
+        elif tool_name == "git_status":
+            return self.tool_git_status(arguments)
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+
+    def tool_read_file(self, args):
+        path = os.path.expanduser(args.get("path", ""))
+        try:
+            with open(path, 'r', errors='replace') as f:
+                content = f.read()
+                if len(content) > 10000:
+                    content = content[:10000] + "\n... (truncated)"
+            return {
+                "content": [{"type": "text", "text": content}]
+            }
+        except Exception as e:
+            return {
+                "content": [{"type": "text", "text": f"Error: {e}"}],
+                "isError": True
+            }
+
+    def tool_list_directory(self, args):
+        path = os.path.expanduser(args.get("path", "."))
+        try:
+            entries = os.listdir(path)
+            result = []
+            for e in sorted(entries):
+                full = os.path.join(path, e)
+                result.append({
+                    "name": e,
+                    "type": "directory" if os.path.isdir(full) else "file",
+                    "size": os.path.getsize(full) if os.path.isfile(full) else None
+                })
+            return {
+                "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
+            }
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True}
+
+    def tool_run_command(self, args):
+        cmd = args.get("command", "")
+        timeout = args.get("timeout", 30)
+        try:
+            # Use shlex.split for safe argument parsing — no shell injection
+            result = subprocess.run(
+                shlex.split(cmd), capture_output=True, text=True, timeout=timeout
+            )
+            output = result.stdout
+            if result.returncode != 0 and result.stderr:
+                output += f"\n[exit {result.returncode}]\n" + result.stderr
+            return {
+                "content": [{"type": "text", "text": output[:5000]}]
+            }
+        except subprocess.TimeoutExpired:
+            return {"content": [{"type": "text", "text": "Command timed out"}], "isError": True}
+        except FileNotFoundError:
+            return {"content": [{"type": "text", "text": f"Command not found: {cmd.split()[0] if cmd else '(empty)'}"}], "isError": True}
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Invalid command syntax: {e}"}], "isError": True}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True}
+
+    def tool_ask_llm(self, args):
+        prompt = args.get("prompt", "")
+        model = args.get("model", "mistral")
+        try:
+            import urllib.request
+            data = json.dumps({
+                "model": model,
+                "prompt": prompt,
+                "stream": False
+            }).encode('utf-8')
+            req = urllib.request.Request(OLLAMA_URL, data=data,
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read())
+            return {
+                "content": [{"type": "text", "text": result.get("response", "No response")}]
+            }
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"LLM error: {e}"}], "isError": True}
+
+    def tool_get_system_info(self, args):
+        info = {}
+        try:
+            result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split('\n'):
+                if "Mem:" in line:
+                    parts = line.split()
+                    info["memory_total_mb"] = parts[1]
+                    info["memory_used_mb"] = parts[2]
+        except Exception:
+            pass
+        try:
+            result = subprocess.run(["nproc"], capture_output=True, text=True, timeout=5)
+            info["cpu_cores"] = result.stdout.strip()
+        except Exception:
+            pass
+        try:
+            result = subprocess.run(["df", "-h", "/"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split('\n')[1:]:
+                parts = line.split()
+                if len(parts) >= 5:
+                    info["disk_total"] = parts[1]
+                    info["disk_used"] = parts[2]
+        except Exception:
+            pass
+        info["ollama_status"] = check_ollama()
+        return {"content": [{"type": "text", "text": json.dumps(info, indent=2)}]}
+
+    def tool_git_status(self, args):
+        path = os.path.expanduser(args.get("path", os.getcwd()))
+        try:
+            result = subprocess.run(
+                ["git", "-C", path, "status", "--short"],
+                capture_output=True, text=True, timeout=10
+            )
+            branch = subprocess.run(
+                ["git", "-C", path, "branch", "--show-current"],
+                capture_output=True, text=True, timeout=10
+            )
+            return {
+                "content": [{"type": "text", "text": json.dumps({
+                    "branch": branch.stdout.strip(),
+                    "changes": result.stdout.strip()
+                }, indent=2)}]
+            }
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True}
+
+    def handle_list_resources(self):
+        return {
+            "resources": [
+                {"uri": "neuros://system/info", "name": "System Information", "mimeType": "application/json"},
+                {"uri": "neuros://system/clipboard", "name": "Clipboard Content", "mimeType": "text/plain"},
+                {"uri": "neuros://ollama/models", "name": "Available Models", "mimeType": "application/json"},
+                {"uri": "neuros://git/status", "name": "Git Repository Status", "mimeType": "application/json"},
+            ]
+        }
+
+    def handle_read_resource(self, params):
+        uri = params.get("uri", "")
+
+        if uri == "neuros://system/info":
+            return self.tool_get_system_info({})
+        elif uri == "neuros://ollama/models":
+            return self.tool_ollama_models()
+        elif uri == "neuros://git/status":
+            return self.tool_git_status({})
+        else:
+            return {"contents": [{"uri": uri, "mimeType": "text/plain", "text": "Resource not found"}]}
+
+    def tool_ollama_models(self):
+        try:
+            import urllib.request
+            req = urllib.request.Request("http://localhost:11434/api/tags")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+            models = [m["name"] for m in data.get("models", [])]
+            return {"content": [{"type": "text", "text": json.dumps(models)}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True}
+
+    def log_message(self, format, *args):
+        pass
+
+
+def check_ollama():
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:11434/api/tags")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            return {"running": True, "models": [m["name"] for m in data.get("models", [])]}
+    except Exception:
+        return {"running": False}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS MCP Server")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port (default: {DEFAULT_PORT})")
+    parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
+    args = parser.parse_args()
+
+    server = HTTPServer((args.host, args.port), MCPServer)
+
+    print(f"""
+╔══════════════════════════════════════════╗
+║       🧠 NeurOS MCP Server               ║
+║       Model Context Protocol v1.0         ║
+╠══════════════════════════════════════════╣
+║  URL:   http://{args.host}:{args.port:<5}             ║
+║  Tools: read_file, list_dir, run_cmd     ║
+║         ask_llm, sys_info, git_status    ║
+╚══════════════════════════════════════════╝
+
+Press Ctrl+C to stop.
+""")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()

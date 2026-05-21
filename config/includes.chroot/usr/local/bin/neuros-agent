@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""
+neuros-agent — NeurOS System Context Agent
+Provides system-wide context for the LLM: clipboard, active windows, recent files,
+battery status, network info, running processes, and more.
+
+Usage:
+  neuros-agent context              Dump full system context
+  neuros-agent clipboard            Get clipboard contents
+  neuros-agent windows              List active windows
+  neuros-agent index <dir>          Index a directory for RAG/semantic search
+  neuros-agent search <query>       Search indexed documents
+  neuros-agent status               System health overview
+"""
+
+import sys
+import os
+import json
+import subprocess
+import time
+import hashlib
+import argparse
+from datetime import datetime
+
+CONTEXT_DIR = os.path.expanduser("~/.config/neuros/context")
+INDEX_DIR = os.path.expanduser("~/.config/neuros/rag-index")
+os.makedirs(CONTEXT_DIR, exist_ok=True)
+os.makedirs(INDEX_DIR, exist_ok=True)
+
+def get_clipboard():
+    """Get clipboard content using xclip."""
+    try:
+        result = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-o"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            content = result.stdout.strip()
+            if len(content) > 2000:
+                content = content[:2000] + "..."
+            return content
+    except Exception:
+        pass
+    return None
+
+def get_active_window():
+    """Get the currently active window title and application."""
+    try:
+        result = subprocess.run(
+            ["xdotool", "getactivewindow", "getwindowname"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-a", ":ACTIVE:"],
+            capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        pass
+
+    return None
+
+def get_open_windows():
+    """List all open window titles."""
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-l"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            windows = []
+            for line in result.stdout.strip().split('\n'):
+                parts = line.split(None, 3)
+                if len(parts) >= 4:
+                    windows.append(parts[3])
+            return windows
+    except Exception:
+        pass
+    return []
+
+def get_recent_files(directory=None, limit=20):
+    """Get recently modified files."""
+    target_dir = directory or os.path.expanduser("~")
+
+    marker_file = os.path.join(CONTEXT_DIR, ".last-context")
+    # Create marker if it doesn't exist (first run fallback)
+    if not os.path.exists(marker_file):
+        with open(marker_file, 'w') as f:
+            f.write(str(time.time() - 86400))  # 24 hours ago
+
+    try:
+        # Use find for recent files
+        result = subprocess.run(
+            ["find", target_dir, "-maxdepth", "3", "-type", "f",
+             "-not", "-path", "*/\\.*", "-not", "-path", "*/node_modules/*",
+             "-not", "-path", "*/__pycache__/*", "-not", "-path", "*/.git/*",
+             "-newer", marker_file,
+             "-printf", "%T@ %p\\n"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            files = []
+            for line in result.stdout.strip().split('\n'):
+                parts = line.split(' ', 1)
+                if len(parts) == 2:
+                    files.append(parts[1])
+            return files[:limit]
+    except Exception:
+        pass
+
+    # Fallback: check home dir
+    home = os.path.expanduser("~")
+    recent = []
+    for root, dirs, files in os.walk(home):
+        dirs[:] = [d for d in dirs if not d.startswith('.')][:3]
+        for fname in files:
+            if fname.startswith('.'):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                mtime = os.path.getmtime(fpath)
+                # Files modified in last 24 hours
+                if time.time() - mtime < 86400:
+                    recent.append(fpath)
+            except OSError:
+                pass
+        if len(recent) >= limit:
+            break
+    return recent[:limit]
+
+def get_system_info():
+    """Get system health overview."""
+    info = {}
+
+    # Uptime
+    try:
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+            hours = int(uptime / 3600)
+            minutes = int((uptime % 3600) / 60)
+            info["uptime"] = f"{hours}h {minutes}m"
+    except Exception:
+        pass
+
+    # Memory
+    try:
+        result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n'):
+            if "Mem:" in line:
+                parts = line.split()
+                info["memory_total"] = parts[1] + "MB"
+                info["memory_used"] = parts[2] + "MB"
+    except Exception:
+        pass
+
+    # CPU
+    try:
+        result = subprocess.run(["nproc"], capture_output=True, text=True, timeout=5)
+        info["cpu_cores"] = result.stdout.strip()
+    except Exception:
+        pass
+
+    # Disk
+    try:
+        result = subprocess.run(["df", "-h", "/"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n')[1:]:
+            parts = line.split()
+            if len(parts) >= 5:
+                info["disk_total"] = parts[1]
+                info["disk_used"] = parts[2]
+                info["disk_avail"] = parts[3]
+    except Exception:
+        pass
+
+    # Network
+    try:
+        result = subprocess.run(
+            ["hostname", "-I"],
+            capture_output=True, text=True, timeout=5
+        )
+        info["local_ip"] = result.stdout.strip()
+    except Exception:
+        pass
+
+    # Battery (if laptop)
+    try:
+        for battery in os.listdir("/sys/class/power_supply/"):
+            if battery.startswith("BAT"):
+                with open(f"/sys/class/power_supply/{battery}/capacity") as f:
+                    info["battery"] = f"{f.read().strip()}%"
+                break
+    except Exception:
+        pass
+
+    return info
+
+def get_git_context():
+    """Get git status for current directory."""
+    try:
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+
+        status = subprocess.run(
+            ["git", "status", "--short"],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+
+        diff = subprocess.run(
+            ["git", "diff", "--stat"],
+            capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+
+        recent = subprocess.run(
+            ["git", "log", "--oneline", "-5"],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+
+        return {
+            "branch": branch,
+            "status": status,
+            "diff_summary": diff[:500],
+            "recent_commits": recent
+        }
+    except Exception:
+        return None
+
+def get_ollama_status():
+    """Check Ollama status."""
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:11434/api/tags")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            return {
+                "running": True,
+                "models": [m["name"] for m in data.get("models", [])]
+            }
+    except Exception:
+        return {"running": False}
+
+def dump_context():
+    """Dump full system context as JSON."""
+    context = {
+        "timestamp": datetime.now().isoformat(),
+        "system": get_system_info(),
+        "ollama": get_ollama_status(),
+        "clipboard": get_clipboard(),
+        "active_window": get_active_window(),
+        "open_windows": get_open_windows()[:10],
+        "recent_files": get_recent_files()[:15],
+        "cwd": os.getcwd(),
+    }
+
+    # Git context if in a repo
+    git = get_git_context()
+    if git:
+        context["git"] = git
+
+    # Save context for RAG usage
+    context_file = os.path.join(CONTEXT_DIR, f"context-{int(time.time())}.json")
+    with open(context_file, 'w') as f:
+        json.dump(context, f, indent=2)
+
+    # Update marker for recent file tracking
+    with open(os.path.join(CONTEXT_DIR, ".last-context"), 'w') as f:
+        f.write(str(time.time()))
+
+    print(json.dumps(context, indent=2))
+
+def clipboard_output():
+    """Get clipboard content."""
+    content = get_clipboard()
+    if content:
+        print(content)
+    else:
+        print("(clipboard empty or xclip not available)")
+
+def windows_output():
+    """List active windows."""
+    active = get_active_window()
+    print(f"Active window: {active or 'unknown'}")
+    print("\nAll windows:")
+    for w in get_open_windows()[:20]:
+        print(f"  • {w}")
+
+def index_directory(directory):
+    """Index a directory for semantic search."""
+    directory = os.path.abspath(directory)
+    print(f"Indexing {directory}...")
+
+    documents = []
+    supported_exts = {'.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css',
+                      '.md', '.txt', '.sh', '.bash', '.zsh', '.json', '.yaml',
+                      '.yml', '.toml', '.ini', '.cfg', '.conf', '.c', '.cpp',
+                      '.h', '.hpp', '.rs', '.go', '.java', '.rb', '.php',
+                      '.vim', '.lua', '.r', '.sql', '.xml', '.csv'}
+
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
+                   ('node_modules', '__pycache__', '.git', 'venv', '.venv', 'dist', 'build')]
+
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in supported_exts:
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, 'r', errors='replace') as f:
+                    content = f.read()
+                    if len(content) > 8000:
+                        content = content[:8000]
+                    documents.append({
+                        "path": fpath,
+                        "content": content,
+                        "ext": ext
+                    })
+            except Exception:
+                pass
+
+    # Save index
+    index_file = os.path.join(INDEX_DIR, f"index-{hashlib.md5(directory.encode()).hexdigest()[:8]}.json")
+    with open(index_file, 'w') as f:
+        json.dump({"directory": directory, "documents": documents}, f, indent=2)
+
+    print(f"Indexed {len(documents)} files from {directory}")
+    print(f"Index saved to: {index_file}")
+
+def search_index(query):
+    """Simple keyword search across indexed documents."""
+    indices = []
+    for fname in os.listdir(INDEX_DIR):
+        if fname.startswith("index-") and fname.endswith(".json"):
+            indices.append(os.path.join(INDEX_DIR, fname))
+
+    if not indices:
+        print("No indices found. Index a directory first: neuros-agent index /path/to/project")
+        return
+
+    query_lower = query.lower()
+    results = []
+    for index_path in indices:
+        with open(index_path) as f:
+            index_data = json.load(f)
+
+        for doc in index_data["documents"]:
+            content_lower = doc["content"].lower()
+            if query_lower in content_lower:
+                # Find context around match
+                idx = content_lower.find(query_lower)
+                start = max(0, idx - 100)
+                end = min(len(doc["content"]), idx + len(query) + 100)
+                snippet = doc["content"][start:end]
+                results.append({
+                    "file": doc["path"],
+                    "snippet": f"...{snippet}...",
+                    "score": content_lower.count(query_lower)
+                })
+
+    # Sort by relevance
+    results.sort(key=lambda x: -x["score"])
+
+    print(f"Found {len(results)} results for '{query}':\n")
+    for i, r in enumerate(results[:20]):
+        print(f"{i+1}. {r['file']} (matches: {r['score']})")
+        print(f"   {r['snippet'][:150]}")
+        print()
+
+def system_status():
+    """Show system health overview."""
+    info = get_system_info()
+    ollama = get_ollama_status()
+
+    print("🧠  NeurOS System Status")
+    print("=" * 40)
+
+    if "uptime" in info:
+        print(f"  Uptime:     {info['uptime']}")
+    if "cpu_cores" in info:
+        print(f"  CPU cores:  {info['cpu_cores']}")
+    if "memory_total" in info:
+        print(f"  Memory:     {info['memory_used']} / {info['memory_total']}")
+    if "disk_total" in info:
+        print(f"  Disk:       {info['disk_used']} / {info['disk_total']}")
+    if "battery" in info:
+        print(f"  Battery:    {info['battery']}")
+    if "local_ip" in info:
+        print(f"  Local IP:   {info['local_ip']}")
+
+    print(f"  LLM:        {'🟢 Running' if ollama['running'] else '🔴 Stopped'}")
+    if ollama.get("models"):
+        print(f"  Models:     {', '.join(ollama['models'])}")
+
+    # Check for clipboard
+    clip = get_clipboard()
+    if clip:
+        print(f"  Clipboard:  {len(clip)} chars")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS System Context Agent")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    subparsers.add_parser("context", help="Dump full system context")
+    subparsers.add_parser("clipboard", help="Get clipboard contents")
+    subparsers.add_parser("windows", help="List active windows")
+
+    index_p = subparsers.add_parser("index", help="Index a directory for search")
+    index_p.add_argument("directory", help="Directory to index")
+
+    search_p = subparsers.add_parser("search", help="Search indexed documents")
+    search_p.add_argument("query", help="Search query")
+
+    subparsers.add_parser("status", help="System health overview")
+
+    args = parser.parse_args()
+
+    if args.command == "context":
+        dump_context()
+    elif args.command == "clipboard":
+        clipboard_output()
+    elif args.command == "windows":
+        windows_output()
+    elif args.command == "index":
+        index_directory(args.directory)
+    elif args.command == "search":
+        search_index(args.query)
+    elif args.command == "status":
+        system_status()
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

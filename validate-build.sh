@@ -96,6 +96,26 @@ check_content "config/includes.chroot/usr/local/bin/neuros-tray" "update_status"
 check_executable "config/includes.chroot/usr/local/bin/neuros-welcome" "neuros-welcome"
 check_content "config/includes.chroot/usr/local/bin/neuros-welcome" "Gtk.Window" "welcome: GTK window"
 
+echo ""
+echo "--- New AI Tools ---"
+NEW_TOOLS=(
+    "neuros-chat"
+    "neuros-model"
+    "neuros-snippets"
+    "neuros-git"
+    "neuros-agent"
+    "neuros-voice"
+    "neuros-speak"
+    "neuros-mcp"
+)
+for tool in "${NEW_TOOLS[@]}"; do
+    TOOL_PATH="config/includes.chroot/usr/local/bin/$tool"
+    if [[ -f "$TOOL_PATH" ]]; then
+        check_exists "$TOOL_PATH" "$tool"
+        check_content "$TOOL_PATH" "#!/usr/bin/env python3" "$tool: correct shebang"
+    fi
+done
+
 check_executable "config/includes.chroot/usr/local/bin/neuros-firstboot" "neuros-firstboot"
 check_content "config/includes.chroot/usr/local/bin/neuros-firstboot" "MARKER" "firstboot: done marker"
 
@@ -120,6 +140,7 @@ HOOKS=(
     "0400-remove-telemetry"
     "0500-configure-system"
     "0600-install-gnome-extensions"
+    "0700-install-neuros-tools"
 )
 
 for hook in "${HOOKS[@]}"; do

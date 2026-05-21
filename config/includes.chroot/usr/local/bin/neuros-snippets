@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+neuros-snippets — NeurOS Code Snippet Manager
+Save, search, generate, and organize code snippets with AI tagging.
+
+Usage:
+  neuros-snippets save <file> [--name N]    Save a snippet
+  neuros-snippets list [--tag TAG]           List saved snippets
+  neuros-snippets search <query>             Search snippets (AI-powered)
+  neuros-snippets show <id>                  Show snippet details
+  neuros-snippets delete <id>                Delete a snippet
+  neuros-snippets generate "<description>"   Generate a snippet using AI
+  neuros-snippets export <format>            Export snippets (json/md)
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+import textwrap
+import hashlib
+import time
+from datetime import datetime
+
+SNIPPETS_DIR = os.path.expanduser("~/.config/neuros/snippets")
+SNIPPETS_DB = os.path.join(SNIPPETS_DIR, "snippets.json")
+OLLAMA_URL = "http://localhost:11434/api/generate"
+os.makedirs(SNIPPETS_DIR, exist_ok=True)
+
+
+def load_db():
+    """Load the snippets database."""
+    if os.path.exists(SNIPPETS_DB):
+        with open(SNIPPETS_DB) as f:
+            return json.load(f)
+    return []
+
+
+def save_db(db):
+    """Save the snippets database."""
+    with open(SNIPPETS_DB, 'w') as f:
+        json.dump(db, f, indent=2)
+
+
+def save_snippet(filepath, name=None):
+    """Save a file or stdin as a snippet."""
+    if filepath == '-':
+        content = sys.stdin.read()
+        name = name or "stdin-snippet"
+    else:
+        if not os.path.exists(filepath):
+            print(f"Error: File not found: {filepath}")
+            sys.exit(1)
+        with open(filepath, 'r', errors='replace') as f:
+            content = f.read()
+        name = name or os.path.basename(filepath)
+
+    ext = os.path.splitext(filepath if filepath != '-' else '')[-1] or '.txt'
+
+    # Auto-tag using AI
+    tags = auto_tag(content, filepath if filepath != '-' else '')
+
+    snippet = {
+        "id": hashlib.md5(f"{name}-{time.time()}".encode()).hexdigest()[:10],
+        "name": name,
+        "content": content,
+        "language": ext.lstrip('.'),
+        "tags": tags,
+        "created": datetime.now().isoformat(),
+        "source": filepath
+    }
+
+    db = load_db()
+    db.append(snippet)
+    save_db(db)
+
+    print(f"✅ Snippet saved: {name}")
+    print(f"   ID: {snippet['id']}")
+    print(f"   Language: {snippet['language']}")
+    print(f"   Tags: {', '.join(tags)}")
+    print(f"   Size: {len(content)} chars")
+
+
+def auto_tag(content, filepath):
+    """Auto-generate tags using lightweight heuristics."""
+    tags = []
+
+    content_lower = content.lower()
+
+    # Language-specific tags
+    if 'def ' in content or 'import ' in content or 'class ' in content:
+        tags.append('python')
+    if '{' in content and '}' in content and ('function' in content_lower or 'const' in content_lower or '=>' in content_lower):
+        tags.append('javascript')
+    if '#!/bin/bash' in content or '#!/usr/bin/env bash' in content:
+        tags.append('bash')
+    if '#include' in content and ('int main' in content or 'void main' in content):
+        tags.append('c')
+    if 'use std::' in content or 'fn main' in content or 'impl ' in content:
+        tags.append('rust')
+    if 'package ' in content and ('func ' in content or 'func(' in content):
+        tags.append('go')
+    if '</html>' in content or '<div' in content:
+        tags.append('html')
+    if '{' in content and '}' in content and (':' in content and ';' in content):
+        if 'color:' in content or 'font-' in content or 'margin:' in content:
+            tags.append('css')
+
+    # Pattern tags
+    if 'def test_' in content or 'unittest' in content or 'describe(' in content or 'it(' in content:
+        tags.append('testing')
+    if 'SELECT ' in content.upper() or 'INSERT INTO' in content.upper():
+        tags.append('sql')
+    if 'docker' in content_lower or 'Dockerfile' in (filepath or ''):
+        tags.append('docker')
+    if 'api' in content_lower or 'endpoint' in content_lower or 'router' in content_lower:
+        tags.append('api')
+    if 'algorithm' in content_lower or 'sort(' in content or 'search(' in content:
+        tags.append('algorithm')
+    if 'regex' in content_lower or 're.compile' in content or 'new RegExp' in content:
+        tags.append('regex')
+
+    if not tags:
+        tags.append('general')
+
+    return tags
+
+
+def list_snippets(tag=None):
+    """List all saved snippets, optionally filtered by tag."""
+    db = load_db()
+
+    if not db:
+        print("No snippets saved yet.")
+        print("Save one: neuros-snippets save <file>")
+        return
+
+    if tag:
+        db = [s for s in db if tag in s.get('tags', [])]
+        if not db:
+            print(f"No snippets with tag '{tag}'")
+            return
+
+    print(f"\n{'ID':<12} {'Name':<25} {'Lang':<10} {'Tags':<30} {'Size':>8}")
+    print("-" * 90)
+    for s in sorted(db, key=lambda x: x['created'], reverse=True):
+        print(f"{s['id']:<12} {s['name'][:25]:<25} {s['language']:<10} {', '.join(s['tags'])[:30]:<30} {len(s['content']):>8}")
+
+    print(f"\n{len(db)} snippets total.")
+
+
+def search_snippets(query):
+    """AI-powered snippet search."""
+    db = load_db()
+    if not db:
+        print("No snippets to search.")
+        return
+
+    # Build a prompt with all snippets for AI to rank
+    snippets_text = []
+    for s in db:
+        snippets_text.append(f"[{s['id']}] {s['name']} ({', '.join(s['tags'])}):\n{s['content'][:300]}")
+
+    prompt = f"""You are a code snippet search engine. Given a search query and a list of snippets,
+return the IDs of the 5 most relevant snippets, ranked by relevance. Return ONLY a JSON array of IDs.
+
+Query: {query}
+
+Snippets:
+{chr(10).join(snippets_text[:20])}
+
+Return ONLY: ["id1", "id2", ...]"""
+
+    try:
+        import urllib.request
+        data = json.dumps({
+            "model": "mistral",
+            "prompt": prompt,
+            "stream": False
+        }).encode('utf-8')
+
+        req = urllib.request.Request(OLLAMA_URL, data=data,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read())
+            response = result.get("response", "[]")
+
+        # Parse IDs from response
+        import re
+        ids = re.findall(r'"([a-f0-9]+)"', response)
+
+        print(f"Results for '{query}':\n")
+        for sid in ids:
+            for s in db:
+                if s['id'] == sid:
+                    print(f"  📄 {s['name']} ({s['language']}) [{', '.join(s['tags'])}]")
+                    print(f"     {textwrap.shorten(s['content'], width=120, placeholder='...')}")
+                    print()
+        if not ids:
+            # Fallback: keyword search
+            query_lower = query.lower()
+            for s in db:
+                if query_lower in s['content'].lower() or query_lower in s['name'].lower():
+                    print(f"  📄 {s['name']} ({s['language']}) [{', '.join(s['tags'])}]")
+                    print()
+
+    except Exception as e:
+        # Fallback to simple keyword search
+        print(f"(Offline mode - keyword search)\n")
+        query_lower = query.lower()
+        found = False
+        for s in db:
+            if query_lower in s['content'].lower() or query_lower in s['name'].lower() or any(query_lower in t.lower() for t in s['tags']):
+                print(f"  📄 {s['name']} ({s['language']}) [{', '.join(s['tags'])}]")
+                print(f"     {textwrap.shorten(s['content'], width=120, placeholder='...')}")
+                print()
+                found = True
+        if not found:
+            print("No snippets found.")
+
+
+def show_snippet(sid):
+    """Show a snippet's full content."""
+    db = load_db()
+    for s in db:
+        if s['id'] == sid:
+            print(f"\n{'='*60}")
+            print(f"  Name: {s['name']}")
+            print(f"  Language: {s['language']}")
+            print(f"  Tags: {', '.join(s['tags'])}")
+            print(f"  Created: {s['created']}")
+            print(f"  Source: {s.get('source', 'manual')}")
+            print(f"{'='*60}\n")
+            print(s['content'])
+            return
+    print(f"Snippet {sid} not found.")
+
+
+def delete_snippet(sid):
+    """Delete a snippet."""
+    db = load_db()
+    for s in db:
+        if s['id'] == sid:
+            confirm = input(f"Delete '{s['name']}'? [y/N]: ")
+            if confirm.lower() == 'y':
+                db.remove(s)
+                save_db(db)
+                print(f"✅ Deleted: {s['name']}")
+            else:
+                print("Cancelled.")
+            return
+    print(f"Snippet {sid} not found.")
+
+
+def generate_snippet(description):
+    """Generate a code snippet using the local LLM."""
+    prompt = f"""You are an expert programmer. Generate a clean, well-commented code snippet based on this description.
+Be concise and include only the code (and brief comments). Choose the most appropriate language.
+
+Description: {description}
+
+Return ONLY the code. No explanations before or after."""
+
+    print(f"Generating: {description}")
+    print()
+
+    try:
+        import urllib.request
+        data = json.dumps({
+            "model": "mistral",
+            "prompt": prompt,
+            "stream": True
+        }).encode('utf-8')
+
+        req = urllib.request.Request(OLLAMA_URL, data=data,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            generated = ""
+            for line in resp:
+                if line:
+                    chunk = json.loads(line)
+                    text = chunk.get("response", "")
+                    print(text, end="", flush=True)
+                    generated += text
+                    if chunk.get("done"):
+                        break
+
+        # Offer to save
+        print("\n")
+        save = input("Save this snippet? [y/N]: ")
+        if save.lower() == 'y':
+            name = input("Name: ") or description[:30]
+            db = load_db()
+            snippet = {
+                "id": hashlib.md5(f"{name}-{time.time()}".encode()).hexdigest()[:10],
+                "name": name,
+                "content": generated,
+                "language": auto_tag(generated, '')[0] if auto_tag(generated, '') else 'txt',
+                "tags": auto_tag(generated, ''),
+                "created": datetime.now().isoformat(),
+                "source": "AI-generated"
+            }
+            db.append(snippet)
+            save_db(db)
+            print(f"✅ Saved as: {name}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+def export_snippets(fmt="json"):
+    """Export snippets to a file."""
+    db = load_db()
+    if not db:
+        print("No snippets to export.")
+        return
+
+    if fmt == "json":
+        outpath = os.path.expanduser(f"~/neuros-snippets-export.json")
+        with open(outpath, 'w') as f:
+            json.dump(db, f, indent=2)
+        print(f"✅ Exported {len(db)} snippets to {outpath}")
+
+    elif fmt == "md":
+        outpath = os.path.expanduser(f"~/neuros-snippets-export.md")
+        with open(outpath, 'w') as f:
+            f.write("# NeurOS Snippets\n\n")
+            for s in db:
+                f.write(f"## {s['name']}\n")
+                f.write(f"- **Language:** {s['language']}\n")
+                f.write(f"- **Tags:** {', '.join(s['tags'])}\n")
+                f.write(f"- **Created:** {s['created']}\n\n")
+                f.write(f"```{s['language']}\n{s['content']}\n```\n\n")
+        print(f"✅ Exported {len(db)} snippets to {outpath}")
+    else:
+        print(f"Unknown format: {fmt}. Use 'json' or 'md'.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Code Snippet Manager")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    save_p = subparsers.add_parser("save", help="Save a snippet")
+    save_p.add_argument("file", help="File path or '-' for stdin")
+    save_p.add_argument("--name", "-n", help="Snippet name")
+
+    list_p = subparsers.add_parser("list", aliases=["ls"], help="List snippets")
+    list_p.add_argument("--tag", "-t", help="Filter by tag")
+
+    search_p = subparsers.add_parser("search", help="Search snippets")
+    search_p.add_argument("query", help="Search query")
+
+    show_p = subparsers.add_parser("show", help="Show snippet content")
+    show_p.add_argument("id", help="Snippet ID")
+
+    delete_p = subparsers.add_parser("delete", aliases=["rm"], help="Delete snippet")
+    delete_p.add_argument("id", help="Snippet ID")
+
+    gen_p = subparsers.add_parser("generate", aliases=["gen"], help="Generate a snippet with AI")
+    gen_p.add_argument("description", help="Description of the snippet to generate")
+
+    export_p = subparsers.add_parser("export", help="Export snippets")
+    export_p.add_argument("format", nargs="?", default="json", choices=["json", "md"])
+
+    args = parser.parse_args()
+
+    if args.command == "save":
+        save_snippet(args.file, args.name)
+    elif args.command in ("list", "ls"):
+        list_snippets(args.tag)
+    elif args.command == "search":
+        search_snippets(args.query)
+    elif args.command == "show":
+        show_snippet(args.id)
+    elif args.command in ("delete", "rm"):
+        delete_snippet(args.id)
+    elif args.command in ("generate", "gen"):
+        generate_snippet(args.description)
+    elif args.command == "export":
+        export_snippets(args.format)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

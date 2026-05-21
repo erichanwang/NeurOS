@@ -1,0 +1,37 @@
+Source: neuros
+Section: metapackages
+Priority: optional
+Maintainer: NeurOS Team <dev@neuros.local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://github.com/neuros/neuros
+Rules-Requires-Root: no
+
+Package: neuros-tools
+Architecture: all
+Depends: ${misc:Depends}, python3, python3-gi, gir1.2-gtk-3.0, gir1.2-appindicator3-0.1, zsh, neovim, git, curl, wmctrl, xclip, xdotool, alsa-utils, espeak-ng
+Description: NeurOS AI-powered tools and utilities
+ NeurOS is a custom Ubuntu 24.04 LTS-based Linux distribution
+ with local LLM integration (Ollama + Mistral 7B) baked in.
+ .
+ This package contains the core NeurOS command-line tools:
+  * nn — Terminal AI assistant with file/context awareness
+  * neuros-chat — Local web chat GUI (Flask + HTML/CSS/JS)
+  * neuros-model — Model manager (list, pull, switch, benchmark)
+  * neuros-git — AI-powered git assistant (commits, reviews, PRs)
+  * neuros-agent — System context agent (clipboard, windows, RAG)
+  * neuros-snippets — Code snippet manager with AI search
+  * neuros-voice — Speech-to-text input
+  * neuros-speak — Text-to-speech output
+  * neuros-mcp — Model Context Protocol server
+
+Package: neuros-desktop
+Architecture: all
+Depends: ${misc:Depends}, neuros-tools (= ${binary:Version}), gnome-shell, gnome-shell-extensions
+Description: NeurOS desktop integration package
+ Desktop integration for NeurOS including:
+  * System tray applet (neuros-tray)
+  * Welcome screen (neuros-welcome)
+  * GNOME shell extensions (dash-to-dock, blur-my-shell)
+  * Dark theme and custom keyboard shortcuts
+  * Wallpaper and visual branding

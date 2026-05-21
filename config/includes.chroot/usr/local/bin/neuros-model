@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""
+neuros-model — NeurOS Model Manager
+Manage local LLM models: list, download, delete, compare, and benchmark.
+
+Usage:
+  neuros-model list                  List installed models
+  neuros-model pull <name>           Download a model (e.g., codellama, llama3)
+  neuros-model remove <name>         Delete a model
+  neuros-model switch <name>         Set default model
+  neuros-model info <name>           Show model details (size, quantization)
+  neuros-model search <query>        Search for models in Ollama library
+  neuros-model benchmark [name]      Run inference speed benchmark
+  neuros-model compare <a> <b> ...   Compare multiple models on the same prompt
+"""
+
+import sys
+import os
+import json
+import subprocess
+import time
+import argparse
+import textwrap
+
+OLLAMA_URL = "http://localhost:11434/api"
+CONFIG_PATH = os.path.expanduser("~/.config/neuros/llm.conf")
+
+def api_request(endpoint, method="GET", data=None):
+    """Make a request to Ollama API."""
+    import urllib.request
+
+    url = f"{OLLAMA_URL}/{endpoint}"
+    body = json.dumps(data).encode('utf-8') if data else None
+
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    req.get_method = lambda: method
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code} - {e.reason}")
+        return None
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+def list_models():
+    """List all installed models."""
+    data = api_request("tags")
+    if not data or not data.get("models"):
+        print("No models installed. Pull one with: neuros-model pull mistral")
+        return
+
+    print()
+    print(f"{'Model':<30} {'Size':>10} {'Modified':>20}")
+    print("-" * 62)
+    for m in data["models"]:
+        name = m.get("name", "unknown")
+        size = format_size(m.get("size", 0))
+        modified = m.get("modified_at", "")[:19].replace("T", " ")
+        print(f"{name:<30} {size:>10} {modified:>20}")
+
+    # Show current default
+    default = get_current_model()
+    print(f"\nDefault model: {default}")
+
+def pull_model(name):
+    """Download a model."""
+    print(f"Pulling {name}...")
+    print("(This may take several minutes depending on model size)\n")
+
+    try:
+        result = subprocess.run(
+            ["ollama", "pull", name],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True
+        )
+
+        # Show progress
+        for line in result.stdout.split('\n'):
+            if line.strip():
+                if 'pulling' in line.lower() or 'writing' in line.lower() or 'verifying' in line.lower():
+                    print(f"  {line.strip()}")
+                elif '%' in line:
+                    print(f"  {line.strip()}")
+
+        if result.returncode == 0:
+            print(f"\n✅ {name} pulled successfully!")
+        else:
+            print(f"\n❌ Failed to pull {name}")
+            sys.exit(1)
+
+    except FileNotFoundError:
+        print("Error: ollama not found. Is neuros-llm installed?")
+        sys.exit(1)
+
+def remove_model(name):
+    """Delete a model."""
+    confirm = input(f"Are you sure you want to delete '{name}'? [y/N]: ")
+    if confirm.lower() != 'y':
+        print("Cancelled.")
+        return
+
+    data = api_request("delete", method="DELETE", data={"name": name})
+    if data is not None:
+        print(f"✅ {name} removed.")
+
+def switch_model(name):
+    """Set the default model in llm.conf."""
+    # Verify model exists
+    models_data = api_request("tags")
+    if models_data:
+        model_names = [m["name"] for m in models_data.get("models", [])]
+        if name not in model_names:
+            print(f"Warning: '{name}' is not installed. Pull it first with: neuros-model pull {name}")
+
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+
+    # Read existing config
+    lines = []
+    found = False
+    try:
+        with open(CONFIG_PATH) as f:
+            for line in f:
+                if '=' in line and not line.startswith('[') and 'model' in line.split('=')[0]:
+                    lines.append(f'model = "{name}"\n')
+                    found = True
+                else:
+                    lines.append(line)
+    except FileNotFoundError:
+        pass
+
+    if not found:
+        lines.append(f'model = "{name}"\n')
+
+    with open(CONFIG_PATH, 'w') as f:
+        f.writelines(lines)
+
+    print(f"✅ Default model set to '{name}'.")
+
+def model_info(name):
+    """Show detailed info about a model."""
+    data = api_request("show", method="POST", data={"name": name})
+    if not data:
+        return
+
+    print(f"\n{'='*50}")
+    print(f"  Model: {name}")
+    print(f"{'='*50}")
+
+    # Get parameters if available
+    params = data.get("parameters", "")
+    template = data.get("template", "")
+
+    if params:
+        print(f"\n  Parameters:")
+        for line in params.split('\n'):
+            print(f"    {line}")
+
+    if template:
+        print(f"\n  Template: {template[:200]}...")
+
+    # Get modelfile
+    try:
+        result = subprocess.run(["ollama", "show", name], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            print(f"\n  Details:")
+            for line in result.stdout.split('\n'):
+                if line.strip():
+                    print(f"    {line}")
+    except Exception:
+        pass
+
+def search_models(query):
+    """Search for models in Ollama library."""
+    print(f"Searching for '{query}'...\n")
+
+    # Use ollama search or list from known models
+    known_models = {
+        "mistral": "7B general-purpose model, good for most tasks (~4GB)",
+        "codellama": "Meta's code-specialized model, available in 7B/13B/34B",
+        "llama3": "Meta's latest general model (8B), very capable",
+        "llama3.1": "Meta's latest improved model (8B), state of the art open model",
+        "gemma2": "Google's lightweight model (2B/9B), fast and capable",
+        "phi3": "Microsoft's small but powerful model (3.8B)",
+        "qwen2": "Alibaba's multilingual model (0.5B-72B options)",
+        "deepseek-coder": "Specialized code model (1.3B-33B)",
+        "nomic-embed-text": "Text embedding model for RAG/semantic search",
+        "llava": "Vision-language model (understand images)",
+        "dolphin-mistral": "Uncensored variant of Mistral",
+        "openhermes": "Fine-tuned for chat/conversation",
+        "neural-chat": "Intel's chat-optimized model (7B)",
+        "starling-lm": "RLHF-trained conversational model (7B)",
+        "orca-mini": "Small, fast model based on Orca (3B)",
+        "tinydolphin": "Ultra-small model for testing (1.1B)",
+    }
+
+    results = [(name, desc) for name, desc in known_models.items() if query.lower() in name.lower() or query.lower() in desc.lower()]
+
+    if not results:
+        print("No matches found. Try: mistral, llama3, codellama, phi3")
+        return
+
+    for name, desc in results:
+        print(f"  {name:<25} {desc}")
+
+    print(f"\n{len(results)} results. Pull with: neuros-model pull <name>")
+
+def benchmark_model(name=None, prompt="Explain quantum computing in one paragraph."):
+    """Run a simple inference speed benchmark."""
+    model_name = name or get_current_model()
+
+    print(f"Benchmarking {model_name}...")
+    print(f"Prompt: \"{prompt}\"\n")
+
+    data = {
+        "model": model_name,
+        "prompt": prompt,
+        "stream": False
+    }
+
+    start = time.time()
+    result = api_request("generate", method="POST", data=data)
+    elapsed = time.time() - start
+
+    if not result:
+        return
+
+    response = result.get("response", "")
+    tokens = result.get("eval_count", 0)
+    tokens_per_sec = tokens / elapsed if elapsed > 0 else 0
+
+    print(f"  Time: {elapsed:.2f}s")
+    print(f"  Tokens: {tokens}")
+    print(f"  Speed: {tokens_per_sec:.1f} tokens/sec")
+    print(f"  Response length: {len(response)} chars")
+    print(f"\n  Response: {response[:200]}...")
+
+def compare_models(models, prompt="Write a haiku about Linux."):
+    """Compare responses from multiple models."""
+    print(f"Comparing {len(models)} models on: \"{prompt}\"\n")
+
+    for model in models:
+        print(f"\n{'─'*60}")
+        print(f"  🤖 {model}")
+        print(f"{'─'*60}")
+
+        data = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False
+        }
+
+        start = time.time()
+        result = api_request("generate", method="POST", data=data)
+        elapsed = time.time() - start
+
+        if result:
+            response = result.get("response", "No response")
+            tokens = result.get("eval_count", 0)
+            tps = tokens / elapsed if elapsed > 0 else 0
+            print(f"  {response[:300]}")
+            print(f"  ({tps:.1f} tok/s, {elapsed:.1f}s)")
+        else:
+            print(f"  Error: Could not get response")
+
+def get_current_model():
+    """Read current default model from config."""
+    try:
+        with open(CONFIG_PATH) as f:
+            for line in f:
+                if '=' in line and not line.startswith('['):
+                    key, val = line.split('=', 1)
+                    if key.strip() == "model":
+                        return val.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return "mistral"
+
+def format_size(size_bytes):
+    """Format size in human-readable format."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} PB"
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="NeurOS Model Manager",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+        Examples:
+          neuros-model list
+          neuros-model pull codellama
+          neuros-model switch llama3
+          neuros-model compare mistral llama3
+          neuros-model benchmark
+        """)
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    subparsers.add_parser("list", aliases=["ls"], help="List installed models")
+    pull_p = subparsers.add_parser("pull", aliases=["download"], help="Download a model")
+    pull_p.add_argument("name", help="Model name (e.g., mistral, codellama, llama3)")
+
+    remove_p = subparsers.add_parser("remove", aliases=["rm", "delete"], help="Remove a model")
+    remove_p.add_argument("name", help="Model name to remove")
+
+    switch_p = subparsers.add_parser("switch", aliases=["use", "set"], help="Set default model")
+    switch_p.add_argument("name", help="Model name to set as default")
+
+    info_p = subparsers.add_parser("info", aliases=["show"], help="Show model details")
+    info_p.add_argument("name", help="Model name")
+
+    search_p = subparsers.add_parser("search", aliases=["find"], help="Search for models")
+    search_p.add_argument("query", help="Search query")
+
+    bench_p = subparsers.add_parser("benchmark", aliases=["bench"], help="Benchmark a model")
+    bench_p.add_argument("name", nargs="?", help="Model to benchmark (default: current)")
+    bench_p.add_argument("--prompt", default="Explain quantum computing in one paragraph.", help="Test prompt")
+
+    compare_p = subparsers.add_parser("compare", aliases=["cmp"], help="Compare multiple models")
+    compare_p.add_argument("models", nargs="+", help="Models to compare")
+    compare_p.add_argument("--prompt", default="Write a haiku about Linux.", help="Comparison prompt")
+
+    args = parser.parse_args()
+
+    if args.command in (None, "list", "ls"):
+        list_models()
+    elif args.command in ("pull", "download"):
+        pull_model(args.name)
+    elif args.command in ("remove", "rm", "delete"):
+        remove_model(args.name)
+    elif args.command in ("switch", "use", "set"):
+        switch_model(args.name)
+    elif args.command in ("info", "show"):
+        model_info(args.name)
+    elif args.command in ("search", "find"):
+        search_models(args.query)
+    elif args.command in ("benchmark", "bench"):
+        benchmark_model(args.name, args.prompt)
+    elif args.command in ("compare", "cmp"):
+        compare_models(args.models, args.prompt)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
