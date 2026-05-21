@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""
+neuros-sql — NeurOS SQL Assistant
+Natural language to SQL and back. Database exploration and optimization.
+
+Usage:
+  neuros-sql "all users who joined last month"        Generate SQL
+  neuros-sql --db app.db "active orders over $100"    Generate + execute
+  neuros-sql explain "SELECT ... FROM ..."             Explain a query
+  neuros-sql optimize "SELECT ..."                     Optimize a query
+  neuros-sql schema ./app.db                           Explore database schema
+  neuros-sql --pipe                                    Read natural language from stdin
+"""
+
+import sys, os, json, sqlite3, argparse, subprocess
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        return f"Error: {e}"
+
+def get_schema(db_path):
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = cur.fetchall()
+
+        schema_lines = []
+        for (table,) in tables:
+            cur.execute(f"PRAGMA table_info({table})")
+            cols = cur.fetchall()
+            col_strs = [f"  {c[1]} {c[2]}" + (" PK" if c[5] else "") + (" NOT NULL" if c[3] else "") for c in cols]
+            schema_lines.append(f"CREATE TABLE {table} (")
+            schema_lines.extend(col_strs)
+            schema_lines.append(");")
+
+            # Foreign keys
+            cur.execute(f"PRAGMA foreign_key_list({table})")
+            fks = cur.fetchall()
+            for fk in fks:
+                schema_lines.append(f"  -- FK: {fk[3]} -> {fk[2]}({fk[4]})")
+
+            # Row count
+            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            schema_lines.append(f"  -- {cur.fetchone()[0]} rows\n")
+
+        conn.close()
+        return '\n'.join(schema_lines)
+    except Exception as e:
+        return f"Schema unavailable: {e}"
+
+def generate_sql(question, db_path=None):
+    schema = get_schema(db_path) if db_path else ""
+    db_hint = f"Database: {os.path.basename(db_path)}\n" if db_path else ""
+
+    prompt = f"""Write a SQL query for this question.
+
+{db_hint}
+Schema:
+{schema[:3000]}
+
+Question: {question}
+
+Rules:
+- Return ONLY the SQL query
+- Use appropriate JOINs
+- Include comments for clarity
+- Handle NULLs appropriately
+- Use parameterized-style where helpful
+- Add LIMIT 100 for safety"""
+
+    sql = query_ollama(prompt).strip()
+    # Clean up formatting
+    sql = sql.strip('`').strip()
+    if sql.lower().startswith('```sql'):
+        sql = sql[6:]
+    if sql.startswith('```'):
+        lines = sql.split('\n')
+        sql = '\n'.join(l for l in lines if not l.startswith('```'))
+
+    return sql
+
+def explain_sql(sql):
+    prompt = f"""Explain this SQL query in plain English. Break down each clause.
+
+{sql}
+
+Provide:
+## Purpose (what this query returns)
+## Clause Breakdown (SELECT, FROM, JOIN, WHERE, GROUP BY, etc.)
+## Performance Notes (indexes, scans, optimizations)
+## Potential Issues (NULLs, duplicates, edge cases)"""
+
+    print(query_ollama(prompt))
+
+def optimize_sql(sql, db_path=None):
+    schema = get_schema(db_path) if db_path else ""
+
+    prompt = f"""Optimize this SQL query for performance.
+
+Query:
+{sql}
+
+Schema:
+{schema[:2000]}
+
+Provide:
+1. Performance analysis (estimated cost)
+2. Suggested indexes
+3. Rewritten optimized query
+4. Expected improvement (rough %)
+
+Return the optimized query with comments."""
+
+    print(query_ollama(prompt))
+
+def execute_sql(db_path, sql):
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(sql)
+
+        if sql.strip().upper().startswith(('SELECT', 'PRAGMA', 'EXPLAIN')):
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description] if cur.description else []
+
+            if cols:
+                widths = [max(len(str(c)), max((len(str(r[i])) for r in rows), default=0)) for i, c in enumerate(cols)]
+                header = ' │ '.join(str(c).ljust(w) for c, w in zip(cols, widths))
+                sep = '─┼─'.join('─' * w for w in widths)
+                print(header)
+                print(sep)
+                for row in rows[:50]:
+                    print(' │ '.join(str(v).ljust(w) for v, w in zip(row, widths)))
+                if len(rows) > 50:
+                    print(f"... ({len(rows) - 50} more rows)")
+            print(f"\n{len(rows)} rows returned")
+        else:
+            conn.commit()
+            print(f"✅ Query executed successfully. {cur.rowcount} rows affected.")
+
+        conn.close()
+    except Exception as e:
+        print(f"SQL Error: {e}")
+
+def explore_schema(db_path):
+    schema = get_schema(db_path)
+    print(f"\n📊 Database: {os.path.basename(db_path)}\n{'═'*40}")
+    print(schema)
+
+    # Sample data
+    prompt = f"""Describe this database in plain English. What kind of data does it store?
+{schema[:2000]}
+
+Give a 2-3 sentence overview and suggest 3 interesting queries."""
+    print(f"\n🤖 Analysis:\n{query_ollama(prompt)}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS SQL Assistant")
+    parser.add_argument("question", nargs="?", help="Natural language query")
+    parser.add_argument("--db", "-d", help="Database file path")
+    parser.add_argument("--explain", "-e", help="Explain a SQL query")
+    parser.add_argument("--optimize", "-o", help="Optimize a SQL query")
+    parser.add_argument("--schema", "-s", help="Explore database schema")
+    parser.add_argument("--execute", "-x", action="store_true", help="Auto-execute generated query")
+    parser.add_argument("--pipe", "-p", action="store_true", help="Read from stdin")
+
+    args = parser.parse_args()
+
+    if args.schema:
+        explore_schema(args.schema)
+        return
+
+    sql_arg = None
+    if args.explain:
+        sql_arg = args.explain
+    elif args.optimize:
+        sql_arg = args.optimize
+
+    if sql_arg:
+        if args.explain:
+            explain_sql(sql_arg)
+        elif args.optimize:
+            optimize_sql(sql_arg, args.db)
+        return
+
+    # Get question
+    if args.pipe or not sys.stdin.isatty():
+        question = sys.stdin.read().strip()
+    elif args.question:
+        question = args.question
+    else:
+        parser.print_help()
+        return
+
+    sql = generate_sql(question, args.db)
+    print(f"\n💡 SQL:\n{'─'*40}\n{sql}\n")
+
+    if args.db and (args.execute or input("Execute? [y/N]: ").lower() == 'y'):
+        execute_sql(args.db, sql)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""
+neuros-notify — NeurOS Notification System
+AI-powered desktop notifications with smart routing and priority filtering.
+
+Usage:
+  neuros-notify "message" [--priority high|normal|low] [--persistent] [--action "label:command"]
+  neuros-notify --monitor [--filter pattern]              Watch logs/processes and notify
+  neuros-notify --dismiss                                  Clear all notifications
+  neuros-notify --history                                  Show notification history
+  neuros-notify --webhook URL                              Add webhook endpoint
+"""
+
+import sys
+import os
+import json
+import time
+import subprocess
+import argparse
+import signal
+from datetime import datetime
+
+HISTORY_DIR = os.path.expanduser("~/.local/share/neuros/notifications")
+HISTORY_FILE = os.path.join(HISTORY_DIR, "history.json")
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+WEBHOOKS_FILE = os.path.join(CONFIG_DIR, "webhooks.json")
+
+
+def ensure_dirs():
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+
+
+def notify(message, priority="normal", persistent=False, action=None, icon="neuros"):
+    """Send a desktop notification using notify-send."""
+    cmd = ["notify-send", "--app-name=NeurOS"]
+
+    if icon:
+        cmd.extend(["--icon", icon])
+
+    if priority == "high":
+        cmd.append("--urgency=critical")
+    elif priority == "low":
+        cmd.append("--urgency=low")
+    else:
+        cmd.append("--urgency=normal")
+
+    if persistent:
+        cmd.append("--hint=int:transient:0")
+    else:
+        cmd.append("--hint=int:transient:1")
+
+    if action:
+        cmd.extend(["--action", action])
+
+    # Truncate long messages for notification
+    display_msg = message[:200] + "..." if len(message) > 200 else message
+    cmd.append(display_msg)
+
+    try:
+        subprocess.run(cmd, timeout=5)
+        save_to_history(message, priority)
+        send_to_webhooks(message, priority)
+        return True
+    except Exception as e:
+        print(f"Notification failed: {e}", file=sys.stderr)
+        # Fallback: write to terminal
+        print(f"\n🧠 [NEUROS {priority.upper()}] {display_msg}\n")
+        return False
+
+
+def save_to_history(message, priority):
+    """Save notification to history."""
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "priority": priority,
+        "message": message
+    }
+    history = load_history()
+    history.append(entry)
+    # Keep last 500 notifications
+    if len(history) > 500:
+        history = history[-500:]
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+def load_history():
+    """Load notification history."""
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return []
+
+
+def load_webhooks():
+    """Load webhook URLs."""
+    if os.path.exists(WEBHOOKS_FILE):
+        try:
+            with open(WEBHOOKS_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return []
+
+
+def send_to_webhooks(message, priority):
+    """Send notification to registered webhooks."""
+    import urllib.request
+    webhooks = load_webhooks()
+    if not webhooks:
+        return
+    payload = json.dumps({
+        "source": "neuros-notify",
+        "priority": priority,
+        "message": message,
+        "timestamp": datetime.now().isoformat()
+    }).encode()
+    for url in webhooks:
+        try:
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            urllib.request.urlopen(req, timeout=3)
+        except Exception:
+            pass
+
+
+def add_webhook(url):
+    """Register a new webhook URL."""
+    webhooks = load_webhooks()
+    if url not in webhooks:
+        webhooks.append(url)
+        with open(WEBHOOKS_FILE, "w") as f:
+            json.dump(webhooks, f, indent=2)
+        notify(f"Webhook registered: {url}", priority="low")
+    else:
+        print(f"Webhook already registered: {url}")
+
+
+def dismiss_all():
+    """Dismiss all active NeuroS notifications."""
+    # Clear from notification center
+    subprocess.run(
+        ["gdbus", "call", "--session",
+         "--dest=org.freedesktop.Notifications",
+         "--object-path=/org/freedesktop/Notifications",
+         "--method=org.freedesktop.Notifications"],
+        capture_output=True
+    )
+    print("Notifications dismissed.")
+
+
+def show_history(limit=50):
+    """Display notification history."""
+    history = load_history()
+    if not history:
+        print("No notification history.")
+        return
+    for entry in history[-limit:]:
+        ts = entry["timestamp"][:19].replace("T", " ")
+        prio_marker = {"high": "🔴", "normal": "🟡", "low": "🟢"}.get(
+            entry["priority"], "⚪"
+        )
+        print(f"  {prio_marker} [{ts}] {entry['message'][:100]}")
+
+
+def monitor_process(cmd_pattern=None):
+    """Monitor processes and notify on changes."""
+    print("Monitoring processes... (Ctrl+C to stop)")
+    known = set()
+    try:
+        while True:
+            output = subprocess.check_output(
+                ["ps", "aux", "--no-headers"], text=True
+            )
+            current = set()
+            for line in output.splitlines():
+                if cmd_pattern and cmd_pattern not in line:
+                    continue
+                current.add(line.strip())
+
+            new = current - known
+            gone = known - current
+
+            for proc in new:
+                notify(f"New process: {proc[:100]}", priority="low")
+
+            for proc in gone:
+                notify(f"Process ended: {proc[:100]}", priority="low")
+
+            known = current
+            time.sleep(10)
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped.")
+
+
+def ai_priority(message):
+    """Use local LLM to determine notification priority."""
+    import urllib.request
+    import urllib.error
+
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    prompt = (
+        f"Classify this notification priority as HIGH, NORMAL, or LOW. "
+        f"Reply with only one word.\n\n"
+        f"Message: {message}\n\nPriority:"
+    )
+
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_predict": 5}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read().decode())
+        result = data.get("response", "").strip().upper()
+        if "HIGH" in result:
+            return "high"
+        elif "LOW" in result:
+            return "low"
+        return "normal"
+    except Exception:
+        return "normal"
+
+
+def main():
+    ensure_dirs()
+    parser = argparse.ArgumentParser(description="NeurOS Notification System")
+    parser.add_argument("message", nargs="?", help="Notification message")
+    parser.add_argument("--priority", "-p", default="normal",
+                        choices=["high", "normal", "low"],
+                        help="Notification priority")
+    parser.add_argument("--persistent", action="store_true",
+                        help="Keep notification visible until dismissed")
+    parser.add_argument("--action", "-a",
+                        help="Action label:command (e.g., 'Open:firefox')")
+    parser.add_argument("--monitor", "-m", nargs="?", const="",
+                        help="Monitor processes matching pattern")
+    parser.add_argument("--dismiss", action="store_true",
+                        help="Dismiss all notifications")
+    parser.add_argument("--history", "-H", action="store_true",
+                        help="Show notification history")
+    parser.add_argument("--webhook", "-w",
+                        help="Add webhook URL for notifications")
+    parser.add_argument("--ai-priority", action="store_true",
+                        help="Use AI to determine priority")
+
+    args = parser.parse_args()
+
+    if args.dismiss:
+        dismiss_all()
+        return
+
+    if args.history:
+        show_history()
+        return
+
+    if args.webhook:
+        add_webhook(args.webhook)
+        return
+
+    if args.monitor is not None:
+        pattern = args.monitor if args.monitor else None
+        monitor_process(pattern)
+        return
+
+    if not args.message:
+        parser.print_help()
+        return
+
+    priority = args.priority
+    if args.ai_priority:
+        priority = ai_priority(args.message)
+
+    notify(args.message, priority, args.persistent, args.action)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+neuros-workflow — NeurOS Workflow Automation
+Define multi-step AI-powered workflows for common tasks.
+
+Usage:
+  neuros-workflow run "code-review"           Run a named workflow
+  neuros-workflow create review               Interactively create a workflow
+  neuros-workflow list                        List saved workflows
+  neuros-workflow show review                 Show workflow steps
+  neuros-workflow delete review               Delete a workflow
+"""
+
+import sys, os, json, subprocess, argparse, time
+from urllib.request import Request, urlopen
+
+WORKFLOW_DIR = os.path.expanduser("~/.config/neuros/workflows")
+OLLAMA_URL = "http://localhost:11434/api/generate"
+os.makedirs(WORKFLOW_DIR, exist_ok=True)
+
+DEFAULT_WORKFLOWS = {
+    "code-review": {
+        "name": "Code Review Pipeline",
+        "steps": [
+            {"type": "command", "cmd": "git diff --cached --stat", "label": "Checking changes"},
+            {"type": "command", "cmd": "git diff --cached", "label": "Getting diff"},
+            {"type": "ai", "prompt": "Review the git diff and provide: summary, issues, suggestions, score (1-10). Diff: {diff_output}", "label": "AI code review"},
+            {"type": "save", "path": "~/code-review-{timestamp}.md", "label": "Saving review"}
+        ]
+    },
+    "project-docs": {
+        "name": "Generate Project Documentation",
+        "steps": [
+            {"type": "command", "cmd": "find . -type f -name '*.py' -o -name '*.js' | head -20", "label": "Finding source files"},
+            {"type": "ai", "prompt": "Generate a README for this project based on these files: {file_list}", "label": "Generating README"},
+            {"type": "save", "path": "~/README-generated.md", "label": "Saving README"}
+        ]
+    },
+    "security-scan": {
+        "name": "Security Scan Pipeline",
+        "steps": [
+            {"type": "command", "cmd": "ufw status", "label": "Check firewall"},
+            {"type": "command", "cmd": "ss -tlnp4", "label": "Check ports"},
+            {"type": "command", "cmd": "find /etc -perm -o+w -type f 2>/dev/null | head -10", "label": "World-writable files"},
+            {"type": "ai", "prompt": "Analyze these security findings: {step_outputs}", "label": "AI security analysis"}
+        ]
+    }
+}
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except: return "(LLM unavailable)"
+
+def load_workflow(name):
+    # Check built-in first
+    if name in DEFAULT_WORKFLOWS:
+        return DEFAULT_WORKFLOWS[name]
+    
+    # Check user workflows
+    wf_path = os.path.join(WORKFLOW_DIR, f"{name}.json")
+    if os.path.exists(wf_path):
+        with open(wf_path) as f:
+            return json.load(f)
+    return None
+
+def save_workflow(name, workflow):
+    wf_path = os.path.join(WORKFLOW_DIR, f"{name}.json")
+    with open(wf_path, 'w') as f:
+        json.dump(workflow, f, indent=2)
+
+def list_workflows():
+    print("\n📋 Available Workflows\n" + "=" * 50)
+    
+    # Built-in
+    print("\nBuilt-in:")
+    for name, wf in DEFAULT_WORKFLOWS.items():
+        print(f"  📦 {name:<20} {wf['name']} ({len(wf['steps'])} steps)")
+    
+    # User
+    user_wfs = []
+    if os.path.exists(WORKFLOW_DIR):
+        for fname in os.listdir(WORKFLOW_DIR):
+            if fname.endswith('.json'):
+                user_wfs.append(fname.replace('.json', ''))
+    
+    if user_wfs:
+        print("\nCustom:")
+        for name in user_wfs:
+            wf = load_workflow(name)
+            if wf:
+                print(f"  ⚡ {name:<20} {wf['name']} ({len(wf['steps'])} steps)")
+
+def show_workflow(name):
+    wf = load_workflow(name)
+    if not wf:
+        print(f"Workflow '{name}' not found.")
+        return
+    
+    print(f"\n📋 {wf['name']}\n{'='*50}")
+    for i, step in enumerate(wf['steps'], 1):
+        icon = {"command": "💻", "ai": "🤖", "save": "💾", "ask": "❓", "pause": "⏸️"}
+        print(f"  {i}. {icon.get(step['type'], '•')} {step.get('label', step['type'])}")
+        if step['type'] == 'command':
+            print(f"     cmd: {step['cmd']}")
+
+def run_workflow(name, extra_vars=None):
+    wf = load_workflow(name)
+    if not wf:
+        print(f"Workflow '{name}' not found.")
+        return
+
+    print(f"\n⚡ Running: {wf['name']}\n{'='*50}")
+    
+    context = {}
+    outputs = []
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    context['timestamp'] = timestamp
+
+    for i, step in enumerate(wf['steps'], 1):
+        label = step.get('label', f'Step {i}')
+        print(f"\n[{i}/{len(wf['steps'])}] {label}")
+
+        if step['type'] == 'command':
+            cmd = step['cmd'].format(**context)
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+            output = result.stdout.strip() or result.stderr.strip()
+            if output:
+                # Show preview
+                for line in output.split('\n')[:5]:
+                    print(f"  {line[:100]}")
+                if len(output.split('\n')) > 5:
+                    print(f"  ... ({len(output.splitlines())} lines total)")
+            else:
+                print("  (no output)")
+            context[f'step_{i}_output'] = output
+            outputs.append(output)
+
+        elif step['type'] == 'ai':
+            prompt = step['prompt'].format(**context, step_outputs='\n'.join(outputs[-3:]))
+            result = query_ollama(prompt)
+            print(f"  {result[:300]}")
+            context[f'step_{i}_output'] = result
+            outputs.append(result)
+
+        elif step['type'] == 'save':
+            path = os.path.expanduser(step['path'].format(**context, timestamp=timestamp))
+            content = outputs[-1] if outputs else ""
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            with open(path, 'w') as f:
+                f.write(content)
+            print(f"  ✅ Saved: {path}")
+
+        elif step['type'] == 'ask':
+            question = step.get('question', 'Continue?')
+            answer = input(f"  {question} [Y/n]: ")
+            if answer.lower() == 'n':
+                print("  ⏹️  Workflow stopped.")
+                return
+
+    print(f"\n✅ Workflow '{wf['name']}' complete!")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Workflow Automation")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    run = subparsers.add_parser("run", help="Run a workflow")
+    run.add_argument("name", help="Workflow name")
+
+    subparsers.add_parser("list", help="List workflows")
+
+    show = subparsers.add_parser("show", help="Show workflow steps")
+    show.add_argument("name", help="Workflow name")
+
+    delete = subparsers.add_parser("delete", help="Delete workflow")
+    delete.add_argument("name", help="Workflow name")
+
+    args = parser.parse_args()
+
+    if args.command == "run":
+        run_workflow(args.name)
+    elif args.command == "list":
+        list_workflows()
+    elif args.command == "show":
+        show_workflow(args.name)
+    elif args.command == "delete":
+        wf_path = os.path.join(WORKFLOW_DIR, f"{args.name}.json")
+        if os.path.exists(wf_path):
+            os.remove(wf_path)
+            print(f"✅ Deleted: {args.name}")
+        else:
+            print("Cannot delete built-in workflows.")
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""
+neuros-translate — NeurOS Local Translator
+Translate text between languages using the local LLM. No cloud. No API keys.
+
+Usage:
+  neuros-translate "Hello world" --to es          English → Spanish
+  neuros-translate "Bonjour le monde" --from fr    Auto-detect → English
+  neuros-translate ./document.txt --to ja          Translate a file
+  neuros-translate --pipe --to de                  Read from stdin
+  neuros-translate --interactive                   Interactive translation mode
+  neuros-translate --list                          List supported languages
+"""
+
+import sys, os, json, argparse
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+LANGUAGES = {
+    "en": "English", "es": "Spanish", "fr": "French", "de": "German",
+    "it": "Italian", "pt": "Portuguese", "ru": "Russian", "zh": "Chinese",
+    "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi",
+    "nl": "Dutch", "pl": "Polish", "tr": "Turkish", "sv": "Swedish",
+    "no": "Norwegian", "da": "Danish", "fi": "Finnish", "el": "Greek",
+    "he": "Hebrew", "th": "Thai", "vi": "Vietnamese", "id": "Indonesian",
+    "uk": "Ukrainian", "cs": "Czech", "ro": "Romanian", "hu": "Hungarian",
+}
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        print(f"Error: LLM unavailable ({e})")
+        sys.exit(1)
+
+def translate(text, source_lang=None, target_lang="en", style="natural"):
+    src_name = LANGUAGES.get(source_lang, source_lang or "auto-detect")
+    tgt_name = LANGUAGES.get(target_lang, target_lang)
+
+    if source_lang:
+        prompt = f"Translate the following text from {src_name} to {tgt_name}. Style: {style}.\n\nText:\n{text}\n\nReturn ONLY the translation."
+    else:
+        prompt = f"Translate the following text to {tgt_name}. Auto-detect the source language. Style: {style}.\n\nText:\n{text}\n\nReturn ONLY the translation."
+
+    return query_ollama(prompt)
+
+def translate_file(filepath, source_lang=None, target_lang="en", style="natural"):
+    try:
+        with open(filepath, 'r', errors='replace') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        sys.exit(1)
+
+    # Split large files into chunks
+    chunks = []
+    paragraphs = content.split('\n\n')
+    chunk = ""
+    for p in paragraphs:
+        if len(chunk) + len(p) < 3000:
+            chunk += p + "\n\n"
+        else:
+            if chunk:
+                chunks.append(chunk)
+            chunk = p + "\n\n"
+    if chunk:
+        chunks.append(chunk)
+
+    print(f"📄 Translating {filepath} ({len(content)} chars, {len(chunks)} chunks)...")
+
+    results = []
+    for i, chunk in enumerate(chunks):
+        print(f"  Chunk {i+1}/{len(chunks)}...", end=" ", flush=True)
+        results.append(translate(chunk, source_lang, target_lang, style))
+        print("✅")
+
+    # Save translation
+    base, ext = os.path.splitext(filepath)
+    outpath = f"{base}.{target_lang}{ext}"
+    with open(outpath, 'w') as f:
+        f.write('\n\n'.join(results))
+    print(f"✅ Saved: {outpath}")
+
+def interactive_mode(target_lang="en"):
+    print(f"🌐 Interactive Translator (→ {LANGUAGES.get(target_lang, target_lang)})")
+    print("   Type text to translate. 'lang XX' to switch. 'exit' to quit.\n")
+    cur_lang = target_lang
+
+    while True:
+        try:
+            text = input("🌐> ").strip()
+            if not text:
+                continue
+            if text.lower() == 'exit':
+                break
+            if text.lower().startswith('lang '):
+                cur_lang = text[5:].strip().lower()
+                print(f"   Target language: {LANGUAGES.get(cur_lang, cur_lang)}")
+                continue
+            if text.lower() == 'list':
+                print("   Languages:", ", ".join(f"{k}({v})" for k,v in LANGUAGES.items()))
+                continue
+
+            result = translate(text, target_lang=cur_lang)
+            print(f"   {result}\n")
+        except (KeyboardInterrupt, EOFError):
+            break
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Local Translator")
+    parser.add_argument("text", nargs="?", help="Text or file to translate")
+    parser.add_argument("--to", "-t", default="en", help="Target language code (default: en)")
+    parser.add_argument("--from", "-f", dest="source", help="Source language code (auto-detect if omitted)")
+    parser.add_argument("--style", "-s", default="natural", choices=["natural", "formal", "casual", "technical"])
+    parser.add_argument("--pipe", "-p", action="store_true", help="Read from stdin")
+    parser.add_argument("--interactive", "-i", action="store_true", help="Interactive mode")
+    parser.add_argument("--list", "-l", action="store_true", help="List languages")
+
+    args = parser.parse_args()
+
+    if args.list:
+        print("Supported Languages:")
+        for code, name in sorted(LANGUAGES.items()):
+            print(f"  {code:<6} {name}")
+        return
+
+    if args.interactive:
+        interactive_mode(args.to)
+        return
+
+    if args.pipe or not sys.stdin.isatty():
+        text = sys.stdin.read()
+        if text.strip():
+            print(translate(text, args.source, args.to, args.style))
+        return
+
+    if not args.text:
+        parser.print_help()
+        return
+
+    # Check if it's a file
+    if os.path.isfile(args.text):
+        translate_file(args.text, args.source, args.to, args.style)
+    else:
+        result = translate(args.text, args.source, args.to, args.style)
+        print(result)
+
+if __name__ == "__main__":
+    main()

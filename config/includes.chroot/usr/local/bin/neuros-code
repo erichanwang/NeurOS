@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""
+neuros-code — NeurOS Code Assistant
+AI-powered code generation, refactoring, explanation, and optimization.
+
+Usage:
+  neuros-code generate "a Python Flask REST API"  # Generate code from description
+  neuros-code refactor ./file.py                   # AI refactoring suggestions
+  neuros-code explain ./file.py                    # Explain what a file/module does
+  neuros-code optimize ./file.py                   # Performance optimization suggestions
+  neuros-code review ./file.py                     # Detailed code review
+  neuros-code convert ./input.py --to rust         # Convert code between languages
+  neuros-code complete ./file.py --line 42         # AI code completion at cursor
+  neuros-code test ./file.py                       # Generate unit tests
+"""
+
+import sys, os, json, subprocess, argparse, textwrap, tempfile
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+DEFAULT_MODEL = "mistral"
+
+def query_ollama(prompt, model=DEFAULT_MODEL, stream=False):
+    data = json.dumps({"model": model, "prompt": prompt, "stream": stream}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=180) as resp:
+            if stream:
+                for line in resp:
+                    if line:
+                        chunk = json.loads(line)
+                        print(chunk.get("response", ""), end="", flush=True)
+                        if chunk.get("done"):
+                            print()
+                            break
+            else:
+                return json.loads(resp.read()).get("response", "No response.")
+    except Exception as e:
+        print(f"Error: LLM not available. Is neuros-llm running? ({e})")
+        sys.exit(1)
+
+def read_file(path, max_len=8000):
+    try:
+        with open(path, 'r', errors='replace') as f:
+            content = f.read()
+            if len(content) > max_len:
+                content = content[:max_len] + "\n... (truncated)"
+            return content
+    except Exception as e:
+        return f"(Could not read: {e})"
+
+def get_language(path):
+    ext = os.path.splitext(path)[1].lower()
+    lang_map = {'.py':'Python','.js':'JavaScript','.ts':'TypeScript','.jsx':'React JSX',
+                '.tsx':'React TSX','.rs':'Rust','.go':'Go','.java':'Java','.c':'C',
+                '.cpp':'C++','.h':'C/C++ Header','.sh':'Bash','.rb':'Ruby',
+                '.php':'PHP','.sql':'SQL','.html':'HTML','.css':'CSS','.lua':'Lua',
+                '.vim':'Vimscript','.json':'JSON','.yaml':'YAML','.yml':'YAML',
+                '.toml':'TOML','.xml':'XML','.md':'Markdown'}
+    return lang_map.get(ext, "unknown")
+
+def cmd_generate(description, language=None, output=None):
+    lang_hint = f" in {language}" if language else ""
+    prompt = f"""Generate clean, well-documented code{lang_hint} based on this description.
+
+Description: {description}
+
+Requirements:
+- Include imports/dependencies
+- Add docstrings and comments
+- Handle edge cases
+- Follow best practices for the language
+- Return ONLY the code, no explanations."""
+
+    print(f"🤖 Generating code{lang_hint}...\n")
+    result = query_ollama(prompt)
+    print(result)
+
+    if output:
+        with open(output, 'w') as f:
+            # Strip markdown code fences if present
+            clean = result
+            if clean.startswith("```"):
+                lines = clean.split('\n')
+                lines = [l for l in lines if not l.startswith("```")]
+                clean = '\n'.join(lines)
+            f.write(clean)
+        print(f"\n✅ Saved to: {output}")
+
+def cmd_refactor(filepath):
+    content = read_file(filepath)
+    lang = get_language(filepath)
+
+    prompt = f"""Review this {lang} code and suggest refactoring improvements.
+Focus on: readability, DRY principle, design patterns, error handling, and modern {lang} idioms.
+
+Code:
+{content}
+
+Provide:
+1. **Summary** (2-3 sentences)
+2. **Issues Found** (specific problems with line references)
+3. **Refactored Code** (key sections rewritten)
+4. **Benefits** (what improves)"""
+
+    print(f"🤖 Analyzing {filepath} for refactoring...\n")
+    print(query_ollama(prompt))
+
+def cmd_explain(filepath):
+    content = read_file(filepath)
+    lang = get_language(filepath)
+
+    prompt = f"""Explain this {lang} code clearly and concisely.
+
+Code:
+{content}
+
+Provide:
+1. **What it does** (high-level overview)
+2. **Key components** (functions, classes, logic)
+3. **Data flow** (how data moves through the code)
+4. **Dependencies** (what it depends on)
+5. **Potential issues** (if any)"""
+
+    print(f"🤖 Explaining {filepath}...\n")
+    print(query_ollama(prompt))
+
+def cmd_optimize(filepath):
+    content = read_file(filepath)
+    lang = get_language(filepath)
+
+    prompt = f"""Analyze this {lang} code for performance optimizations.
+
+Code:
+{content}
+
+Focus on:
+- Algorithmic complexity
+- Memory usage
+- I/O efficiency
+- Caching opportunities
+- Parallelization potential
+
+Provide specific, actionable suggestions with code examples."""
+
+    print(f"🤖 Optimizing {filepath}...\n")
+    print(query_ollama(prompt))
+
+def cmd_review(filepath):
+    content = read_file(filepath)
+    lang = get_language(filepath)
+
+    prompt = f"""Perform a thorough code review of this {lang} code.
+
+Code:
+{content}
+
+Rate each category (1-10) and provide details:
+1. **Correctness** — bugs, edge cases, error handling
+2. **Security** — injection, validation, secrets
+3. **Performance** — bottlenecks, inefficiencies
+4. **Maintainability** — clarity, modularity, naming
+5. **Style** — consistency, idioms, formatting
+6. **Testing** — testability, coverage considerations
+
+End with an overall score and top 3 action items."""
+
+    print(f"🤖 Reviewing {filepath}...\n")
+    print(query_ollama(prompt))
+
+def cmd_convert(filepath, target_lang):
+    content = read_file(filepath)
+    source_lang = get_language(filepath)
+
+    prompt = f"""Convert this {source_lang} code to {target_lang}.
+Preserve all functionality and logic. Use idiomatic {target_lang} patterns.
+
+Source ({source_lang}):
+{content}
+
+Return ONLY the converted {target_lang} code. No explanations."""
+
+    print(f"🤖 Converting {source_lang} → {target_lang}...\n")
+    print(query_ollama(prompt))
+
+def cmd_complete(filepath, line_num):
+    content = read_file(filepath)
+    lines = content.split('\n')
+    context_start = max(0, line_num - 20)
+    context_end = min(len(lines), line_num + 5)
+    context = '\n'.join(lines[context_start:context_end])
+
+    prompt = f"""Complete the code at line {line_num}. Provide the continuation.
+
+Context:
+{context}
+
+Return ONLY the completion (what should follow). Keep it concise."""
+
+    print(f"🤖 Completing code at {filepath}:{line_num}...\n")
+    print(query_ollama(prompt))
+
+def cmd_test(filepath):
+    content = read_file(filepath)
+    lang = get_language(filepath)
+
+    prompt = f"""Generate comprehensive unit tests for this {lang} code.
+
+Code:
+{content}
+
+Requirements:
+- Cover all functions/methods
+- Test edge cases
+- Test error conditions
+- Use the standard testing framework for {lang}
+- Include imports and setup
+- Return ONLY the test code."""
+
+    print(f"🤖 Generating tests for {filepath}...\n")
+    result = query_ollama(prompt)
+    print(result)
+
+    # Offer to save
+    base = os.path.splitext(os.path.basename(filepath))[0]
+    ext_map = {'.py': 'test_' + base + '.py', '.js': base + '.test.js',
+               '.ts': base + '.test.ts', '.rs': 'test_' + base + '.rs',
+               '.go': base + '_test.go'}
+    test_ext = ext_map.get(os.path.splitext(filepath)[1], 'test_' + base + '.txt')
+    save = input(f"\nSave as {test_ext}? [y/N]: ")
+    if save.lower() == 'y':
+        with open(test_ext, 'w') as f:
+            clean = result
+            if clean.startswith("```"):
+                lines = clean.split('\n')
+                lines = [l for l in lines if not l.startswith("```")]
+                clean = '\n'.join(lines)
+            f.write(clean)
+        print(f"✅ Saved: {test_ext}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Code Assistant")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    gen = subparsers.add_parser("generate", aliases=["gen"], help="Generate code from description")
+    gen.add_argument("description", help="What code to generate")
+    gen.add_argument("--language", "-l", help="Target language")
+    gen.add_argument("--output", "-o", help="Save to file")
+
+    ref = subparsers.add_parser("refactor", help="AI refactoring suggestions")
+    ref.add_argument("file", help="File to refactor")
+
+    exp = subparsers.add_parser("explain", help="Explain what code does")
+    exp.add_argument("file", help="File to explain")
+
+    opt = subparsers.add_parser("optimize", help="Performance optimization suggestions")
+    opt.add_argument("file", help="File to optimize")
+
+    rev = subparsers.add_parser("review", help="Detailed code review")
+    rev.add_argument("file", help="File to review")
+
+    conv = subparsers.add_parser("convert", help="Convert code between languages")
+    conv.add_argument("file", help="Source file")
+    conv.add_argument("--to", required=True, help="Target language")
+
+    comp = subparsers.add_parser("complete", help="AI code completion")
+    comp.add_argument("file", help="File to complete in")
+    comp.add_argument("--line", type=int, required=True, help="Line number")
+
+    test = subparsers.add_parser("test", help="Generate unit tests")
+    test.add_argument("file", help="File to generate tests for")
+
+    args = parser.parse_args()
+
+    if args.command in ("generate", "gen"):
+        cmd_generate(args.description, args.language, args.output)
+    elif args.command == "refactor":
+        cmd_refactor(args.file)
+    elif args.command == "explain":
+        cmd_explain(args.file)
+    elif args.command == "optimize":
+        cmd_optimize(args.file)
+    elif args.command == "review":
+        cmd_review(args.file)
+    elif args.command == "convert":
+        cmd_convert(args.file, args.to)
+    elif args.command == "complete":
+        cmd_complete(args.file, args.line)
+    elif args.command == "test":
+        cmd_test(args.file)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

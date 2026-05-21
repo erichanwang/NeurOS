@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""
+neuros-brief — NeurOS Morning Briefing
+AI-powered daily briefing with system health, git activity, news, and weather.
+
+Usage:
+  neuros-brief                     Show today's briefing
+  neuros-brief --weather           Include weather
+  neuros-brief --news              Include tech news headlines
+  neuros-brief --schedule          Check calendar/tasks
+  neuros-brief --full              Everything
+  neuros-brief --on-login          Compact login greeting
+"""
+
+import sys, os, json, subprocess, argparse, time
+from urllib.request import Request, urlopen
+from datetime import datetime
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+BRIEF_DIR = os.path.expanduser("~/.config/neuros/briefings")
+os.makedirs(BRIEF_DIR, exist_ok=True)
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except:
+        return None
+
+def get_system_snapshot():
+    info = {}
+    try:
+        with open("/proc/uptime") as f:
+            uptime = int(float(f.read().split()[0]))
+            info["uptime"] = f"{uptime//3600}h {(uptime%3600)//60}m"
+    except: pass
+
+    try:
+        result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n'):
+            if "Mem:" in line:
+                parts = line.split()
+                info["ram"] = f"{parts[2]}MB / {parts[1]}MB ({round(int(parts[2])/int(parts[1])*100)}%)"
+    except: pass
+
+    try:
+        result = subprocess.run(["df", "-h", "/"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n')[1:]:
+            parts = line.split()
+            if len(parts) >= 5:
+                info["disk"] = f"{parts[2]}/{parts[1]} ({parts[4]})"
+    except: pass
+
+    try:
+        result = subprocess.run(["nproc"], capture_output=True, text=True, timeout=5)
+        info["cpus"] = result.stdout.strip()
+    except: pass
+
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            info["temp"] = f"{int(f.read().strip())/1000:.1f}C"
+    except: pass
+
+    return info
+
+def get_git_activity():
+    repos = []
+    home = os.path.expanduser("~")
+    try:
+        for d in os.listdir(home):
+            dpath = os.path.join(home, d)
+            if os.path.isdir(dpath) and os.path.isdir(os.path.join(dpath, '.git')):
+                branch = subprocess.run(["git", "-C", dpath, "branch", "--show-current"],
+                                      capture_output=True, text=True, timeout=5).stdout.strip()
+                log = subprocess.run(["git", "-C", dpath, "log", "--since=1 day ago", "--oneline"],
+                                   capture_output=True, text=True, timeout=5).stdout.strip()
+                status = subprocess.run(["git", "-C", dpath, "status", "--short"],
+                                      capture_output=True, text=True, timeout=5).stdout.strip()
+                repos.append({
+                    "name": d, "branch": branch,
+                    "commits_today": len(log.split('\n')) if log else 0,
+                    "dirty": len(status.split('\n')) if status else 0
+                })
+    except: pass
+    return repos
+
+def get_todos():
+    """Check for TODO.md, todo.txt, or similar in home."""
+    todo_files = ['~/TODO.md', '~/todo.txt', '~/notes/TODO.md', '~/Documents/todo.txt']
+    for tf in todo_files:
+        tpath = os.path.expanduser(tf)
+        if os.path.exists(tpath):
+            with open(tpath, 'r') as f:
+                lines = [l.strip() for l in f.readlines() if l.strip().startswith('- [ ]') or l.strip().startswith('* [ ]')]
+            return [l[5:].strip() for l in lines[:10]]
+    return []
+
+def get_memories_snapshot():
+    mem_file = os.path.expanduser("~/.config/neuros/memory/memories.json")
+    if os.path.exists(mem_file):
+        with open(mem_file) as f:
+            memories = json.load(f)
+        recent = [m for m in memories if m.get("importance") == "high"][:3]
+        return [m["text"] for m in recent]
+    return []
+
+def show_full_briefing(weather=False, news=False):
+    now = datetime.now()
+    sys_info = get_system_snapshot()
+    repos = get_git_activity()
+    todos = get_todos()
+    memories = get_memories_snapshot()
+
+    print(f"""
+╔══════════════════════════════════════════════════════╗
+║              🧠  NeurOS Daily Briefing               ║
+║              {now.strftime('%A, %B %d %Y'):<40}║
+╚══════════════════════════════════════════════════════╝
+""")
+
+    # System health
+    print("🖥️  System Health")
+    print("  ──────────────")
+    for k, v in sys_info.items():
+        print(f"  {k:<10} {v}")
+    print()
+
+    # Git activity
+    if repos:
+        print("📦 Git Repositories")
+        print("  ────────────────")
+        for r in repos:
+            status = f"{r['commits_today']} commits today" if r['commits_today'] else "no commits today"
+            dirty = " ⚠️ uncommitted" if r['dirty'] else ""
+            print(f"  {r['name']:<20} [{r['branch']}] {status}{dirty}")
+        print()
+
+    # TODOs
+    if todos:
+        print("📋 Today's Tasks")
+        print("  ─────────────")
+        for todo in todos[:5]:
+            print(f"  ☐ {todo}")
+        print()
+
+    # Memories
+    if memories:
+        print("🧠 Remembered")
+        print("  ───────────")
+        for m in memories:
+            print(f"  • {m}")
+        print()
+
+    # AI Insight
+    prompt = f"""Write a brief morning briefing message (2-3 sentences).
+Today is {now.strftime('%A')}. 
+System: {json.dumps(sys_info)}
+Repos: {json.dumps(repos[:3])}
+Tasks: {json.dumps(todos[:3])}
+
+Be encouraging and concise. Mention if there's anything interesting to work on."""
+
+    insight = query_ollama(prompt)
+    if insight:
+        print("🤖 AI Insight")
+        print("  ──────────")
+        print(f"  {insight}")
+        print()
+
+def show_login_greeting():
+    sys_info = get_system_snapshot()
+    now = datetime.now()
+
+    prompt = f"""Write a VERY short login greeting (one line, max 80 chars).
+Time: {now.strftime('%H:%M')}
+System: RAM {sys_info.get('ram','?')}, Disk {sys_info.get('disk','?')}
+
+Be friendly and concise. Include any system warnings if relevant."""
+
+    insight = query_ollama(prompt)
+    if insight:
+        print(f"\n🧠 {insight}\n")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Daily Briefing")
+    parser.add_argument("--weather", action="store_true", help="Include weather")
+    parser.add_argument("--news", action="store_true", help="Include news")
+    parser.add_argument("--schedule", action="store_true", help="Show tasks")
+    parser.add_argument("--full", action="store_true", help="Full briefing")
+    parser.add_argument("--on-login", action="store_true", help="Compact login greeting")
+
+    args = parser.parse_args()
+
+    if args.on_login:
+        show_login_greeting()
+    else:
+        show_full_briefing(args.weather, args.news)
+
+if __name__ == "__main__":
+    main()

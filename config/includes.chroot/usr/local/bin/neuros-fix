@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+neuros-fix — NeurOS Code Fixer
+AI-powered code fixing: reads errors, proposes fixes, applies them.
+
+Usage:
+  neuros-fix file.py                     Fix obvious issues in a file
+  neuros-fix --error "Traceback..."       Fix a specific error
+  neuros-fix --lint file.py               Fix linter issues automatically
+  neuros-fix --refactor file.py           Refactor for best practices
+"""
+
+import sys
+import os
+import json
+import argparse
+import subprocess
+import urllib.request
+import urllib.error
+import difflib
+import shutil
+
+
+def query_llm(prompt, max_tokens=2000, temperature=0.3):
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens, "temperature": temperature}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read().decode()).get("response", "")
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def fix_file(filepath, backup=True):
+    if not os.path.exists(filepath):
+        print(f"File not found: {filepath}")
+        return
+
+    with open(filepath) as f:
+        original = f.read()
+
+    prompt = (
+        f"Fix all bugs, errors, and bad practices in this code. Return the "
+        f"COMPLETE corrected file content. Do NOT add explanations, do NOT "
+        f"wrap in markdown code fences. Return ONLY the corrected code.\n\n"
+        f"File: {os.path.basename(filepath)}\n```\n{original[:6000]}\n```\n\n"
+        f"Corrected code:"
+    )
+    print(f"Analyzing {filepath}...")
+    fixed = query_llm(prompt, max_tokens=4000, temperature=0.2)
+    fixed = fixed.replace("```", "").strip()
+
+    if fixed == original or not fixed:
+        print("No changes suggested.")
+        return
+
+    print(f"\nProposed changes ({len(fixed)} chars vs {len(original)}):")
+    diff = difflib.unified_diff(
+        original.splitlines(True), fixed.splitlines(True),
+        fromfile=filepath, tofile=f"{filepath}.fixed"
+    )
+    diff_text = "".join(list(diff)[:100])
+    if len(diff_text) > 3000:
+        diff_text = diff_text[:3000] + "\n... (diff truncated)"
+    print(diff_text)
+
+    if backup:
+        bak = filepath + ".bak"
+        shutil.copy(filepath, bak)
+        print(f"\nBackup saved: {bak}")
+
+    with open(filepath, "w") as f:
+        f.write(fixed)
+    print(f"Fixed: {filepath}")
+
+
+def fix_error(error_text, context_file=None):
+    context = ""
+    if context_file and os.path.exists(context_file):
+        with open(context_file) as f:
+            context = f.read()[:4000]
+
+    prompt = (
+        f"Analyze this error and provide a specific fix. "
+        f"Return ONLY the corrected code snippet.\n\n"
+        f"Error:\n{error_text}\n\n"
+    )
+    if context:
+        prompt += f"File context:\n```\n{context}\n```\n\n"
+    prompt += "Fix (return only the corrected code):"
+
+    print("Analyzing error...")
+    fix = query_llm(prompt)
+    print(f"\nSuggested fix:\n{fix}")
+
+
+def fix_lint(filepath, backup=True):
+    if not os.path.exists(filepath):
+        print(f"File not found: {filepath}")
+        return
+
+    with open(filepath) as f:
+        content = f.read()
+
+    ext = os.path.splitext(filepath)[1]
+    lint_output = ""
+    if ext == ".py":
+        try:
+            lint_output = subprocess.check_output(
+                ["python3", "-m", "flake8", "--max-line-length=100", filepath],
+                text=True, stderr=subprocess.STDOUT
+            )
+        except subprocess.CalledProcessError as e:
+            lint_output = e.output
+    elif ext == ".sh":
+        try:
+            lint_output = subprocess.check_output(
+                ["shellcheck", filepath], text=True, stderr=subprocess.STDOUT
+            )
+        except Exception:
+            pass
+
+    if not lint_output.strip():
+        print("No linter issues found.")
+        return
+
+    prompt = (
+        f"Fix all linter issues in this code. Return the COMPLETE corrected "
+        f"file content, no explanations, no markdown.\n\n"
+        f"Linter output:\n{lint_output[:2000]}\n\n"
+        f"Original code:\n```\n{content[:4000]}\n```\n\nCorrected code:"
+    )
+    print("Fixing linter issues...")
+    fixed = query_llm(prompt, max_tokens=4000, temperature=0.2)
+    fixed = fixed.replace("```", "").strip()
+
+    if fixed != content and fixed:
+        if backup:
+            shutil.copy(filepath, filepath + ".bak")
+        with open(filepath, "w") as f:
+            f.write(fixed)
+        print(f"Fixed {len(lint_output.splitlines())} linter issues in {filepath}")
+    else:
+        print("AI could not fix all linter issues.")
+
+
+def refactor_file(filepath, backup=True):
+    if not os.path.exists(filepath):
+        print(f"File not found: {filepath}")
+        return
+
+    with open(filepath) as f:
+        original = f.read()
+
+    prompt = (
+        f"Refactor this code for best practices: improve readability, reduce "
+        f"complexity, add type hints (Python), use modern patterns. Return "
+        f"COMPLETE refactored code, no explanations, no markdown.\n\n"
+        f"Original:\n```\n{original[:5000]}\n```\n\nRefactored:"
+    )
+    print(f"Refactoring {filepath}...")
+    refactored = query_llm(prompt, max_tokens=5000, temperature=0.3)
+    refactored = refactored.replace("```", "").strip()
+
+    if refactored and refactored != original:
+        if backup:
+            shutil.copy(filepath, filepath + ".bak")
+        with open(filepath, "w") as f:
+            f.write(refactored)
+        print(f"Refactored: {filepath}")
+    else:
+        print("No refactoring changes needed.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Code Fixer")
+    parser.add_argument("file", nargs="?", help="File to fix")
+    parser.add_argument("--error", "-e", help="Error text to fix")
+    parser.add_argument("--lint", "-l", action="store_true",
+                        help="Fix linter issues")
+    parser.add_argument("--refactor", "-r", action="store_true",
+                        help="Refactor for best practices")
+    parser.add_argument("--no-backup", action="store_true",
+                        help="Don't create backup")
+
+    args = parser.parse_args()
+
+    if args.error:
+        fix_error(args.error, args.file)
+    elif args.file:
+        if args.refactor:
+            refactor_file(args.file, backup=not args.no_backup)
+        elif args.lint:
+            fix_lint(args.file, backup=not args.no_backup)
+        else:
+            fix_file(args.file, backup=not args.no_backup)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

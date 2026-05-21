@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+neuros-ocr — NeurOS OCR Scanner
+Extract text from images and PDFs using local OCR with AI enhancement.
+
+Usage:
+  neuros-ocr image.png                   Extract text from image
+  neuros-ocr document.pdf                Extract text from PDF
+  neuros-ocr --clipboard                 OCR from clipboard image
+  neuros-ocr --translate image.png       Extract and translate text
+  neuros-ocr --summarize document.pdf    Extract and summarize text
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+import tempfile
+import shutil
+from pathlib import Path
+
+
+def ocr_image(image_path, language="eng"):
+    try:
+        result = subprocess.check_output(
+            ["tesseract", image_path, "stdout", "-l", language],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        return result.strip()
+    except FileNotFoundError:
+        return None, "tesseract-ocr not installed: sudo apt install tesseract-ocr tesseract-ocr-eng"
+    except Exception as e:
+        return None, f"OCR error: {e}"
+
+
+def ocr_pdf(pdf_path, language="eng"):
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run(
+                ["pdftoppm", "-png", "-r", "300", pdf_path,
+                 os.path.join(tmpdir, "page")],
+                check=True, capture_output=True
+            )
+            pages = sorted(os.listdir(tmpdir))
+            if not pages:
+                return None, "No pages extracted from PDF."
+
+            all_text = []
+            for page_file in pages:
+                page_path = os.path.join(tmpdir, page_file)
+                text, err = ocr_image(page_path, language)
+                if text:
+                    all_text.append(f"--- Page {page_file} ---\n{text}")
+            return "\n\n".join(all_text), None
+    except FileNotFoundError:
+        return None, "pdftoppm not installed: sudo apt install poppler-utils"
+    except Exception as e:
+        return None, f"PDF OCR error: {e}"
+
+
+def ocr_clipboard():
+    """OCR from clipboard image."""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp = f.name
+        subprocess.run(["xclip", "-selection", "clipboard", "-t",
+                        "image/png", "-o"], stdout=open(tmp, "wb"), check=True)
+        text, err = ocr_image(tmp)
+        os.unlink(tmp)
+        return text, err
+    except Exception as e:
+        return None, f"Clipboard OCR error: {e}"
+
+
+def ai_process(text, mode="summarize"):
+    import urllib.request
+
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+
+    if mode == "translate":
+        prompt = f"Translate this text to English. Return only the translation.\n\n{text[:4000]}"
+    elif mode == "summarize":
+        prompt = f"Summarize this text in 3-5 bullet points.\n\n{text[:4000]}"
+    elif mode == "clean":
+        prompt = f"Clean up this OCR text by fixing obvious errors. Return only the corrected text.\n\n{text[:4000]}"
+    else:
+        return text
+
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        return json.loads(resp.read().decode()).get("response", text)
+    except Exception:
+        return text
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS OCR Scanner")
+    parser.add_argument("file", nargs="?", help="Image or PDF file to OCR")
+    parser.add_argument("--clipboard", "-c", action="store_true",
+                        help="OCR from clipboard")
+    parser.add_argument("--language", "-l", default="eng",
+                        help="OCR language (default: eng)")
+    parser.add_argument("--translate", "-t", action="store_true",
+                        help="Translate extracted text to English")
+    parser.add_argument("--summarize", "-s", action="store_true",
+                        help="Summarize extracted text")
+    parser.add_argument("--clean", action="store_true",
+                        help="AI-clean OCR errors")
+    parser.add_argument("--output", "-o", help="Save text to file")
+
+    args = parser.parse_args()
+
+    if args.clipboard:
+        text, err = ocr_clipboard()
+    elif args.file:
+        ext = os.path.splitext(args.file)[1].lower()
+        if ext == ".pdf":
+            text, err = ocr_pdf(args.file, args.language)
+        else:
+            text, err = ocr_image(args.file, args.language)
+    else:
+        parser.print_help()
+        return
+
+    if err:
+        print(f"Error: {err}")
+        return
+
+    if not text:
+        print("No text extracted.")
+        return
+
+    if args.translate:
+        text = ai_process(text, "translate")
+    elif args.summarize:
+        text = ai_process(text, "summarize")
+    elif args.clean:
+        text = ai_process(text, "clean")
+
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(text)
+        print(f"Saved to: {args.output}")
+    else:
+        print(text)
+
+
+if __name__ == "__main__":
+    main()

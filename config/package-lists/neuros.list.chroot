@@ -32,6 +32,21 @@ gir1.2-appindicator3-0.1
 also-utils
 espeak-ng
 
+# Screenshot & OCR
+tesseract-ocr
+tesseract-ocr-eng
+imagemagick
+
+# Network tools
+nmap
+
+# Docker (optional)
+docker.io
+
+# Linting
+flake8
+shellcheck
+
 # Shells
 fish
 
@@ -39,7 +54,10 @@ fish
 build-essential
 python3-dev
 
-# Remove these (add to remove list)
-# ubuntu-report
-# apport
-# whoopsie
+# System monitoring
+lm-sensors
+
+# PDF tools
+poppler-utils
+
+

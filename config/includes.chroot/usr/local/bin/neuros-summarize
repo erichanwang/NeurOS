@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+neuros-summarize — NeurOS Document Summarizer
+Summarize documents, articles, and codebases using the local LLM.
+
+Usage:
+  neuros-summarize article.md              Summarize a document
+  neuros-summarize ./project/              Summarize a codebase
+  neuros-summarize --url https://...       Summarize a web page
+  neuros-summarize --diff                  Summarize git diff
+  neuros-summarize --tldr article.md       One-paragraph TL;DR
+  neuros-summarize --bullets article.md    Bullet-point summary
+"""
+
+import sys, os, json, argparse, subprocess, textwrap
+from urllib.request import Request, urlopen
+from datetime import datetime
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=180) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        return f"(LLM error: {e})"
+
+def read_content(target, max_len=10000):
+    if os.path.isfile(target):
+        with open(target, 'r', errors='replace') as f:
+            return f.read()[:max_len], os.path.basename(target)
+    elif os.path.isdir(target):
+        # Summarize directory
+        files = []
+        for root, dirs, filenames in os.walk(target):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
+                      ('node_modules','__pycache__','.git','dist','build')]
+            for fname in filenames[:80]:
+                files.append(os.path.join(root, fname))
+        if len(files) > 80:
+            files = files[:80]
+
+        content = f"Directory: {target}\nFiles: {len(files)}\n\n"
+        for fpath in files[:30]:
+            try:
+                with open(fpath, 'r', errors='replace') as f:
+                    fc = f.read()[:500]
+                rel = os.path.relpath(fpath, target)
+                content += f"### {rel}\n```\n{fc}\n```\n\n"
+            except: pass
+        return content, os.path.basename(target)
+    elif target.startswith('http://') or target.startswith('https://'):
+        try:
+            req = Request(target, headers={"User-Agent": "NeurOS/1.0"})
+            with urlopen(req, timeout=15) as resp:
+                html = resp.read().decode('utf-8', errors='replace')
+            # Very basic text extraction
+            import re
+            text = re.sub(r'<[^>]+>', ' ', html)
+            text = re.sub(r'\s+', ' ', text)
+            return text[:8000], target
+        except Exception as e:
+            return f"(Failed to fetch URL: {e})", target
+    else:
+        return target, "text"
+
+def summarize(content, title, style="default"):
+    if style == "tldr":
+        prompt = f"""Summarize this in ONE concise paragraph (2-3 sentences). Title: {title}
+
+{content[:8000]}
+
+Return ONLY the TL;DR paragraph."""
+    elif style == "bullets":
+        prompt = f"""Summarize this as bullet points. Title: {title}
+
+{content[:8000]}
+
+Return 5-10 bullet points covering the key information."""
+    elif style == "executive":
+        prompt = f"""Write an executive summary. Title: {title}
+
+{content[:8000]}
+
+Include:
+## Key Points
+## Implications
+## Recommendations"""
+    elif style == "code":
+        prompt = f"""Summarize this codebase. Title: {title}
+
+{content[:8000]}
+
+Provide:
+## Purpose — what this project does
+## Architecture — key components
+## Dependencies — what it uses
+## Entry Points — how to run/use it"""
+    else:
+        prompt = f"""Summarize this content. Title: {title}
+
+{content[:8000]}
+
+Provide a clear, well-structured summary covering the main points."""
+
+    return query_ollama(prompt)
+
+def summarize_diff():
+    try:
+        result = subprocess.run(["git", "diff", "--cached", "--stat"],
+                               capture_output=True, text=True, timeout=10)
+        stat = result.stdout.strip()
+        
+        result = subprocess.run(["git", "diff", "--cached"],
+                               capture_output=True, text=True, timeout=30)
+        diff = result.stdout.strip()[:6000]
+        
+        if not diff:
+            result = subprocess.run(["git", "diff"], capture_output=True, text=True, timeout=30)
+            diff = result.stdout.strip()[:6000]
+            if not diff:
+                print("No changes to summarize.")
+                return
+        
+        prompt = f"""Summarize these git changes concisely.
+
+Files changed:
+{stat}
+
+Diff:
+{diff}
+
+Provide:
+## Summary (one sentence)
+## Changes (bullet list)
+## Impact (what this affects)"""
+        
+        print("🤖 Summarizing git changes...\n")
+        print(query_ollama(prompt))
+        return
+    except Exception as e:
+        print(f"Error: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Document Summarizer")
+    parser.add_argument("target", nargs="?", help="File, directory, URL, or text to summarize")
+    parser.add_argument("--tldr", action="store_true", help="One-paragraph TL;DR")
+    parser.add_argument("--bullets", action="store_true", help="Bullet-point summary")
+    parser.add_argument("--executive", action="store_true", help="Executive summary")
+    parser.add_argument("--code", action="store_true", help="Codebase summary")
+    parser.add_argument("--diff", action="store_true", help="Summarize git diff")
+    parser.add_argument("--pipe", "-p", action="store_true", help="Read from stdin")
+
+    args = parser.parse_args()
+
+    if args.diff:
+        summarize_diff()
+        return
+
+    if args.pipe or not sys.stdin.isatty():
+        content = sys.stdin.read()
+        title = "stdin"
+    elif args.target:
+        content, title = read_content(args.target)
+    else:
+        parser.print_help()
+        return
+
+    style = "default"
+    if args.tldr: style = "tldr"
+    elif args.bullets: style = "bullets"
+    elif args.executive: style = "executive"
+    elif args.code: style = "code"
+
+    print(f"📄 Summarizing: {title}\n")
+    result = summarize(content, title, style)
+    print(result)
+
+if __name__ == "__main__":
+    main()

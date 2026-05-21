@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""
+neuros-analyze — NeurOS Data Analyzer
+AI-powered data analysis: summarize CSVs, find patterns, generate insights.
+
+Usage:
+  neuros-analyze data.csv                   Analyze a CSV/TSV data file
+  neuros-analyze data.json                  Analyze JSON data
+  neuros-analyze --sql db.sqlite "query"    Natural language SQL queries
+  neuros-analyze --plot data.csv            Generate data visualization ideas
+  neuros-analyze --stats data.csv           Statistical summary
+"""
+
+import sys, os, json, csv, argparse, textwrap, io
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        print(f"Error: LLM unavailable ({e})")
+        sys.exit(1)
+
+def read_csv(filepath, max_rows=50):
+    try:
+        with open(filepath, 'r', errors='replace') as f:
+            sample = ''.join(f.readline() for _ in range(max_rows + 1))
+
+        reader = csv.DictReader(io.StringIO(sample))
+        headers = reader.fieldnames or []
+        rows = list(reader)
+
+        # Basic stats
+        stats = {}
+        for h in headers:
+            values = [row.get(h, '') for row in rows if row.get(h, '')]
+            try:
+                numeric = [float(v) for v in values if v]
+            except: numeric = []
+            if numeric and len(numeric) > len(values) * 0.8:
+                stats[h] = {
+                    "type": "numeric",
+                    "count": len(numeric),
+                    "min": min(numeric),
+                    "max": max(numeric),
+                    "avg": sum(numeric) / len(numeric)
+                }
+            else:
+                unique = list(set(values))[:10]
+                stats[h] = {
+                    "type": "categorical",
+                    "count": len(values),
+                    "unique_count": len(set(values)),
+                    "sample_values": unique
+                }
+
+        return headers, rows[:20], stats
+    except Exception as e:
+        return None, None, {"error": str(e)}
+
+def read_json(filepath):
+    try:
+        with open(filepath, 'r', errors='replace') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return f"JSON array with {len(data)} items. Sample: {json.dumps(data[:3], indent=2)[:2000]}"
+        elif isinstance(data, dict):
+            return f"JSON object with keys: {list(data.keys())[:20]}. Sample: {json.dumps(data, indent=2)[:2000]}"
+        else:
+            return str(data)[:2000]
+    except Exception as e:
+        return f"Error reading JSON: {e}"
+
+def analyze_data(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    fname = os.path.basename(filepath)
+
+    if ext in ('.csv', '.tsv'):
+        headers, rows, stats = read_csv(filepath)
+        if headers is None:
+            print(f"Error: Could not read {filepath}")
+            return
+
+        print(f"\n📊 Analyzing {fname}")
+        print(f"   {len(headers)} columns, {len(rows)} rows sampled\n")
+
+        # Show column stats
+        for col, info in stats.items():
+            if isinstance(info, dict):
+                if info.get("type") == "numeric":
+                    print(f"  📈 {col}: avg={info['avg']:.2f}, min={info['min']}, max={info['max']}")
+                else:
+                    samples = ', '.join(str(v) for v in info.get('sample_values', [])[:5])
+                    print(f"  🏷️  {col}: {info['unique_count']} unique values ({samples}...)")
+
+        # AI analysis
+        sample_data = json.dumps([dict(r) for r in rows[:15]], indent=2)
+        stats_json = json.dumps(stats, indent=2)
+
+    elif ext == '.json':
+        content = read_json(filepath)
+        print(f"\n📊 Analyzing {fname}")
+        stats_json = "(see sample below)"
+        sample_data = content
+    else:
+        with open(filepath, 'r', errors='replace') as f:
+            sample_data = f.read()[:3000]
+        stats_json = "(text file)"
+
+    prompt = f"""Analyze this dataset and provide insights.
+
+File: {fname}
+Column stats: {stats_json[:1000]}
+Sample data: {sample_data[:2500]}
+
+Provide:
+1. **Summary** — what this dataset contains
+2. **Key Patterns** — trends, correlations, outliers
+3. **Interesting Findings** — 3-5 actionable insights
+4. **Recommendations** — what to investigate next
+5. **Visualization Ideas** — charts/graphs that would be useful
+
+Be specific and data-driven."""
+
+    print(f"\n🤖 AI Analysis\n{'─'*50}")
+    print(query_ollama(prompt))
+
+def natural_sql(db_path, question):
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cur.fetchall()]
+
+        schema = []
+        for table in tables:
+            cur.execute(f"PRAGMA table_info({table})")
+            cols = [(r[1], r[2]) for r in cur.fetchall()]
+            schema.append(f"  {table}: {', '.join(f'{n} ({t})' for n, t in cols)}")
+            # Get sample
+            cur.execute(f"SELECT * FROM {table} LIMIT 3")
+            schema.append(f"    Sample: {cur.fetchall()}")
+
+        schema_str = '\n'.join(schema)
+    except Exception as e:
+        print(f"Error reading database: {e}")
+        return
+
+    prompt = f"""Write a SQL query for this question.
+
+Database schema:
+{schema_str[:2000]}
+
+Question: {question}
+
+Return ONLY the SQL query. No explanation."""
+
+    sql = query_ollama(prompt).strip().strip('`').strip()
+    if sql.startswith('sql'):
+        sql = sql[3:].strip()
+
+    print(f"\n💡 SQL:\n{sql}\n")
+
+    choice = input("Execute? [y/N]: ")
+    if choice.lower() == 'y':
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(sql)
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description] if cur.description else []
+            if cols:
+                print(f"\n{' | '.join(cols)}")
+                print('-' * 40)
+            for row in rows[:50]:
+                print(' | '.join(str(v) for v in row))
+            if len(rows) > 50:
+                print(f"... ({len(rows)-50} more rows)")
+        except Exception as e:
+            print(f"Error: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Data Analyzer")
+    parser.add_argument("file", nargs="?", help="Data file to analyze (csv, json, sqlite, txt)")
+    parser.add_argument("--sql", help="Natural language SQL query (requires db path as file)")
+    parser.add_argument("--stats", action="store_true", help="Show statistical summary")
+    parser.add_argument("--plot", action="store_true", help="Suggest visualizations")
+
+    args = parser.parse_args()
+
+    if not args.file:
+        parser.print_help()
+        return
+
+    if args.sql:
+        natural_sql(args.file, args.sql)
+    else:
+        analyze_data(args.file)
+
+if __name__ == "__main__":
+    main()

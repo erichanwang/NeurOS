@@ -72,6 +72,56 @@ alias nhear="neuros-voice"
 # MCP Server
 alias nmcp="neuros-mcp"
 
+# Developer Tools
+alias ncode="neuros-code"
+alias ndocs="neuros-docs"
+alias ntl="neuros-translate"
+alias nsh="neuros-shell"
+alias nlearn="neuros-learn"
+alias nlint="neuros-lint"
+alias nfix="neuros-fix"
+alias nrefactor="neuros-refactor"
+alias nscan="neuros-scan"
+alias ntest="neuros-test"
+alias ndebug="neuros-debug"
+alias nsql="neuros-sql"
+alias napi="neuros-api"
+alias ndocker="neuros-docker"
+
+# System & Monitoring
+alias nhealth="neuros-health"
+alias nprofile="neuros-profile"
+alias nbench="neuros-bench"
+alias nwatch="neuros-watch"
+alias ndaemon="neuros-daemon"
+alias nnotify="neuros-notify"
+alias nschedule="neuros-schedule"
+
+# Data & Knowledge
+alias nsum="neuros-summarize"
+alias nbrief="neuros-brief"
+alias nknow="neuros-knowledge"
+alias nmem="neuros-memory"
+alias nanalyze="neuros-analyze"
+
+# Infrastructure
+alias nconfig="neuros-config"
+alias nbackup="neuros-backup"
+alias nfw="neuros-firewall"
+alias nnet="neuros-network"
+alias nsec="neuros-security"
+
+# Media
+alias nss="neuros-screenshot"
+alias nocr="neuros-ocr"
+alias nimg="neuros-image"
+
+# Workflow
+alias nwf="neuros-workflow"
+alias npipe="neuros-pipe"
+alias nbatch="neuros-batch"
+alias ntemplate="neuros-template"
+
 # === nn shell integration ===
 # Ctrl+Space for quick nn access
 function nn-widget() {

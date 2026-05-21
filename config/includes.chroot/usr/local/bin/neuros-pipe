@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""
+neuros-pipe — NeurOS Data Pipeline
+Pipe data through AI transformations. Like Unix pipes but with LLM processing.
+
+Usage:
+  cat data.txt | neuros-pipe "summarize"             Summarize stdin
+  ls -la | neuros-pipe "explain what each file is"   Explain command output
+  git log | neuros-pipe "extract all authors"        Process git log
+  neuros-pipe "translate to French" < document.txt   Translate file
+  neuros-pipe --json "extract emails" < data.json    Process JSON
+"""
+
+import sys, os, json, argparse
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt, stream=False):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": stream}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=180) as resp:
+            if stream:
+                for line in resp:
+                    if line:
+                        chunk = json.loads(line)
+                        print(chunk.get("response", ""), end="", flush=True)
+                        if chunk.get("done", False):
+                            print()
+                            break
+            else:
+                return json.loads(resp.read()).get("response", "")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Pipe data through AI transformations",
+        epilog="Example: ls -la | neuros-pipe 'explain each file'"
+    )
+    parser.add_argument("instruction", help="What to do with the input")
+    parser.add_argument("--stream", "-s", action="store_true", help="Stream output")
+    parser.add_argument("--json", action="store_true", help="Input is JSON")
+    parser.add_argument("--model", "-m", default="mistral", help="Model to use")
+    parser.add_argument("--context", "-c", default="", help="Additional context")
+
+    args = parser.parse_args()
+
+    # Read stdin
+    input_data = sys.stdin.read()
+
+    if not input_data.strip():
+        print("Error: No input data. Pipe something in.", file=sys.stderr)
+        sys.exit(1)
+
+    # Truncate if too large
+    max_input = 8000
+    if len(input_data) > max_input:
+        truncated_note = f"\n... ({len(input_data) - max_input} more chars truncated)\n"
+        input_data = input_data[:max_input] + truncated_note
+
+    prompt = f"""Process this data according to the instruction.
+
+Instruction: {args.instruction}
+{f'Format: JSON' if args.json else 'Format: text'}
+{f'Context: {args.context}' if args.context else ''}
+
+Data:
+{input_data}
+
+Return ONLY the processed result. No explanations."""
+
+    if args.stream:
+        query_ollama(prompt, stream=True)
+    else:
+        result = query_ollama(prompt)
+        print(result)
+
+if __name__ == "__main__":
+    main()

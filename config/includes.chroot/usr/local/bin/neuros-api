@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""
+neuros-api — NeurOS API Generator
+AI-powered REST API scaffolding from natural language descriptions.
+
+Usage:
+  neuros-api "a todo app with CRUD endpoints" --framework fastapi
+  neuros-api --spec openapi.yaml                   Generate from OpenAPI spec
+  neuros-api --endpoints endpoints.json             Generate from endpoint list
+"""
+
+import sys
+import os
+import json
+import argparse
+import urllib.request
+import urllib.error
+
+FRAMEWORKS = {
+    "fastapi": {
+        "imports": "from fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel\nfrom typing import List, Optional",
+        "app_init": "app = FastAPI(title=\"{name}\", version=\"1.0.0\")",
+        "decorator": "@app.{method}(\"{path}\")",
+        "run": 'uvicorn.run(app, host="0.0.0.0", port=8000)',
+    },
+    "flask": {
+        "imports": "from flask import Flask, request, jsonify",
+        "app_init": 'app = Flask(__name__)',
+        "decorator": "@app.route(\"{path}\", methods=[\"{method_upper}\"])",
+        "run": 'app.run(host="0.0.0.0", port=8000, debug=True)',
+    },
+}
+
+
+def query_llm(prompt, max_tokens=2000):
+    config = {}
+    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("["):
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip('"').strip("'")
+    model = config.get("model", "mistral")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": prompt, "stream": False,
+                "options": {"num_predict": max_tokens}
+            }).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read().decode()).get("response", "")
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def generate_api(description, framework="fastapi", output_dir=None):
+    fw = FRAMEWORKS.get(framework, FRAMEWORKS["fastapi"])
+
+    prompt = (
+        f"Generate a complete {framework} REST API based on this description. "
+        f"Return ONLY valid Python code with no markdown formatting. "
+        f"Include all imports, models, routes, and app initialization. "
+        f"Use proper error handling and validation.\n\n"
+        f"Description: {description}\n\n"
+        f"Framework: {framework}\n"
+        f"Generate complete {framework} application code:"
+    )
+
+    print(f"Generating {framework} API...")
+    code = query_llm(prompt, max_tokens=3000)
+
+    # Clean up common LLM artifacts
+    code = code.replace("```python", "").replace("```", "").strip()
+
+    output_dir = output_dir or "neuros-api"
+    os.makedirs(output_dir, exist_ok=True)
+    filepath = os.path.join(output_dir, "main.py")
+
+    with open(filepath, "w") as f:
+        f.write(code)
+
+    print(f"API generated: {filepath}")
+    print(f"Run with: cd {output_dir} && python3 main.py")
+
+    # Generate requirements
+    reqs = ["fastapi", "uvicorn", "pydantic"] if framework == "fastapi" else ["flask"]
+    req_path = os.path.join(output_dir, "requirements.txt")
+    with open(req_path, "w") as f:
+        f.write("\n".join(reqs) + "\n")
+    print(f"Dependencies: {req_path}")
+
+
+def generate_from_spec(spec_path, framework="fastapi", output_dir=None):
+    with open(spec_path) as f:
+        spec = f.read()
+    prompt = (
+        f"Generate a complete {framework} implementation for this OpenAPI/JSON "
+        f"spec. Return ONLY valid Python code.\n\n{spec}\n\nCode:"
+    )
+    code = query_llm(prompt, max_tokens=3000)
+    code = code.replace("```python", "").replace("```", "").strip()
+
+    output_dir = output_dir or "neuros-api"
+    os.makedirs(output_dir, exist_ok=True)
+    filepath = os.path.join(output_dir, "main.py")
+    with open(filepath, "w") as f:
+        f.write(code)
+    print(f"API generated: {filepath}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS API Generator")
+    parser.add_argument("description", nargs="?", help="API description")
+    parser.add_argument("--framework", "-f", default="fastapi",
+                        choices=["fastapi", "flask"], help="Framework")
+    parser.add_argument("--spec", "-s", help="OpenAPI spec file")
+    parser.add_argument("--output", "-o", default="neuros-api",
+                        help="Output directory")
+
+    args = parser.parse_args()
+
+    if args.spec:
+        if not os.path.exists(args.spec):
+            print(f"Spec not found: {args.spec}")
+            return
+        generate_from_spec(args.spec, args.framework, args.output)
+    elif args.description:
+        generate_api(args.description, args.framework, args.output)
+    else:
+        parser.print_help()
+        print("\nExample: neuros-api 'a blog with posts and comments' --framework fastapi")
+
+
+if __name__ == "__main__":
+    main()

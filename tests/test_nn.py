@@ -249,9 +249,20 @@ class TestPackageLists(unittest.TestCase):
         )
         with open(pkg_path) as f:
             content = f.read()
-        required = ["gnome-shell", "neovim", "python3", "ufw", "zsh"]
+        required = ["gnome-shell", "neovim", "python3", "ufw", "zsh",
+                    "tesseract-ocr", "nmap", "flake8", "lm-sensors"]
         for pkg in required:
             self.assertIn(pkg, content, f"Package '{pkg}' missing from list")
+
+    def test_no_flask_dependency(self):
+        """Test that python3-flask is NOT in the package list."""
+        pkg_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), '..',
+            'config', 'package-lists', 'neuros.list.chroot'
+        )
+        with open(pkg_path) as f:
+            content = f.read()
+        self.assertNotIn("python3-flask", content, "python3-flask should not be a dependency")
 
     def test_telemetry_packages_removed(self):
         """Test that telemetry packages are in the remove list."""

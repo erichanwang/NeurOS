@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""
+neuros-image — NeurOS Image Assistant
+Analyze images using local vision models (llava) or text-based descriptions.
+
+Usage:
+  neuros-image describe ./photo.jpg        Describe an image (requires llava)
+  neuros-image ocr ./screenshot.png        Extract text (requires tesseract)
+  neuros-image convert ./input.png --to jpg Convert image format
+  neuros-image resize ./photo.jpg --width 800  Resize image
+  neuros-image compress ./photo.jpg --quality 80 Compress image
+"""
+
+import sys, os, json, subprocess, argparse, base64
+from urllib.request import Request, urlopen
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_VISION_URL = "http://localhost:11434/api/chat"
+
+def describe_with_llava(filepath):
+    try:
+        with open(filepath, 'rb') as f:
+            image_b64 = base64.b64encode(f.read()).decode('utf-8')
+
+        data = json.dumps({
+            "model": "llava:7b",
+            "messages": [{
+                "role": "user",
+                "content": "Describe this image in detail. What do you see?",
+                "images": [image_b64]
+            }],
+            "stream": False
+        }).encode('utf-8')
+
+        req = Request(OLLAMA_VISION_URL, data=data, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read())
+            return result.get("message", {}).get("content", "")
+    except Exception as e:
+        return f"Vision model unavailable: {e}\n\nInstall: ollama pull llava:7b"
+
+def describe_with_metadata(filepath):
+    try:
+        import subprocess
+        # Try exiftool for metadata
+        result = subprocess.run(["exiftool", filepath], capture_output=True, text=True, timeout=10)
+        metadata = result.stdout if result.returncode == 0 else ""
+    except:
+        metadata = ""
+
+    # Try file command
+    try:
+        result = subprocess.run(["file", filepath], capture_output=True, text=True, timeout=5)
+        file_info = result.stdout.strip()
+    except:
+        file_info = ""
+
+    size = os.path.getsize(filepath)
+    size_str = f"{size/1024:.1f}KB" if size < 1024*1024 else f"{size/(1024*1024):.1f}MB"
+
+    prompt = f"""Describe this image based on metadata:
+
+File: {os.path.basename(filepath)}
+Size: {size_str}
+File info: {file_info}
+Metadata: {metadata[:2000]}
+
+Provide a description of what this image likely contains based on available information."""
+
+    try:
+        data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+        req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except:
+        return f"File: {os.path.basename(filepath)}\nSize: {size_str}\n{file_info}"
+
+def ocr_image(filepath):
+    try:
+        result = subprocess.run(
+            ["tesseract", filepath, "stdout", "-l", "eng"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except FileNotFoundError:
+        pass
+    return "Tesseract not installed. Install: sudo apt install tesseract-ocr"
+
+def convert_image(filepath, target_format, quality=85):
+    base = os.path.splitext(filepath)[0]
+    outpath = f"{base}.{target_format}"
+
+    try:
+        subprocess.run([
+            "convert", filepath,
+            "-quality", str(quality),
+            outpath
+        ], capture_output=True, timeout=30, check=True)
+        print(f"✅ Converted: {outpath}")
+    except FileNotFoundError:
+        print("ImageMagick not installed. Install: sudo apt install imagemagick")
+    except Exception as e:
+        print(f"Error: {e}")
+
+def resize_image(filepath, width=None, height=None):
+    base, ext = os.path.splitext(filepath)
+    dims = f"{width}x{height}" if width and height else f"{width or ''}{'x' + str(height) if height else ''}"
+    outpath = f"{base}-{dims}{ext}"
+
+    args = ["convert", filepath, "-resize", dims, outpath]
+    if width and not height:
+        args = ["convert", filepath, "-resize", f"{width}x", outpath]
+    elif height and not width:
+        args = ["convert", filepath, "-resize", f"x{height}", outpath]
+
+    try:
+        subprocess.run(args, capture_output=True, timeout=30, check=True)
+        size = os.path.getsize(outpath)
+        print(f"✅ Resized: {outpath} ({size/1024:.1f}KB)")
+    except FileNotFoundError:
+        print("ImageMagick not installed. Install: sudo apt install imagemagick")
+
+def compress_image(filepath, quality=80):
+    base, ext = os.path.splitext(filepath)
+    outpath = f"{base}-compressed{ext}"
+
+    try:
+        orig_size = os.path.getsize(filepath)
+        subprocess.run([
+            "convert", filepath, "-quality", str(quality), outpath
+        ], capture_output=True, timeout=30, check=True)
+        new_size = os.path.getsize(outpath)
+        savings = (1 - new_size / orig_size) * 100
+        print(f"✅ Compressed: {outpath}")
+        print(f"   {orig_size/1024:.1f}KB → {new_size/1024:.1f}KB ({savings:.0f}% savings)")
+    except FileNotFoundError:
+        print("ImageMagick not installed.")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Image Assistant")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    desc = subparsers.add_parser("describe", help="Describe image")
+    desc.add_argument("file", help="Image file")
+
+    ocr = subparsers.add_parser("ocr", help="Extract text from image")
+    ocr.add_argument("file", help="Image file")
+
+    convert = subparsers.add_parser("convert", help="Convert format")
+    convert.add_argument("file", help="Source image")
+    convert.add_argument("--to", required=True, help="Target format (jpg, png, webp)")
+    convert.add_argument("--quality", type=int, default=85)
+
+    resize = subparsers.add_parser("resize", help="Resize image")
+    resize.add_argument("file", help="Image to resize")
+    resize.add_argument("--width", type=int, help="Target width")
+    resize.add_argument("--height", type=int, help="Target height")
+
+    compress = subparsers.add_parser("compress", help="Compress image")
+    compress.add_argument("file", help="Image to compress")
+    compress.add_argument("--quality", type=int, default=80)
+
+    args = parser.parse_args()
+
+    if args.command == "describe":
+        print("🖼️ Image Description\n" + "=" * 40)
+        # Try vision model first, fall back to metadata
+        result = describe_with_llava(args.file)
+        if "unavailable" in result.lower():
+            result = describe_with_metadata(args.file)
+        print(result)
+    elif args.command == "ocr":
+        print(f"📝 OCR: {args.file}\n{'='*40}")
+        text = ocr_image(args.file)
+        print(text or "(no text found)")
+    elif args.command == "convert":
+        convert_image(args.file, args.to, args.quality)
+    elif args.command == "resize":
+        resize_image(args.file, args.width, args.height)
+    elif args.command == "compress":
+        compress_image(args.file, args.quality)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

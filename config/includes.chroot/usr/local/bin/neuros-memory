@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""
+neuros-memory — NeurOS Long-Term Memory
+Persistent conversation memory that survives across sessions.
+
+Usage:
+  neuros-memory remember "User prefers Python over JavaScript"
+  neuros-memory recall "programming preferences"       Search memories
+  neuros-memory context                                 Get memory context for LLM
+  neuros-memory list                                    List all memories
+  neuros-memory forget <id>                             Delete a memory
+  neuros-memory prune                                    Remove old/low-value memories
+"""
+
+import sys, os, json, hashlib, time, argparse, textwrap
+from urllib.request import Request, urlopen
+from datetime import datetime, timedelta
+
+MEM_DIR = os.path.expanduser("~/.config/neuros/memory")
+MEM_FILE = os.path.join(MEM_DIR, "memories.json")
+OLLAMA_URL = "http://localhost:11434/api/generate"
+os.makedirs(MEM_DIR, exist_ok=True)
+
+def load_memories():
+    if os.path.exists(MEM_FILE):
+        with open(MEM_FILE) as f:
+            return json.load(f)
+    return []
+
+def save_memories(memories):
+    with open(MEM_FILE, 'w') as f:
+        json.dump(memories, f, indent=2)
+
+def remember(text, importance="medium", category=None):
+    memories = load_memories()
+
+    # Auto-categorize with basic heuristics
+    cat = category
+    if not cat:
+        text_lower = text.lower()
+        if any(w in text_lower for w in ['prefer', 'like', 'love', 'hate', 'favorite']):
+            cat = "preference"
+        elif any(w in text_lower for w in ['code', 'python', 'javascript', 'rust', 'go', 'lang']):
+            cat = "programming"
+        elif any(w in text_lower for w in ['project', 'working on', 'build', 'develop']):
+            cat = "project"
+        elif any(w in text_lower for w in ['name', 'called', 'am', 'live', 'location']):
+            cat = "personal"
+        else:
+            cat = "general"
+
+    memory = {
+        "id": hashlib.md5(f"{text}-{time.time()}".encode()).hexdigest()[:10],
+        "text": text,
+        "importance": importance,
+        "category": cat,
+        "created": datetime.now().isoformat(),
+        "access_count": 0,
+        "last_accessed": datetime.now().isoformat()
+    }
+
+    memories.append(memory)
+    save_memories(memories)
+
+    print(f"🧠 Remembered: {text}")
+    print(f"   ID: {memory['id']} | Category: {cat} | Importance: {importance}")
+
+def recall(query, limit=10):
+    memories = load_memories()
+    if not memories:
+        print("No memories stored yet.")
+        return
+
+    # Score by relevance
+    query_words = set(query.lower().split())
+    scored = []
+    for m in memories:
+        text_words = set(m["text"].lower().split())
+        score = len(query_words & text_words) / len(query_words) if query_words else 0
+        # Boost by category match
+        if m.get("category") and m["category"].lower() in query.lower():
+            score += 0.5
+        # Boost by importance
+        imp_weight = {"high": 0.3, "medium": 0.1, "low": 0}
+        score += imp_weight.get(m.get("importance", "medium"), 0)
+
+        if score > 0:
+            scored.append((score, m))
+
+    scored.sort(key=lambda x: -x[0])
+
+    print(f"\n🧠 Recalling: {query}\n{'─'*50}")
+
+    for i, (score, m) in enumerate(scored[:limit]):
+        age = datetime.now() - datetime.fromisoformat(m["created"])
+        age_str = f"{age.days}d ago" if age.days > 0 else f"{age.seconds // 3600}h ago"
+        print(f"{i+1}. [{m['importance'].upper()}] [{m['category']}] {m['text']}")
+        print(f"   ID: {m['id']} | {age_str} | accessed {m['access_count']}x\n")
+
+        # Update access
+        m["access_count"] += 1
+        m["last_accessed"] = datetime.now().isoformat()
+
+    save_memories(memories)
+
+def get_context(max_memories=10):
+    memories = load_memories()
+    if not memories:
+        return ""
+
+    # Get most important and recent
+    high = [m for m in memories if m["importance"] == "high"]
+    recent = sorted(memories, key=lambda x: x["last_accessed"], reverse=True)[:max_memories]
+
+    context_lines = ["[User Memory Context]"]
+    for m in high + recent[:max_memories]:
+        context_lines.append(f"- [{m['category']}] {m['text']}")
+
+    return '\n'.join(set(context_lines))
+
+def list_memories(category=None, importance=None):
+    memories = load_memories()
+    if not memories:
+        print("No memories yet.")
+        return
+
+    if category:
+        memories = [m for m in memories if m["category"] == category]
+    if importance:
+        memories = [m for m in memories if m["importance"] == importance]
+
+    print(f"\n🧠 {len(memories)} memories\n{'─'*50}")
+    for m in sorted(memories, key=lambda x: x["created"], reverse=True):
+        imp_indicator = {"high": "⭐", "medium": "  ", "low": "  "}.get(m["importance"], "  ")
+        print(f"{imp_indicator} [{m['category']:<12}] {m['text']}")
+    print()
+
+def forget(memory_id):
+    memories = load_memories()
+    for m in memories:
+        if m["id"] == memory_id:
+            memories.remove(m)
+            save_memories(memories)
+            print(f"✅ Forgotten: {m['text']}")
+            return
+    print(f"Memory {memory_id} not found.")
+
+def prune(days=30, keep_important=True):
+    memories = load_memories()
+    cutoff = datetime.now() - timedelta(days=days)
+    removed = []
+
+    new_memories = []
+    for m in memories:
+        created = datetime.fromisoformat(m["created"])
+        if keep_important and m["importance"] == "high":
+            new_memories.append(m)
+        elif m["access_count"] > 2:
+            new_memories.append(m)
+        elif created > cutoff:
+            new_memories.append(m)
+        else:
+            removed.append(m)
+
+    save_memories(new_memories)
+    print(f"🧹 Pruned {len(removed)} old memories ({len(new_memories)} remaining)")
+    for m in removed:
+        print(f"   💨 {m['text']}")
+
+def summarize_memories():
+    memories = load_memories()
+    if len(memories) < 5:
+        print(f"Only {len(memories)} memories — not enough to summarize.")
+        return
+
+    memory_text = '\n'.join(f"- [{m['category']}] {m['text']}" for m in memories)
+
+    prompt = f"""Summarize what you know about this user from their memories.
+Group by category. Be concise.
+
+{memory_text[:3000]}
+
+Return a structured summary:
+## User Summary
+- Category: key facts
+- Category: key facts"""
+
+    try:
+        data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+        req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=120) as resp:
+            summary = json.loads(resp.read()).get("response", "")
+        print(f"\n🧠 Memory Summary\n{'─'*50}")
+        print(summary)
+    except Exception as e:
+        print(f"Error: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Long-Term Memory")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    rem_p = subparsers.add_parser("remember", help="Store a memory")
+    rem_p.add_argument("text", help="What to remember")
+    rem_p.add_argument("--importance", "-i", default="medium",
+                       choices=["high", "medium", "low"])
+    rem_p.add_argument("--category", "-c", help="Category")
+
+    rec_p = subparsers.add_parser("recall", help="Search memories")
+    rec_p.add_argument("query", help="What to recall")
+    rec_p.add_argument("--limit", "-n", type=int, default=10)
+
+    subparsers.add_parser("context", help="Get memory context for LLM")
+
+    list_p = subparsers.add_parser("list", help="List memories")
+    list_p.add_argument("--category", "-c", help="Filter by category")
+    list_p.add_argument("--importance", "-i", choices=["high", "medium", "low"])
+
+    forget_p = subparsers.add_parser("forget", help="Delete a memory")
+    forget_p.add_argument("id", help="Memory ID")
+
+    prune_p = subparsers.add_parser("prune", help="Remove old memories")
+    prune_p.add_argument("--days", "-d", type=int, default=30)
+    prune_p.add_argument("--keep-important", action="store_true", default=True)
+
+    subparsers.add_parser("summarize", help="AI summary of all memories")
+
+    args = parser.parse_args()
+
+    if args.command == "remember":
+        remember(args.text, args.importance, args.category)
+    elif args.command == "recall":
+        recall(args.query, args.limit)
+    elif args.command == "context":
+        ctx = get_context()
+        if ctx:
+            print(ctx)
+        else:
+            print("(no memories)")
+    elif args.command == "list":
+        list_memories(args.category, args.importance)
+    elif args.command == "forget":
+        forget(args.id)
+    elif args.command == "prune":
+        prune(args.days, args.keep_important)
+    elif args.command == "summarize":
+        summarize_memories()
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

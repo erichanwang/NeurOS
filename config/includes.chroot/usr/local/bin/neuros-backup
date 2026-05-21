@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+neuros-backup — NeurOS Smart Backup
+AI-driven backup with intelligent file selection, deduplication, and compression.
+
+Usage:
+  neuros-backup ~/projects                   Backup a directory
+  neuros-backup --config myapp.conf          Backup with config
+  neuros-backup --list                        List backups
+  neuros-backup --restore <id> --to <dir>     Restore a backup
+"""
+
+import sys
+import os
+import json
+import shutil
+import argparse
+import tarfile
+from datetime import datetime
+
+BACKUP_DIR = os.path.expanduser("~/.local/share/neuros/backups")
+INDEX_FILE = os.path.join(BACKUP_DIR, "index.json")
+CONFIG_DIR = os.path.expanduser("~/.config/neuros")
+
+EXTENSIONS = {
+    "code": [".py", ".js", ".ts", ".rs", ".go", ".java", ".c", ".cpp", ".h",
+             ".rb", ".php", ".swift", ".kt", ".scala", ".sh", ".bash", ".zsh",
+             ".vim", ".lua", ".r", ".jl", ".hs", ".ml", ".elm", ".dart"],
+    "config": [".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+               ".env", ".xml", ".editorconfig", ".gitignore"],
+    "doc": [".md", ".rst", ".txt", ".pdf", ".doc", ".docx", ".odt", ".tex"],
+    "data": [".csv", ".tsv", ".sql", ".db", ".sqlite"],
+    "image": [".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".bmp"],
+    "web": [".html", ".css", ".scss", ".less", ".vue", ".svelte", ".jsx", ".tsx"],
+}
+
+
+def ensure_dirs():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+def load_index():
+    if os.path.exists(INDEX_FILE):
+        with open(INDEX_FILE) as f:
+            return json.load(f)
+    return []
+
+
+def save_index(index):
+    with open(INDEX_FILE, "w") as f:
+        json.dump(index, f, indent=2)
+
+
+def categorize_file(path):
+    ext = os.path.splitext(path)[1].lower()
+    for cat, exts in EXTENSIONS.items():
+        if ext in exts:
+            return cat
+    return "other"
+
+
+def get_changed_files(directory, last_backup_time=None):
+    changed = []
+    total_size = 0
+    file_count = 0
+    # Convert ISO timestamp string to epoch float for comparison
+    if last_backup_time and isinstance(last_backup_time, str):
+        try:
+            from datetime import datetime as _dt
+            last_backup_time = _dt.fromisoformat(last_backup_time).timestamp()
+        except (ValueError, TypeError):
+            last_backup_time = None
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in
+                   ("node_modules", "__pycache__", ".git", "dist", "build",
+                    "target", ".venv", "venv", ".next", ".nuxt")]
+        for f in files:
+            if f.startswith("."):
+                continue
+            path = os.path.join(root, f)
+            try:
+                stat = os.stat(path)
+                if last_backup_time is None or stat.st_mtime > last_backup_time:
+                    size = stat.st_size
+                    changed.append({
+                        "path": path,
+                        "size": size,
+                        "mtime": stat.st_mtime,
+                        "category": categorize_file(path)
+                    })
+                    total_size += size
+                    file_count += 1
+            except OSError:
+                continue
+    return changed, total_size, file_count
+
+
+def create_backup(source_dir, name=None, comment=None):
+    ensure_dirs()
+    source_dir = os.path.abspath(source_dir)
+    if not os.path.isdir(source_dir):
+        print(f"Error: {source_dir} is not a directory")
+        return
+
+    index = load_index()
+    last_time = None
+    for entry in reversed(index):
+        if entry.get("source") == source_dir:
+            last_time = entry.get("timestamp")
+            break
+
+    changed, total_size, count = get_changed_files(source_dir, last_time)
+    if not changed:
+        print("No changes detected. Skipping backup.")
+        return
+
+    name = name or os.path.basename(source_dir)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive_name = f"{name}-{timestamp}.tar.gz"
+    archive_path = os.path.join(BACKUP_DIR, archive_name)
+
+    print(f"Backing up {count} files ({_format_size(total_size)})...")
+    with tarfile.open(archive_path, "w:gz") as tar:
+        for f in changed:
+            tar.add(f["path"], arcname=os.path.relpath(f["path"], source_dir))
+
+    archive_size = os.path.getsize(archive_path)
+    categories = {}
+    for f in changed:
+        cat = f["category"]
+        categories[cat] = categories.get(cat, 0) + 1
+
+    entry = {
+        "id": len(index) + 1,
+        "name": name,
+        "source": source_dir,
+        "archive": archive_name,
+        "timestamp": timestamp,
+        "files": count,
+        "size": archive_size,
+        "categories": categories,
+        "comment": comment
+    }
+    index.append(entry)
+    save_index(index)
+
+    print(f"Backup complete: {archive_name}")
+    print(f"  Files: {count} | Size: {_format_size(archive_size)}")
+    print(f"  Categories: {json.dumps(categories)}")
+
+
+def list_backups():
+    index = load_index()
+    if not index:
+        print("No backups found.")
+        return
+    print(f"{'ID':<4} {'Date':<17} {'Files':<8} {'Size':<10} {'Name'}")
+    print("-" * 60)
+    for entry in index:
+        ts = entry["timestamp"][:16]
+        print(f"{entry['id']:<4} {ts:<17} {entry['files']:<8} "
+              f"{_format_size(entry['size']):<10} {entry['name']}")
+
+
+def restore_backup(backup_id, target_dir):
+    index = load_index()
+    entry = None
+    for e in index:
+        if str(e["id"]) == str(backup_id):
+            entry = e
+            break
+    if not entry:
+        print(f"Backup {backup_id} not found.")
+        return
+
+    archive_path = os.path.join(BACKUP_DIR, entry["archive"])
+    if not os.path.exists(archive_path):
+        print(f"Archive not found: {archive_path}")
+        return
+
+    target_dir = os.path.abspath(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
+    print(f"Restoring {entry['archive']} to {target_dir}...")
+    with tarfile.open(archive_path, "r:gz") as tar:
+        tar.extractall(target_dir)
+    print(f"Restored {entry['files']} files to {target_dir}")
+
+
+def _format_size(size):
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Smart Backup")
+    parser.add_argument("source", nargs="?", help="Directory to back up")
+    parser.add_argument("--name", "-n", help="Backup name")
+    parser.add_argument("--comment", "-m", help="Backup comment")
+    parser.add_argument("--list", "-l", action="store_true", help="List backups")
+    parser.add_argument("--restore", "-r", help="Backup ID to restore")
+    parser.add_argument("--to", "-t", default=".", help="Restore destination")
+
+    args = parser.parse_args()
+
+    if args.list:
+        list_backups()
+    elif args.restore:
+        restore_backup(args.restore, args.to)
+    elif args.source:
+        create_backup(args.source, args.name, args.comment)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

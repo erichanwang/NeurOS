@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""
+neuros-security — NeurOS Security Assistant
+AI-powered security audit, vulnerability check, and hardening.
+
+Usage:
+  neuros-security audit                  System security audit
+  neuros-security check ./Dockerfile     Check file/config for issues
+  neuros-security ssh-hardening          SSH hardening recommendations
+  neuros-security passwords              Password hygiene check (local only)
+  neuros-security checklist              Security best practices checklist
+"""
+
+import sys, os, json, subprocess, argparse, pwd, grp, stat
+from urllib.request import Request, urlopen
+from datetime import datetime, timedelta
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+def query_ollama(prompt):
+    data = json.dumps({"model": "mistral", "prompt": prompt, "stream": False}).encode('utf-8')
+    req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "")
+    except: return None
+
+def security_audit():
+    print("🛡️ Security Audit\n" + "=" * 50)
+    findings = []
+
+    # UFW status
+    try:
+        result = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
+        if "inactive" in result.stdout.lower():
+            findings.append(("HIGH", "UFW firewall is INACTIVE"))
+        else:
+            findings.append(("OK", "UFW firewall is active"))
+    except:
+        findings.append(("WARN", "UFW not installed"))
+
+    # SSH root login
+    sshd_config = "/etc/ssh/sshd_config"
+    if os.path.exists(sshd_config):
+        with open(sshd_config) as f:
+            sshd = f.read()
+        if "PermitRootLogin yes" in sshd and "PermitRootLogin no" not in sshd:
+            findings.append(("HIGH", "SSH root login may be allowed"))
+        elif "PermitRootLogin no" in sshd:
+            findings.append(("OK", "SSH root login disabled"))
+        if "PasswordAuthentication yes" in sshd and "PasswordAuthentication no" not in sshd:
+            findings.append(("HIGH", "SSH password auth enabled (use key-based auth)"))
+
+    # Unused users
+    try:
+        for user in pwd.getpwall():
+            if user.pw_uid >= 1000 and user.pw_uid < 65534:
+                # Check last login
+                result = subprocess.run(["lastlog", "-u", user.pw_name],
+                                      capture_output=True, text=True, timeout=5)
+                if "**Never logged in**" in result.stdout:
+                    findings.append(("WARN", f"User '{user.pw_name}' has never logged in"))
+    except: pass
+
+    # World-writable files in /etc
+    for root, dirs, files in os.walk("/etc"):
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            try:
+                mode = os.stat(fpath).st_mode
+                if mode & stat.S_IWOTH:
+                    findings.append(("WARN", f"World-writable: {fpath}"))
+            except: pass
+        break  # Only check /etc top level
+
+    # SUID binaries
+    try:
+        result = subprocess.run(["find", "/usr/bin", "-perm", "-4000", "-type", "f"],
+                              capture_output=True, text=True, timeout=10)
+        suid_count = len([l for l in result.stdout.strip().split('\n') if l])
+        findings.append(("INFO", f"{suid_count} SUID binaries in /usr/bin"))
+    except: pass
+
+    # Listening services
+    try:
+        result = subprocess.run(["ss", "-tlnp4"], capture_output=True, text=True, timeout=5)
+        lines = [l for l in result.stdout.strip().split('\n') if 'LISTEN' in l]
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 5:
+                port = parts[4].rsplit(':', 1)[-1]
+                if port not in ('22', '53', '11434', '11435', '11436', '631'):
+                    findings.append(("WARN", f"Unexpected listener on port {port}: {line.strip()}"))
+    except: pass
+
+    # Print findings
+    for severity, finding in findings:
+        icon = {"OK": "✅", "INFO": "ℹ️ ", "WARN": "⚠️ ", "HIGH": "🔴"}
+        print(f"  {icon.get(severity, '  ')} [{severity}] {finding}")
+
+    # AI Summary
+    findings_str = '\n'.join(f"[{s}] {f}" for s, f in findings)
+    prompt = f"""Summarize this security audit in 2-3 sentences. Highlight the most critical action items.
+
+{findings_str[:2000]}
+
+Be concise and actionable."""
+
+    insight = query_ollama(prompt)
+    if insight:
+        print(f"\n🤖 AI Summary\n{'─'*40}")
+        print(insight)
+
+    high_count = sum(1 for s, _ in findings if s == "HIGH")
+    warn_count = sum(1 for s, _ in findings if s == "WARN")
+    ok_count = sum(1 for s, _ in findings if s == "OK")
+    print(f"\n📊 {ok_count} OK | {warn_count} Warnings | {high_count} Critical")
+
+def ssh_hardening():
+    print("🔐 SSH Hardening Recommendations\n" + "=" * 40)
+    
+    if os.path.exists("/etc/ssh/sshd_config"):
+        with open("/etc/ssh/sshd_config") as f:
+            config = f.read()
+
+        prompt = f"""Review this SSH config and suggest hardening improvements:
+
+{config[:2000]}
+
+Recommend specific changes for:
+- Key-based auth only
+- Disable root login
+- Change default port
+- Rate limiting
+- Idle timeout
+- AllowUsers restriction"""
+
+        print(query_ollama(prompt))
+    else:
+        print("SSH config not found at /etc/ssh/sshd_config")
+
+def check_file(filepath):
+    try:
+        with open(filepath, 'r', errors='replace') as f:
+            content = f.read()[:5000]
+    except Exception as e:
+        print(f"Error: {e}"); return
+
+    ext = os.path.splitext(filepath)[1].lower()
+    ftype = {
+        '': 'shell script', '.sh': 'shell script', '.bash': 'shell script',
+        '.py': 'Python script', '.js': 'JavaScript', '.yml': 'YAML config',
+        '.yaml': 'YAML config', '.json': 'JSON config', '.env': 'environment file',
+        '.toml': 'TOML config', '.conf': 'config file',
+        'Dockerfile': 'Dockerfile'
+    }.get(ext, f"{ext} file")
+
+    prompt = f"""Security review this {ftype}. 
+
+{content[:4000]}
+
+Check for:
+- Hardcoded secrets/keys/tokens
+- Command injection
+- Path traversal
+- Insecure permissions
+- Unsafe defaults
+- Missing error handling"""
+
+    print(f"🔍 Security Review: {filepath}\n{'─'*40}")
+    print(query_ollama(prompt))
+
+def password_check():
+    print("🔑 Password Hygiene Check\n" + "=" * 40)
+    print("  (Checks local system only — nothing leaves this machine)\n")
+
+    checks = []
+
+    # Check for empty passwords
+    try:
+        result = subprocess.run(["passwd", "-S", os.environ.get("USER", "root")],
+                               capture_output=True, text=True, timeout=5)
+        if "NP" in result.stdout:
+            checks.append(("HIGH", "Current user has NO PASSWORD set"))
+    except: pass
+
+    # Check /etc/shadow permissions
+    try:
+        mode = os.stat("/etc/shadow").st_mode
+        if mode & stat.S_IROTH or mode & stat.S_IWOTH:
+            checks.append(("HIGH", "/etc/shadow is world-readable/writable"))
+        else:
+            checks.append(("OK", "/etc/shadow has correct permissions"))
+    except:
+        checks.append(("WARN", "Cannot check /etc/shadow"))
+
+    # Check password aging
+    try:
+        result = subprocess.run(["chage", "-l", os.environ.get("USER", "root")],
+                               capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n'):
+            if "never" in line.lower() and "expir" in line.lower():
+                checks.append(("WARN", "Password expiration not set"))
+                break
+    except: pass
+
+    for s, c in checks:
+        icon = {"OK": "✅", "WARN": "⚠️", "HIGH": "🔴"}
+        print(f"  {icon.get(s, '  ')} [{s}] {c}")
+
+def checklist():
+    print("🛡️ Security Best Practices Checklist\n" + "=" * 40)
+    items = [
+        "UFW firewall enabled (sudo ufw enable)",
+        "SSH key-based auth only (PasswordAuthentication no)",
+        "Regular system updates (sudo apt update && sudo apt upgrade)",
+        "Non-root user for daily use",
+        "Unused services disabled",
+        "AppArmor/SELinux enabled",
+        "Regular backups configured",
+        "Fail2ban installed for SSH",
+        "No default passwords",
+        "Log monitoring configured",
+        "Encrypted home directory (or full disk encryption)",
+        "Browser privacy extensions installed",
+        "No unnecessary ports exposed",
+    ]
+    for i, item in enumerate(items, 1):
+        print(f"  {'☐'} {i}. {item}")
+
+def main():
+    parser = argparse.ArgumentParser(description="NeurOS Security Assistant")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    subparsers.add_parser("audit", help="Full security audit")
+    subparsers.add_parser("ssh-hardening", help="SSH hardening")
+    subparsers.add_parser("passwords", help="Password hygiene check")
+    subparsers.add_parser("checklist", help="Security checklist")
+
+    check = subparsers.add_parser("check", help="Security review a file")
+    check.add_argument("file", help="File to check")
+
+    args = parser.parse_args()
+
+    if args.command == "audit":
+        security_audit()
+    elif args.command == "ssh-hardening":
+        ssh_hardening()
+    elif args.command == "passwords":
+        password_check()
+    elif args.command == "checklist":
+        checklist()
+    elif args.command == "check":
+        check_file(args.file)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
