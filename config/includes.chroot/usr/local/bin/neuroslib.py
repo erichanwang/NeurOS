@@ -17,12 +17,17 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 
 # === Paths ===
 CONFIG_DIR = os.path.expanduser("~/.config/neuros")
 LLM_CONF = os.path.join(CONFIG_DIR, "llm.conf")
+RESPONSE_CACHE_PATH = os.path.expanduser(
+    os.getenv("NEUROS_RESPONSE_CACHE", "~/.cache/neuros/responses.json")
+)
+RESPONSE_CACHE_LIMIT = 256
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -50,22 +55,72 @@ def load_config():
 # ═══════════════════════════════════════════════════════════════════════
 
 def query_llm(prompt, system="You are a helpful AI assistant.", timeout=120):
-    """Query the local Ollama instance. Returns response string or None."""
+    """Query Ollama, reusing successful responses for the same model/input."""
     config = load_config()
+    model = config["model"]
+    cache_key = _response_cache_key(model, prompt, system)
+    cached = _read_response_cache().get(cache_key)
+    if cached is not None:
+        return cached
     try:
         import urllib.request
         url = f"http://{config['host']}:{config['port']}/api/generate"
         data = json.dumps({
-            "model": config["model"],
+            "model": model,
             "prompt": prompt,
             "system": system,
             "stream": False,
         }).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read()).get("response", "").strip()
+            response = json.loads(resp.read()).get("response", "").strip()
+        if response:
+            _write_response_cache(cache_key, response)
+        return response
     except Exception:
         return None
+
+
+def _response_cache_key(model, prompt, system):
+    """Return a stable key; system is included to prevent prompt collisions."""
+    payload = json.dumps(
+        {"model": model, "prompt": prompt, "system": system},
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_response_cache():
+    try:
+        with open(RESPONSE_CACHE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _write_response_cache(key, response):
+    cache = _read_response_cache()
+    cache[key] = response
+    if len(cache) > RESPONSE_CACHE_LIMIT:
+        cache = dict(list(cache.items())[-RESPONSE_CACHE_LIMIT:])
+    try:
+        parent = os.path.dirname(RESPONSE_CACHE_PATH) or "."
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix="responses-", dir=parent, text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
+            os.replace(tmp_path, RESPONSE_CACHE_PATH)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass
 
 
 def query_llm_stream(prompt, system="You are a helpful AI assistant.", timeout=120):

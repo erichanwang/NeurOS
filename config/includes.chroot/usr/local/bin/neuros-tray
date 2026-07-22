@@ -6,14 +6,20 @@ Shows model status, RAM usage, and provides quick AI access from the GNOME panel
 Requires: python3-gi, gir1.2-gtk-3.0, gir1.2-appindicator3-0.1
 """
 
+import subprocess
+import json
+import os
+import sys
+import threading
+
+if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+    print(__doc__.strip())
+    sys.exit(0)
+
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('AppIndicator3', '0.1')
 from gi.repository import Gtk, AppIndicator3, GLib
-import subprocess
-import json
-import os
-import threading
 
 APP_ID = "neuros-tray"
 CONFIG_PATH = os.path.expanduser("~/.config/neuros/llm.conf")

@@ -5,6 +5,11 @@
 
 set -e
 
+if [ "$#" -gt 0 ] && { [ "$1" = "--help" ] || [ "$1" = "-h" ]; }; then
+    sed -n '2,/^$/p' "$0"
+    exit 0
+fi
+
 MARKER="$HOME/.config/neuros/.firstboot-done"
 CONFIG_DIR="$HOME/.config/neuros"
 SKEL_CONTINUE="/etc/skel/.continue/config.json"

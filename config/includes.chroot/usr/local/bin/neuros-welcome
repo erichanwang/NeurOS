@@ -8,6 +8,10 @@ import sys
 import os
 import subprocess
 
+if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+    print(__doc__.strip())
+    sys.exit(0)
+
 try:
     import gi
     gi.require_version('Gtk', '3.0')

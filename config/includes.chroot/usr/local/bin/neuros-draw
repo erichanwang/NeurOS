@@ -349,7 +349,6 @@ def main():
 
     sub = parser.add_subparsers(dest="subcommand", help="Subcommands")
 
-    sub.add_parser("gallery", aliases=["list", "ls"], help="Browse generated images")
     p_gal = sub.add_parser("gallery", aliases=["list", "ls"], help="Browse generated images")
     p_gal.add_argument("--open", "-o", action="store_true", help="Open latest image")
 
