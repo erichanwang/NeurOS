@@ -219,10 +219,11 @@ def main():
         file_content = read_readme_if_present()
 
     ctx = get_system_context()
+    file_section = f"File content:\n{file_content}" if file_content else ""
     prompt = f"""You are a helpful Linux terminal assistant on NeurOS.
 System context:
 {ctx}
-{"File content:\\n" + file_content if file_content else ""}
+{file_section}
 User question: {question}
 Be concise. If suggesting shell commands, wrap them in backticks."""
 
