@@ -21,47 +21,105 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 DEFAULT_PORT = 11436
 OLLAMA_URL = "http://localhost:11434/api/generate"
+SUPPORTED_PROTOCOL_VERSION = "2024-11-05"
 
 
 class MCPServer(BaseHTTPRequestHandler):
     """MCP protocol server for NeurOS."""
 
+    def _send_error(self, code, message, req_id=None, data=None, status=200):
+        error = {"code": code, "message": message}
+        if data is not None:
+            error["data"] = data
+        self.send_json({"jsonrpc": "2.0", "error": error, "id": req_id}, status=status)
+
+    def _send_no_content(self):
+        self.send_response(202)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
+        content_type = self.headers.get("Content-Type", "")
+        accept = {value.strip().split(";", 1)[0].lower()
+                  for value in self.headers.get("Accept", "").split(",")}
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            self._send_error(-32600, "Content-Type must be application/json", status=400)
+            return
+        if not {"application/json", "text/event-stream"}.issubset(accept):
+            self._send_error(-32600,
+                             "Accept must include application/json and text/event-stream",
+                             status=400)
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self._send_error(-32600, "Content-Length must be a valid integer", status=400)
+            return
+        if content_length < 0:
+            self._send_error(-32600, "Content-Length must not be negative", status=400)
+            return
         body = self.rfile.read(content_length)
 
         try:
             request = json.loads(body)
         except json.JSONDecodeError:
-            self.send_error(400, "Invalid JSON")
+            self._send_error(-32700, "Parse error", status=400)
             return
 
-        method = request.get("method", "")
-        params = request.get("params", {})
+        if not isinstance(request, dict):
+            self._send_error(-32600, "Invalid Request", status=400)
+            return
+
         req_id = request.get("id")
+        if request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str):
+            self._send_error(-32600, "Invalid Request", status=400)
+            return
+        if "id" in request and (req_id is None or not isinstance(req_id, (str, int))
+                                 or isinstance(req_id, bool)):
+            self._send_error(-32600, "Invalid Request", status=400)
+            return
+        params = request.get("params", {})
+        if not isinstance(params, dict):
+            self._send_error(-32602, "Invalid params", req_id=req_id)
+            return
+
+        method = request["method"]
+        is_notification = "id" not in request
 
         if method == "initialize":
-            result = self.handle_initialize(params)
+            result, error = self.handle_initialize(params)
         elif method == "tools/list":
-            result = self.handle_list_tools()
+            result, error = self.handle_list_tools(), None
         elif method == "tools/call":
-            result = self.handle_call_tool(params)
+            result, error = self.handle_call_tool(params)
         elif method == "resources/list":
-            result = self.handle_list_resources()
+            result, error = self.handle_list_resources(), None
         elif method == "resources/read":
-            result = self.handle_read_resource(params)
+            result, error = self.handle_read_resource(params)
         else:
-            self.send_json({"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": req_id})
+            error = {"code": -32601, "message": "Method not found"}
+            result = None
+
+        if is_notification:
+            self._send_no_content()
             return
 
-        self.send_json({"jsonrpc": "2.0", "result": result, "id": req_id})
+        if error is not None:
+            self.send_json({"jsonrpc": "2.0", "error": error, "id": req_id})
+        else:
+            self.send_json({"jsonrpc": "2.0", "result": result, "id": req_id})
 
-    def send_json(self, data):
-        self.send_response(200)
+    def send_json(self, data, status=200):
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode('utf-8'))
+        self.wfile.write(body)
 
     def do_GET(self):
         if self.path == "/health":
@@ -81,8 +139,25 @@ class MCPServer(BaseHTTPRequestHandler):
         self.end_headers()
 
     def handle_initialize(self, params):
+        if not isinstance(params.get("protocolVersion"), str):
+            return None, {"code": -32602, "message": "Invalid params"}
+        client_info = params.get("clientInfo")
+        if not isinstance(params.get("capabilities"), dict) or not isinstance(client_info, dict):
+            return None, {"code": -32602, "message": "Invalid params"}
+        if not isinstance(client_info.get("name"), str) or not isinstance(client_info.get("version"), str):
+            return None, {"code": -32602, "message": "Invalid params"}
+        requested_version = params["protocolVersion"]
+        if requested_version != SUPPORTED_PROTOCOL_VERSION:
+            return None, {
+                "code": -32602,
+                "message": "Unsupported protocol version",
+                "data": {
+                    "supported": [SUPPORTED_PROTOCOL_VERSION],
+                    "requested": requested_version,
+                },
+            }
         return {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
             "serverInfo": {
                 "name": "NeurOS MCP Server",
                 "version": "1.0.0"
@@ -91,7 +166,7 @@ class MCPServer(BaseHTTPRequestHandler):
                 "tools": {},
                 "resources": {}
             }
-        }
+        }, None
 
     def handle_list_tools(self):
         return {
@@ -163,21 +238,23 @@ class MCPServer(BaseHTTPRequestHandler):
     def handle_call_tool(self, params):
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
+        if not isinstance(tool_name, str) or not isinstance(arguments, dict):
+            return None, {"code": -32602, "message": "Invalid params"}
 
         if tool_name == "read_file":
-            return self.tool_read_file(arguments)
+            return self.tool_read_file(arguments), None
         elif tool_name == "list_directory":
-            return self.tool_list_directory(arguments)
+            return self.tool_list_directory(arguments), None
         elif tool_name == "run_command":
-            return self.tool_run_command(arguments)
+            return self.tool_run_command(arguments), None
         elif tool_name == "ask_llm":
-            return self.tool_ask_llm(arguments)
+            return self.tool_ask_llm(arguments), None
         elif tool_name == "get_system_info":
-            return self.tool_get_system_info(arguments)
+            return self.tool_get_system_info(arguments), None
         elif tool_name == "git_status":
-            return self.tool_git_status(arguments)
+            return self.tool_git_status(arguments), None
         else:
-            return {"error": f"Unknown tool: {tool_name}"}
+            return None, {"code": -32602, "message": f"Unknown tool: {tool_name}"}
 
     def tool_read_file(self, args):
         path = os.path.expanduser(args.get("path", ""))
@@ -316,15 +393,21 @@ class MCPServer(BaseHTTPRequestHandler):
 
     def handle_read_resource(self, params):
         uri = params.get("uri", "")
+        if not isinstance(uri, str) or not uri:
+            return None, {"code": -32602, "message": "Invalid params"}
 
         if uri == "neuros://system/info":
-            return self.tool_get_system_info({})
+            return self.tool_get_system_info({}), None
         elif uri == "neuros://ollama/models":
-            return self.tool_ollama_models()
+            return self.tool_ollama_models(), None
         elif uri == "neuros://git/status":
-            return self.tool_git_status({})
+            return self.tool_git_status({}), None
         else:
-            return {"contents": [{"uri": uri, "mimeType": "text/plain", "text": "Resource not found"}]}
+            return None, {
+                "code": -32002,
+                "message": "Resource not found",
+                "data": {"uri": uri},
+            }
 
     def tool_ollama_models(self):
         try:
