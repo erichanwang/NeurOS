@@ -156,4 +156,11 @@ if [ -f /etc/systemd/system/neuros-autofix.service ]; then
         echo "  ⚠️  neuros-autofix service enable skipped (no systemd)"
 fi
 
+# Refresh the hicolor icon theme cache so the tray icon (neuros-symbolic) is found
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null && \
+        echo "  ✅ icon cache updated" || \
+        echo "  ⚠️  icon cache update skipped"
+fi
+
 echo "[NeurOS] Tools installation complete."

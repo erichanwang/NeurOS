@@ -47,7 +47,24 @@ def get_system_context():
             ctx.append(f"Git branch: {branch}")
     except:
         pass
+    try:
+        diff = subprocess.check_output(
+            ["git", "diff", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True, timeout=5).strip()
+        if diff:
+            if len(diff) > 3000:
+                diff = diff[:3000] + "\n... (diff truncated)"
+            ctx.append(f"Uncommitted changes (git diff HEAD):\n{diff}")
+    except:
+        pass
     return "\n".join(ctx)
+
+def read_readme_if_present():
+    """Read README.md/README from the current directory, if one exists."""
+    for name in ("README.md", "README"):
+        if os.path.isfile(name):
+            return read_file_safe(name)
+    return ""
 
 def read_file_safe(path):
     try:
@@ -124,6 +141,8 @@ def main():
     file_content = ""
     if len(args) > 1:
         file_content = read_file_safe(args[1])
+    else:
+        file_content = read_readme_if_present()
 
     ctx = get_system_context()
     prompt = f"""You are a helpful Linux terminal assistant on NeurOS.
