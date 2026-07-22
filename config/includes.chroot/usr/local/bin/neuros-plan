@@ -131,8 +131,9 @@ def export_markdown(plan):
         md += f"## {phase['name']}\n\n"
         for task in phase.get("tasks", []):
             priority = task.get("priority", "medium").upper()
-            deps = f" (depends on: #{', #'.join(map(str, task.get('dependencies', []))))}" if task.get("dependencies") else ""
-            md += f"- [ ] **[{priority}]** {task['title']} — {task.get('hours', 0)}h{deps}\n"
+            deps = f" (depends on: #{', #'.join(map(str, task.get('dependencies', [])))})" if task.get("dependencies") else ""
+            hours = task.get("hours", 0)
+            md += f"- [ ] **[{priority}]** {task['title']} — {hours}h{deps}\n"
             if task.get("description"):
                 md += f"  - {task['description']}\n"
         md += "\n"
