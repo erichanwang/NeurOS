@@ -49,6 +49,13 @@ class NeurosTray:
         self.pause_item.connect("activate", self.on_toggle_pause)
         self.menu.append(self.pause_item)
 
+        # Model switcher (submenu populated from `neuros-model`)
+        self.model_item = Gtk.MenuItem(label="Switch Model")
+        self.model_submenu = Gtk.Menu()
+        self.model_item.set_submenu(self.model_submenu)
+        self.model_item.connect("activate", self.on_model_menu_open)
+        self.menu.append(self.model_item)
+
         self.separator2 = Gtk.SeparatorMenuItem()
         self.menu.append(self.separator2)
 
@@ -201,6 +208,52 @@ class NeurosTray:
                 GLib.idle_add(label.set_label, result.get("response", "No response."))
         except Exception as e:
             GLib.idle_add(label.set_label, f"Error: {e}")
+
+    def get_current_model(self):
+        """Read the current default model from llm.conf."""
+        try:
+            with open(CONFIG_PATH) as f:
+                for line in f:
+                    if '=' in line and not line.startswith('['):
+                        key, val = line.split('=', 1)
+                        if key.strip() == "model":
+                            return val.strip().strip('"').strip("'")
+        except Exception:
+            pass
+        return "mistral"
+
+    def on_model_menu_open(self, widget):
+        """Rebuild the model-switcher submenu with the installed models,
+        marking the current default. Reuses `neuros-model` for the actual
+        listing/switching rather than reimplementing its logic."""
+        for child in self.model_submenu.get_children():
+            self.model_submenu.remove(child)
+
+        running, models = self.check_ollama_status()
+        if not running or not models:
+            empty_item = Gtk.MenuItem(label="(no models — run neuros-model pull)")
+            empty_item.set_sensitive(False)
+            self.model_submenu.append(empty_item)
+            self.model_submenu.show_all()
+            return
+
+        current = self.get_current_model()
+        group = None
+        for name in models:
+            item = Gtk.RadioMenuItem.new_with_label(group if group else [], name)
+            if group is None:
+                group = item.get_group()
+            item.set_active(name == current)
+            item.connect("toggled", self.on_model_selected, name)
+            self.model_submenu.append(item)
+
+        self.model_submenu.show_all()
+
+    def on_model_selected(self, widget, name):
+        """Switch the default model via the `neuros-model` CLI."""
+        if not widget.get_active():
+            return
+        subprocess.Popen(["neuros-model", "switch", name])
 
     def on_toggle_pause(self, widget):
         """Toggle pause/resume of LLM daemon."""
