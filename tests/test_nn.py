@@ -10,12 +10,29 @@ import os
 import json
 import tempfile
 import unittest
+import importlib.util
+from importlib.machinery import SourceFileLoader
 from unittest.mock import patch, mock_open, MagicMock
 from io import StringIO
 
 # Tests validate NeurOS component files directly.
 # The nn CLI uses a __main__ guard (can't import directly),
 # so we test by reading source files and validating logic patterns.
+
+NN_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..',
+    'config', 'includes.chroot', 'usr', 'local', 'bin', 'nn'
+)
+
+
+def load_nn():
+    """Import the real nn script as a module (it has no .py extension,
+    so spec_from_file_location needs an explicit loader)."""
+    loader = SourceFileLoader("nn_module", NN_PATH)
+    spec = importlib.util.spec_from_loader("nn_module", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 class TestNNCore(unittest.TestCase):
     """Test core nn CLI functionality."""
@@ -166,6 +183,60 @@ class TestNNFileReading(unittest.TestCase):
         if len(exact_content) > 8000:
             exact_content = exact_content[:8000] + "\n... (truncated)"
         self.assertEqual(len(exact_content), 8000)
+
+
+class TestNNRealFunctions(unittest.TestCase):
+    """Exercise the actual functions in nn (not copies of their logic)."""
+
+    def setUp(self):
+        self.nn = load_nn()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def test_get_model_reads_config(self):
+        config_path = os.path.join(self.tmpdir, "llm.conf")
+        with open(config_path, "w") as f:
+            f.write('[llm]\nmodel = "codellama"\n')
+        with patch.object(self.nn, "CONFIG_PATH", config_path):
+            self.assertEqual(self.nn.get_model(), "codellama")
+
+    def test_get_model_falls_back_to_default_when_missing(self):
+        with patch.object(self.nn, "CONFIG_PATH", os.path.join(self.tmpdir, "nope.conf")):
+            self.assertEqual(self.nn.get_model(), self.nn.DEFAULT_MODEL)
+
+    def test_read_file_safe_truncates(self):
+        path = os.path.join(self.tmpdir, "big.txt")
+        with open(path, "w") as f:
+            f.write("x" * 10000)
+        content = self.nn.read_file_safe(path)
+        self.assertTrue(content.endswith("... (truncated)"))
+        self.assertEqual(len(content), 8000 + len("\n... (truncated)"))
+
+    def test_read_file_safe_missing_file_reports_error(self):
+        content = self.nn.read_file_safe(os.path.join(self.tmpdir, "missing.txt"))
+        self.assertIn("Could not read file", content)
+
+    def test_read_readme_if_present_finds_readme(self):
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.tmpdir)
+            with open("README.md", "w") as f:
+                f.write("hello readme")
+            self.assertEqual(self.nn.read_readme_if_present(), "hello readme")
+        finally:
+            os.chdir(cwd)
+
+    def test_read_readme_if_present_returns_empty_when_absent(self):
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.tmpdir)
+            self.assertEqual(self.nn.read_readme_if_present(), "")
+        finally:
+            os.chdir(cwd)
+
+    def test_get_system_context_includes_cwd(self):
+        ctx = self.nn.get_system_context()
+        self.assertIn("CWD:", ctx)
+        self.assertIn("Directory contents:", ctx)
 
 
 class TestServiceFile(unittest.TestCase):

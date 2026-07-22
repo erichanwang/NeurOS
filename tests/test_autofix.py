@@ -15,11 +15,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                    "config", "includes.chroot", "usr", "local", "bin"))
 
 import importlib.util
+from importlib.machinery import SourceFileLoader
 
 def load_module(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
+    # neuros-* scripts have no .py extension, so spec_from_file_location can't
+    # infer a loader on its own (it returns None) -- pass one explicitly.
+    loader = SourceFileLoader(name, path)
+    spec = importlib.util.spec_from_loader(name, loader)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    loader.exec_module(module)
     return module
 
 autofix_path = os.path.join(os.path.dirname(__file__), "..",
