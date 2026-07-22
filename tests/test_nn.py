@@ -239,6 +239,95 @@ class TestNNRealFunctions(unittest.TestCase):
         self.assertIn("Directory contents:", ctx)
 
 
+class TestNNContextAwareness(unittest.TestCase):
+    """Test nn's opt-in system-wide context awareness (window title,
+    clipboard, recent files). Must default to off when unset or missing."""
+
+    def setUp(self):
+        self.nn = load_nn()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def test_context_defaults_off_when_config_missing(self):
+        with patch.object(self.nn, "CONFIG_PATH", os.path.join(self.tmpdir, "nope.conf")):
+            settings = self.nn.get_context_config()
+        self.assertEqual(settings, {
+            "window_title": False, "clipboard": False, "recent_files": False
+        })
+
+    def test_context_defaults_off_when_section_absent(self):
+        config_path = os.path.join(self.tmpdir, "llm.conf")
+        with open(config_path, "w") as f:
+            f.write('[llm]\nmodel = "mistral"\n')
+        with patch.object(self.nn, "CONFIG_PATH", config_path):
+            settings = self.nn.get_context_config()
+        self.assertFalse(any(settings.values()))
+
+    def test_context_reads_explicit_opt_in(self):
+        config_path = os.path.join(self.tmpdir, "llm.conf")
+        with open(config_path, "w") as f:
+            f.write('[llm]\nmodel = "mistral"\n[context]\nwindow_title = true\nclipboard = false\nrecent_files = true\n')
+        with patch.object(self.nn, "CONFIG_PATH", config_path):
+            settings = self.nn.get_context_config()
+        self.assertEqual(settings, {
+            "window_title": True, "clipboard": False, "recent_files": True
+        })
+
+    def test_get_system_context_excludes_opt_in_sources_by_default(self):
+        config_path = os.path.join(self.tmpdir, "nope.conf")
+        with patch.object(self.nn, "CONFIG_PATH", config_path):
+            ctx = self.nn.get_system_context()
+        self.assertNotIn("Active window:", ctx)
+        self.assertNotIn("Clipboard contents:", ctx)
+        self.assertNotIn("Recently modified files:", ctx)
+
+    def test_get_system_context_includes_window_title_when_enabled(self):
+        config_path = os.path.join(self.tmpdir, "llm.conf")
+        with open(config_path, "w") as f:
+            f.write('[context]\nwindow_title = true\n')
+        with patch.object(self.nn, "CONFIG_PATH", config_path), \
+             patch.object(self.nn, "get_active_window_title", return_value="my-terminal"):
+            ctx = self.nn.get_system_context()
+        self.assertIn("Active window: my-terminal", ctx)
+
+    def test_get_active_window_title_handles_missing_tool(self):
+        with patch("subprocess.check_output", side_effect=FileNotFoundError):
+            self.assertEqual(self.nn.get_active_window_title(), "")
+
+    def test_get_clipboard_contents_handles_missing_tool(self):
+        with patch("subprocess.check_output", side_effect=FileNotFoundError):
+            self.assertEqual(self.nn.get_clipboard_contents(), "")
+
+    def test_get_recent_files_handles_find_failure(self):
+        with patch("subprocess.run", side_effect=Exception("boom")):
+            self.assertEqual(self.nn.get_recent_files(), [])
+
+
+class TestTrayModelSwitcher(unittest.TestCase):
+    """Test the tray's model-switcher menu.
+    AppIndicator3 isn't importable in this sandbox (no display/indicator
+    lib), so this validates source content the same way the rest of the
+    suite validates the tray, rather than instantiating Gtk objects."""
+
+    def setUp(self):
+        tray_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), '..',
+            'config', 'includes.chroot', 'usr', 'local', 'bin', 'neuros-tray'
+        )
+        with open(tray_path) as f:
+            self.content = f.read()
+
+    def test_has_model_switcher_menu_item(self):
+        self.assertIn("Switch Model", self.content)
+        self.assertIn("model_submenu", self.content)
+
+    def test_reuses_neuros_model_cli_for_switching(self):
+        self.assertIn('"neuros-model", "switch"', self.content)
+
+    def test_rebuilds_submenu_from_installed_models(self):
+        self.assertIn("def on_model_menu_open", self.content)
+        self.assertIn("check_ollama_status", self.content)
+
+
 class TestServiceFile(unittest.TestCase):
     """Test neuros-llm.service correctness."""
 

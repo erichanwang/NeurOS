@@ -32,6 +32,64 @@ def get_model():
         pass
     return DEFAULT_MODEL
 
+def get_context_config():
+    """Read opt-in system-context settings from the [context] section of
+    llm.conf. Every source defaults to False (off) unless the config
+    explicitly turns it on, including when the section is missing entirely."""
+    settings = {"window_title": False, "clipboard": False, "recent_files": False}
+    section = None
+    try:
+        with open(CONFIG_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('['):
+                    section = line.strip('[]').strip()
+                    continue
+                if section == "context" and '=' in line:
+                    key, val = line.split('=', 1)
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'").lower()
+                    if key in settings:
+                        settings[key] = val in ("true", "1", "yes", "on")
+    except:
+        pass
+    return settings
+
+def get_active_window_title():
+    """Return the title of the focused window via xdotool, if installed.
+    Local only: never sent anywhere but the local Ollama prompt."""
+    try:
+        out = subprocess.check_output(
+            ["xdotool", "getactivewindow", "getwindowname"],
+            stderr=subprocess.DEVNULL, text=True, timeout=2).strip()
+        return out
+    except:
+        return ""
+
+def get_clipboard_contents():
+    """Return current clipboard text via xclip or xsel, if installed."""
+    for cmd in (["xclip", "-selection", "clipboard", "-o"],
+                ["xsel", "--clipboard", "--output"]):
+        try:
+            out = subprocess.check_output(
+                cmd, stderr=subprocess.DEVNULL, text=True, timeout=2)
+            return out[:2000]
+        except:
+            continue
+    return ""
+
+def get_recent_files(limit=10):
+    """Return paths of files under $HOME modified in the last 7 days."""
+    home = os.path.expanduser("~")
+    try:
+        result = subprocess.run(
+            ["find", home, "-maxdepth", "3", "-type", "f",
+             "-newermt", "-7 days", "-not", "-path", "*/.*"],
+            capture_output=True, text=True, timeout=5)
+        return [f for f in result.stdout.strip().split("\n") if f][:limit]
+    except:
+        return []
+
 def get_system_context():
     ctx = [f"OS: NeurOS (Ubuntu 24.04)", f"CWD: {os.getcwd()}"]
     try:
@@ -57,6 +115,22 @@ def get_system_context():
             ctx.append(f"Uncommitted changes (git diff HEAD):\n{diff}")
     except:
         pass
+
+    # Opt-in system-wide context. Off by default; see [context] in llm.conf.
+    settings = get_context_config()
+    if settings["window_title"]:
+        title = get_active_window_title()
+        if title:
+            ctx.append(f"Active window: {title}")
+    if settings["clipboard"]:
+        clip = get_clipboard_contents()
+        if clip.strip():
+            ctx.append(f"Clipboard contents:\n{clip}")
+    if settings["recent_files"]:
+        recents = get_recent_files()
+        if recents:
+            ctx.append(f"Recently modified files: {', '.join(recents)}")
+
     return "\n".join(ctx)
 
 def read_readme_if_present():
