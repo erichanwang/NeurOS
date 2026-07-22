@@ -75,5 +75,32 @@ class TestConfigRoundTrip(unittest.TestCase):
             self.assertEqual(self.m.get_current_model(), "mistral")
 
 
+class TestBenchmarkTimeout(unittest.TestCase):
+    """CPU inference of even a 1B model can take well over 10s;
+    api_request must accept a longer timeout for generate calls
+    or `neuros-model benchmark` spuriously reports 'timed out'."""
+
+    def setUp(self):
+        self.m = load_neuros_model()
+
+    def test_api_request_accepts_custom_timeout(self):
+        import inspect
+        params = inspect.signature(self.m.api_request).parameters
+        self.assertIn("timeout", params)
+        self.assertEqual(params["timeout"].default, 10)
+
+    def test_benchmark_uses_longer_timeout_for_generate(self):
+        with patch.object(self.m, "api_request", return_value=None) as mock_req:
+            self.m.benchmark_model("qwen2.5:0.5b")
+        _, kwargs = mock_req.call_args
+        self.assertEqual(kwargs.get("timeout"), 300)
+
+    def test_compare_uses_longer_timeout_for_generate(self):
+        with patch.object(self.m, "api_request", return_value=None) as mock_req:
+            self.m.compare_models(["qwen2.5:0.5b"])
+        _, kwargs = mock_req.call_args
+        self.assertEqual(kwargs.get("timeout"), 300)
+
+
 if __name__ == "__main__":
     unittest.main()

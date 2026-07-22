@@ -25,7 +25,7 @@ import textwrap
 OLLAMA_URL = "http://localhost:11434/api"
 CONFIG_PATH = os.path.expanduser("~/.config/neuros/llm.conf")
 
-def api_request(endpoint, method="GET", data=None):
+def api_request(endpoint, method="GET", data=None, timeout=10):
     """Make a request to Ollama API."""
     import urllib.request
 
@@ -36,7 +36,7 @@ def api_request(endpoint, method="GET", data=None):
     req.get_method = lambda: method
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         print(f"Error: HTTP {e.code} - {e.reason}")
@@ -221,7 +221,7 @@ def benchmark_model(name=None, prompt="Explain quantum computing in one paragrap
     }
 
     start = time.time()
-    result = api_request("generate", method="POST", data=data)
+    result = api_request("generate", method="POST", data=data, timeout=300)
     elapsed = time.time() - start
 
     if not result:
@@ -253,7 +253,7 @@ def compare_models(models, prompt="Write a haiku about Linux."):
         }
 
         start = time.time()
-        result = api_request("generate", method="POST", data=data)
+        result = api_request("generate", method="POST", data=data, timeout=300)
         elapsed = time.time() - start
 
         if result:
