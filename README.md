@@ -30,20 +30,41 @@ nn -i                                    # interactive chat mode
 `Ctrl+Space` in a terminal opens `nn` inline. It picks up the current
 directory and git branch, and can read files you point it at.
 
+`nn` can optionally include system-wide context — the active window
+title, clipboard contents, and recently modified files under `$HOME` —
+in the prompt it sends to Ollama. **All three are off by default.** They
+are enabled per-source in `~/.config/neuros/llm.conf` under `[context]`:
+
+```ini
+[context]
+window_title = false
+clipboard = false
+recent_files = false
+```
+
+Set any of these to `true` to opt in. Whatever is read is only ever
+included in the prompt sent to Ollama on `localhost:11434`; nothing is
+sent anywhere else. Window title reads `xdotool` if installed, clipboard
+reads `xclip`/`xsel` if installed, and recent files uses `find` scoped to
+`$HOME` (top 3 directory levels, last 7 days, dotfiles excluded).
+
 ### System tray applet
 
 A GTK3 + AppIndicator tray icon showing model status and RAM usage,
-with a quick-ask box and a pause/resume control for the LLM daemon. The
-pause/resume action goes through a scoped polkit rule
-(`etc/polkit-1/rules.d/49-neuros-llm.rules`) so it doesn't need a
-password prompt or run the tray process as root.
+with a quick-ask box, a "Switch Model" submenu, and a pause/resume
+control for the LLM daemon. The model submenu lists installed models
+(radio items, current default checked) and switches by shelling out to
+`neuros-model switch <name>` — the tray doesn't reimplement any of
+`neuros-model`'s logic. The pause/resume action goes through a scoped
+polkit rule (`etc/polkit-1/rules.d/49-neuros-llm.rules`) so it doesn't
+need a password prompt or run the tray process as root.
 
 ### Model management (`neuros-model`)
 
 A CLI for listing, pulling, removing, switching, benchmarking, and
 comparing installed models (`neuros-model list/pull/remove/switch/info/
-search/benchmark/compare`). There is no GUI or tray integration for this
-yet, only the CLI.
+search/benchmark/compare`). The system tray's "Switch Model" submenu is
+a thin GUI over this CLI (see above).
 
 ### MCP server (`neuros-mcp`)
 
@@ -73,7 +94,7 @@ GNOME 46 with a dark theme, zsh with oh-my-zsh (git, docker, fzf,
 autosuggestions plugins), Neovim with LSP and fzf, and btop/ripgrep/bat/
 eza pre-installed.
 
-## Hardware requirements
+## Hardware Requirements
 
 | Spec    | Minimum         | Recommended            |
 |---------|-----------------|-------------------------|
@@ -84,7 +105,31 @@ eza pre-installed.
 
 A quantized 7B model is roughly 4 GB. The full ISO is around 7 to 8 GB.
 
-## Building the ISO
+## Benchmarks
+
+Real numbers from `neuros-model benchmark`, run against a live Ollama
+0.x instance on the prompt "Explain quantum computing in one paragraph.":
+
+| Model          | Size   | Speed (tok/s) | Hardware                          |
+|----------------|--------|---------------|------------------------------------|
+| qwen2.5:0.5b   | 397 MB | 18–19.5       | 16-core x86_64 CPU, no GPU (3 runs) |
+| llama3.2:1b    | 1.3 GB | 7.7–8.2       | 16-core x86_64 CPU, no GPU (3 runs) |
+
+These were measured in a CPU-only sandboxed VM, which is not the
+hardware NeurOS recommends (see [Hardware Requirements](#hardware-requirements));
+a GPU with 6GB+ VRAM will be substantially faster. Reproduce with:
+
+```sh
+neuros-model pull qwen2.5:0.5b
+neuros-model benchmark qwen2.5:0.5b
+```
+
+The default model (`mistral`, 7B) was not benchmarked here — pulling it
+requires several GB and minutes of download that weren't available in
+this environment. Run the command above with `mistral` on real target
+hardware to get that number.
+
+## Building from Source (the ISO)
 
 ```sh
 sudo apt update
@@ -172,13 +217,18 @@ Past MVP:
 - MCP server: done. `neuros-mcp` implements `initialize`/`tools-list`/
   `tools-call`/`resources` over HTTP and JSON-RPC, verified end-to-end
   against a live Ollama instance.
-- Model switcher: the CLI is implemented and tested
-  (`neuros-model list/pull/remove/switch/info/search/benchmark/compare`);
-  there's no GUI or tray integration for it yet.
+- Model switcher: done, CLI and tray. `neuros-model` implements
+  `list/pull/remove/switch/info/search/benchmark/compare`, and the
+  system tray now has a "Switch Model" submenu that shells out to
+  `neuros-model switch` rather than reimplementing it.
+- System-wide context awareness: done, opt-in. `nn` can include the
+  active window title, clipboard contents, and recently modified files
+  under `$HOME` in its prompts, each gated behind its own `false`-by-
+  default setting in `~/.config/neuros/llm.conf`'s `[context]` section.
+  Nothing is transmitted anywhere but the local Ollama prompt.
 - GUI chat application: a local browser-based chat UI exists
   (`neuros-chat`), not a native Tauri app.
-- Still open: system-wide context awareness (open apps, clipboard,
-  recent files), voice input and output, a fine-tuning pipeline, and
+- Still open: voice input and output, a fine-tuning pipeline, and
   ARM/CUDA builds.
 
 Building and booting the actual ISO requires a full Ubuntu 24.04 host
