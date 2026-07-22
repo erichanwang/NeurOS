@@ -12,7 +12,7 @@ Usage:
   neuros-watch --command "echo changed" --path ./src   Run custom command
 """
 
-import sys, os, json, subprocess, argparse, time, threading, fnmatch
+import sys, os, json, subprocess, argparse, time, threading, fnmatch, shlex
 from urllib.request import Request, urlopen
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -83,15 +83,19 @@ class FileWatcher:
 
     def lint_file(self, filepath):
         ext = os.path.splitext(filepath)[1]
+        # filepath comes from the filesystem (whatever a watched directory
+        # contains), so it must be quoted before landing in a shell string -
+        # otherwise a filename like "x.py; rm -rf ~" runs as two commands.
+        quoted = shlex.quote(filepath)
         cmd = None
         if ext == '.py':
-            cmd = f"python3 -m py_compile {filepath} && echo OK"
+            cmd = f"python3 -m py_compile {quoted} && echo OK"
         elif ext in ('.js', '.jsx', '.ts', '.tsx'):
-            cmd = f"npx eslint {filepath} 2>/dev/null || echo lint-not-installed"
+            cmd = f"npx eslint {quoted} 2>/dev/null || echo lint-not-installed"
         elif ext == '.rs':
-            cmd = f"cargo check --manifest-path {filepath}/Cargo.toml 2>/dev/null || rustc --edition 2021 {filepath} --check 2>&1 | head -5"
+            cmd = f"cargo check --manifest-path {quoted}/Cargo.toml 2>/dev/null || rustc --edition 2021 {quoted} --check 2>&1 | head -5"
         elif ext == '.go':
-            cmd = f"go vet {filepath} 2>/dev/null"
+            cmd = f"go vet {quoted} 2>/dev/null"
 
         if cmd:
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
