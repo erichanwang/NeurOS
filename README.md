@@ -193,7 +193,10 @@ neuros/
 │   │   ├── usr/local/bin/
 │   │   │   ├── nn              # Terminal assistant CLI
 │   │   │   ├── neuros-tray     # System tray applet
-│   │   │   └── neuros-welcome  # First-boot welcome screen
+│   │   │   ├── neuros-model    # Model manager CLI (list/pull/switch/benchmark)
+│   │   │   ├── neuros-mcp      # MCP server (IDE/tool integration over HTTP)
+│   │   │   ├── neuros-welcome  # First-boot welcome screen
+│   │   │   └── ...             # 70+ additional neuros-* utilities (git, chat, autofix, etc.)
 │   │   ├── etc/systemd/system/
 │   │   │   └── neuros-llm.service  # Ollama daemon service
 │   │   └── etc/skel/
@@ -249,12 +252,12 @@ neuros/
 - [x] Privacy hardening (no telemetry, UFW enabled)
 
 ### Post-MVP
-- [ ] GUI chat application (Tauri)
+- [ ] GUI chat application (Tauri) — a local browser-based chat UI exists (`neuros-chat`, stdlib `http.server`, port 11435), but not a native Tauri app
 - [ ] System-wide context (open apps, clipboard, recent files)
 - [ ] Voice input / output
-- [ ] Model switcher UI
+- [ ] Model switcher UI — CLI is implemented and tested (`neuros-model list/pull/remove/switch/info/search/benchmark/compare`); no GUI/tray integration
 - [ ] Fine-tuning pipeline
-- [ ] MCP (Model Context Protocol) server
+- [x] MCP (Model Context Protocol) server — `neuros-mcp` implements initialize/tools-list/tools-call/resources over HTTP+JSON-RPC (read_file, list_directory, run_command, ask_llm, get_system_info, git_status); verified end-to-end with a live Ollama instance
 - [ ] ARM / NVIDIA CUDA builds
 
 ---
