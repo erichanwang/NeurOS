@@ -175,7 +175,7 @@ def main():
                 if remove_if_unchanged(p, fhash):
                     print(f"    🗑️  Deleted: {p}")
                 else:
-                    print(f"    ⚠️  Skipped changed or unsafe file: {p}")
+                    print(f"    Skipped changed or unsafe file: {p}")
         elif args.interactive:
             for i, p in enumerate(paths):
                 print(f"    [{i+1}] {p}")
