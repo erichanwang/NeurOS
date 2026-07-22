@@ -1,278 +1,206 @@
-# 🧠 NeurOS
+# NeurOS
 
-**Linux with a brain. Fully local. Fully yours.**
+A custom Ubuntu 24.04 LTS-based Linux distribution with a local LLM
+(Ollama plus a small Qwen or Mistral model) built into the OS as a first
+class feature: a terminal assistant, a system tray applet, editor
+integrations, and an MCP server, all running against a model on
+`localhost`. No cloud API, no telemetry, no account.
 
-NeurOS is a custom Ubuntu 24.04 LTS-based Linux distribution with a local LLM (Ollama + Mistral 7B) baked in as a first-class OS feature. Not a chatbot you open in a browser. Not a cloud API you pay per token. An AI that lives on your machine, knows your system, and is accessible everywhere — terminal, IDE, system tray.
+## Why
 
-> **Your AI, your hardware, your data. Nothing leaves the machine.**
-
----
-
-## Why NeurOS?
-
-| Traditional AI Setup | NeurOS |
-|----------------------|--------|
-| Cloud API sends your code to external servers | 100% local — your data stays on your machine |
-| Manual setup of Ollama, models, configs | Pre-installed, pre-configured, zero setup |
-| AI feels bolted-on, separate from the OS | AI is a first-class OS feature — terminal, IDE, tray |
-| Telemetry, accounts, subscriptions required | No telemetry. No accounts. Free and open source. |
-
----
+Most "AI in your terminal" setups mean an API key, a subscription, and
+your code leaving the machine. NeurOS installs Ollama and a model at
+build time, wires them into the shell, the system tray, and your editor,
+and removes the telemetry packages Ubuntu ships by default. Everything
+runs on `localhost:11434`.
 
 ## Features
 
-### 🖥️ Terminal Assistant (`nn`)
-Press `Ctrl+Space` or type `nn "your question"` in any terminal. The AI knows your current directory, git branch, and can read files you point it to.
+### Terminal assistant (`nn`)
 
-```bash
+```sh
 nn "how do I reverse a list in Python"
-nn "what does this repo do"                    # reads README + file tree
-nn explain ./src/auth.py                       # reads and explains a file
-nn "find the bug" ./src/auth.py                # debug a file
-nn "summarize changes since last commit"       # reads git diff
-nn -i                                          # interactive chat mode
+nn "what does this repo do"              # reads README + file tree
+nn explain ./src/auth.py                 # reads and explains a file
+nn "find the bug" ./src/auth.py          # debug a file
+nn "summarize changes since last commit" # reads git diff
+nn -i                                    # interactive chat mode
 ```
 
-### 🧩 System Tray Applet
-Click the brain icon in your GNOME panel for:
-- Model status and RAM usage at a glance
-- Quick Ask — type a question without opening terminal
-- Pause/Resume the LLM daemon
-- Launch terminal assistant
+`Ctrl+Space` in a terminal opens `nn` inline. It picks up the current
+directory and git branch, and can read files you point it at.
 
-### 📝 Code Completion
-- **VS Code**: [Continue.dev](https://www.continue.dev/) pre-installed, pointing to local Ollama
-- **Neovim**: [ollama.nvim](https://github.com/nomnivore/ollama.nvim) pre-configured
-- No API keys, no internet, no telemetry
+### System tray applet
 
-### 🛡️ Privacy by Default
-- No telemetry: `ubuntu-report`, `apport`, `whoopsie`, `popularity-contest` all removed
-- UFW firewall enabled (default deny incoming)
-- VS Code telemetry disabled globally
-- All LLM inference runs on `localhost:11434` only
-- No cloud accounts, no opt-in prompts, no data collection
+A GTK3 + AppIndicator tray icon showing model status and RAM usage,
+with a quick-ask box and a pause/resume control for the LLM daemon. The
+pause/resume action goes through a scoped polkit rule
+(`etc/polkit-1/rules.d/49-neuros-llm.rules`) so it doesn't need a
+password prompt or run the tray process as root.
 
-### 🎨 Developer-Ready Desktop
-- GNOME 46 with dark theme
-- Zsh + Oh-My-Zsh with plugins (git, docker, fzf, autosuggestions)
-- Neovim with LSP, fzf, and Ollama integration
-- btop, ripgrep, bat, eza pre-installed
-- Custom keyboard shortcuts for AI features
+### Model management (`neuros-model`)
 
----
+A CLI for listing, pulling, removing, switching, benchmarking, and
+comparing installed models (`neuros-model list/pull/remove/switch/info/
+search/benchmark/compare`). There is no GUI or tray integration for this
+yet, only the CLI.
 
-## Hardware Requirements
+### MCP server (`neuros-mcp`)
 
-| Spec | Minimum | Recommended |
-|------|---------|-------------|
-| RAM | 8 GB | 16 GB+ |
-| Storage | 20 GB | 50 GB+ |
-| CPU | x86_64, 4 cores | 8+ cores |
-| GPU | Not required (CPU inference) | NVIDIA GPU w/ 6GB+ VRAM |
+Implements the Model Context Protocol over HTTP and JSON-RPC:
+`initialize`, `tools/list`, `tools/call`, and `resources/list`, with
+tools for `read_file`, `list_directory`, `run_command`, `ask_llm`,
+`get_system_info`, and `git_status`. `run_command` is checked against
+shell-metacharacter injection; see `tests/test_mcp.py`.
 
-> **Note:** Mistral 7B (quantized) is ~4 GB. The ISO is ~7-8 GB total.
+### Code completion
 
----
+VS Code ships with Continue.dev pre-installed, pointed at local Ollama.
+Neovim ships with ollama.nvim pre-configured. Neither needs an API key
+or a network connection.
 
-## Quick Start
+### Privacy hardening
 
-### 1. Download the ISO
-Download the latest ISO from [GitHub Releases](https://github.com/neuros/neuros/releases).
+`ubuntu-report`, `apport`, `whoopsie`, and `popularity-contest` are
+removed at build time. VS Code telemetry is disabled globally. UFW is
+enabled with a default-deny incoming policy. All inference happens on
+`localhost:11434`; nothing about your prompts or files leaves the
+machine.
 
-### 2. Flash to USB
+### Desktop
 
-```bash
-# Linux
-sudo dd if=live-image-amd64.hybrid.iso of=/dev/sdX bs=4M status=progress
+GNOME 46 with a dark theme, zsh with oh-my-zsh (git, docker, fzf,
+autosuggestions plugins), Neovim with LSP and fzf, and btop/ripgrep/bat/
+eza pre-installed.
 
-# Windows / macOS
-# Use balenaEtcher or Rufus
-```
+## Hardware requirements
 
-### 3. Boot and Go
-Boot from USB, and you're ready:
-```bash
-nn "hello world"                # Ask the local AI
-nn -i                           # Interactive chat
-code .                          # VS Code with AI autocomplete
-```
+| Spec    | Minimum         | Recommended            |
+|---------|-----------------|-------------------------|
+| RAM     | 8 GB            | 16 GB or more           |
+| Storage | 20 GB           | 50 GB or more           |
+| CPU     | x86_64, 4 cores | 8+ cores                |
+| GPU     | not required    | NVIDIA GPU, 6GB+ VRAM   |
 
----
+A quantized 7B model is roughly 4 GB. The full ISO is around 7 to 8 GB.
 
-## Keyboard Shortcuts
+## Building the ISO
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+Space` (in terminal) | Open `nn` inline mode |
-| `Super+A` | Quick Ask from system tray |
-| `Super+Shift+A` | Pause / Resume LLM daemon |
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────┐
-│                 NeurOS                   │
-│  ┌───────────────────────────────────┐  │
-│  │         GNOME 46 Desktop           │  │
-│  │  ┌─────────┐  ┌────────────────┐  │  │
-│  │  │ System  │  │ Terminal (nn)   │  │  │
-│  │  │ Tray    │  │ Ctrl+Space      │  │  │
-│  │  └────┬────┘  └───────┬────────┘  │  │
-│  └───────┼───────────────┼───────────┘  │
-│          │               │               │
-│  ┌───────┴───────────────┴───────────┐  │
-│  │        neuros-llm.service          │  │
-│  │    Ollama @ localhost:11434        │  │
-│  │    Model: Mistral 7B (quantized)   │  │
-│  └────────────────┬──────────────────┘  │
-│                   │                      │
-│  ┌────────────────┴──────────────────┐  │
-│  │   IDE Integration                  │  │
-│  │   VS Code + Continue.dev            │  │
-│  │   Neovim + ollama.nvim              │  │
-│  └───────────────────────────────────┘  │
-│                                          │
-│  UFW Firewall  │  No Telemetry  │  Zsh  │
-└─────────────────────────────────────────┘
-```
-
----
-
-## Building from Source
-
-### Prerequisites
-- Ubuntu 24.04 host (or VM)
-- 20 GB free disk space
-- Internet connection (for package downloads)
-
-### Build Steps
-
-```bash
-# Install build tools
+```sh
 sudo apt update
 sudo apt install -y live-build qemu-system-x86 ovmf
-
-# Clone the repo
-git clone https://github.com/neuros/neuros.git
-cd neuros
-
-# Build the ISO (20-40 minutes)
+git clone https://github.com/erichanwang/NeurOS.git
+cd NeurOS
 sudo lb build 2>&1 | tee build.log
 ```
 
-The ISO will be at `live-image-amd64.hybrid.iso`.
+This takes 20 to 40 minutes and produces `live-image-amd64.hybrid.iso`.
+Before building, `validate-build.sh` checks the repo for the kind of
+mistake that's invisible until boot, most notably scripts and hooks
+losing their executable bit in a fresh git clone (git tracks the mode
+bit, and a mis-tracked script silently fails to run on first boot even
+though the build itself succeeds).
 
-### Test in VM
-
-```bash
-qemu-system-x86_64 \
-  -m 8192 \
-  -smp 4 \
-  -cdrom live-image-amd64.hybrid.iso \
-  -boot d \
-  -vga virtio \
-  -display sdl
+```sh
+./validate-build.sh
 ```
 
----
+Test the ISO in a VM before writing it to real hardware:
 
-## Project Structure
+```sh
+qemu-system-x86_64 -m 8192 -smp 4 -cdrom live-image-amd64.hybrid.iso \
+  -boot d -vga virtio -display sdl
+```
+
+## Project structure
 
 ```
-neuros/
+NeurOS/
 ├── config/
 │   ├── hooks/live/
-│   │   ├── 0100-install-ollama.hook.chroot     # Install Ollama + pull Mistral
-│   │   ├── 0200-install-vscode.hook.chroot     # VS Code + Continue.dev
-│   │   ├── 0300-configure-gnome.hook.chroot    # GNOME dark theme, dock, fonts
-│   │   ├── 0400-remove-telemetry.hook.chroot   # Privacy hardening
-│   │   └── 0500-configure-system.hook.chroot   # UFW, zsh, hostname
+│   │   ├── 0100-install-ollama.hook.chroot
+│   │   ├── 0200-install-vscode.hook.chroot
+│   │   ├── 0300-configure-gnome.hook.chroot
+│   │   ├── 0400-remove-telemetry.hook.chroot
+│   │   └── 0500-configure-system.hook.chroot
 │   ├── includes.chroot/
 │   │   ├── usr/local/bin/
-│   │   │   ├── nn              # Terminal assistant CLI
-│   │   │   ├── neuros-tray     # System tray applet
-│   │   │   ├── neuros-model    # Model manager CLI (list/pull/switch/benchmark)
-│   │   │   ├── neuros-mcp      # MCP server (IDE/tool integration over HTTP)
-│   │   │   ├── neuros-welcome  # First-boot welcome screen
-│   │   │   └── ...             # 70+ additional neuros-* utilities (git, chat, autofix, etc.)
+│   │   │   ├── nn              # terminal assistant CLI
+│   │   │   ├── neuros-tray     # system tray applet
+│   │   │   ├── neuros-model    # model manager CLI
+│   │   │   ├── neuros-mcp      # MCP server
+│   │   │   ├── neuros-welcome  # first-boot welcome screen
+│   │   │   └── ...             # 70+ additional neuros-* utilities
 │   │   ├── etc/systemd/system/
-│   │   │   └── neuros-llm.service  # Ollama daemon service
+│   │   │   └── neuros-llm.service
+│   │   ├── etc/polkit-1/rules.d/
+│   │   │   └── 49-neuros-llm.rules
 │   │   └── etc/skel/
-│   │       ├── .zshrc                  # Zsh config with nn aliases
-│   │       ├── .config/neuros/llm.conf # NeurOS config
-│   │       ├── .config/nvim/init.vim   # Neovim + ollama.nvim
-│   │       ├── .continue/config.json   # Continue.dev config
-│   │       └── .config/autostart/      # GNOME autostart entries
+│   │       ├── .zshrc
+│   │       ├── .config/neuros/llm.conf
+│   │       ├── .config/nvim/init.vim
+│   │       └── .continue/config.json
 │   └── package-lists/
-│       ├── neuros.list.chroot      # Packages to install
-│       └── remove.list.chroot      # Telemetry packages to remove
-├── docs/
-│   ├── PRD.md
-│   ├── MVP.md
-│   └── INSTRUCTIONS.md
+│       ├── neuros.list.chroot
+│       └── remove.list.chroot
+├── tests/
 └── README.md
 ```
 
----
+## Tech stack
 
-## Tech Stack
+Ubuntu 24.04 LTS, GNOME 46, Ollama, a quantized 7B model by default, a
+Python 3 terminal assistant, a Python 3 + GTK3 + AppIndicator tray
+applet, and `live-build` for the ISO itself.
 
-- **Base OS**: Ubuntu 24.04 LTS (Noble Numbat)
-- **Desktop**: GNOME 46
-- **LLM Runtime**: Ollama
-- **Default Model**: Mistral 7B (quantized, ~4 GB)
-- **Terminal Assistant**: Python 3 CLI
-- **System Tray**: Python 3 + GTK3 + AppIndicator
-- **Config**: TOML / JSON / systemd unit files
-- **Build**: live-build
+## What NeurOS is not
 
----
-
-## What NeurOS Is NOT
-
-- ❌ A cloud API wrapper — everything runs locally
-- ❌ A chatbot app — AI is integrated at the OS level
-- ❌ A model trainer — for inference only
-- ❌ A replacement for ChatGPT/Claude for everything — 7B models are capable but not GPT-4 class
-- ❌ An Android/ARM distro — x86_64 only for MVP
-
----
+It isn't a wrapper around a cloud API; every model call stays on
+`localhost`. It isn't a chatbot you open in a browser tab, though
+`neuros-chat` provides an optional local browser UI on port 11435. It
+doesn't train models, only runs inference on them. It targets x86_64
+only; there's no ARM build.
 
 ## Roadmap
 
-### MVP (Current)
-- [x] Bootable ISO based on Ubuntu 24.04
-- [x] Ollama + Mistral 7B pre-installed
-- [x] `nn` terminal assistant with file/context awareness
-- [x] System tray applet
-- [x] VS Code + Continue.dev integration
-- [x] Neovim + ollama.nvim integration
-- [x] Privacy hardening (no telemetry, UFW enabled)
+MVP (all present and covered by `validate-build.sh` and the test suite):
+bootable ISO, Ollama with a default model pre-installed, the `nn`
+terminal assistant, the system tray applet, VS Code and Neovim
+integration, and privacy hardening.
 
-### Post-MVP
-- [ ] GUI chat application (Tauri) — a local browser-based chat UI exists (`neuros-chat`, stdlib `http.server`, port 11435), but not a native Tauri app
-- [ ] System-wide context (open apps, clipboard, recent files)
-- [ ] Voice input / output
-- [ ] Model switcher UI — CLI is implemented and tested (`neuros-model list/pull/remove/switch/info/search/benchmark/compare`); no GUI/tray integration
-- [ ] Fine-tuning pipeline
-- [x] MCP (Model Context Protocol) server — `neuros-mcp` implements initialize/tools-list/tools-call/resources over HTTP+JSON-RPC (read_file, list_directory, run_command, ask_llm, get_system_info, git_status); verified end-to-end with a live Ollama instance
-- [ ] ARM / NVIDIA CUDA builds
+Past MVP:
+- MCP server: done. `neuros-mcp` implements `initialize`/`tools-list`/
+  `tools-call`/`resources` over HTTP and JSON-RPC, verified end-to-end
+  against a live Ollama instance.
+- Model switcher: the CLI is implemented and tested
+  (`neuros-model list/pull/remove/switch/info/search/benchmark/compare`);
+  there's no GUI or tray integration for it yet.
+- GUI chat application: a local browser-based chat UI exists
+  (`neuros-chat`), not a native Tauri app.
+- Still open: system-wide context awareness (open apps, clipboard,
+  recent files), voice input and output, a fine-tuning pipeline, and
+  ARM/CUDA builds.
 
----
+Building and booting the actual ISO requires a full Ubuntu 24.04 host
+with `live-build`, which this repo's automated checks don't attempt;
+`validate-build.sh` and the Python test suite cover everything that can
+be verified without producing and booting an image.
+
+## Testing
+
+```sh
+python3 tests/test_nn.py
+python3 tests/test_autofix.py
+python3 tests/test_model.py
+python3 tests/test_mcp.py
+./validate-build.sh
+```
 
 ## Contributing
 
-NeurOS is open source. Contributions welcome!
-
-1. Fork the repo
-2. Create a feature branch
-3. Make your changes
-4. Submit a PR with a clear description
-
----
+Fork the repo, create a feature branch, and submit a pull request with
+a clear description of the change.
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE) for details.
+GPL-3.0. See [LICENSE](LICENSE).
