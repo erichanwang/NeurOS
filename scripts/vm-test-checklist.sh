@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vm-test-checklist.sh — Run this inside the NeurOS VM to verify everything works.
+# vm-test-checklist.sh - Run this inside the NeurOS VM to verify everything works.
 #
 # Usage (inside the VM):
 #   chmod +x vm-test-checklist.sh

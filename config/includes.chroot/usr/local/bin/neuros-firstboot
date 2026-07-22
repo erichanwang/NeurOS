@@ -1,5 +1,5 @@
 #!/bin/bash
-# first-boot.sh — NeurOS first-boot setup
+# first-boot.sh - NeurOS first-boot setup
 # Runs on first login to configure user environment and apply settings.
 # Installed at /usr/local/bin/neuros-firstboot and triggered by systemd user service.
 

@@ -144,7 +144,7 @@ def watch_file(trigger):
             except OSError:
                 if on_delete:
                     execute_action(trigger)
-                    # Path gone — stop watching
+                    # Path gone - stop watching
                     break
                 time.sleep(5)
                 continue

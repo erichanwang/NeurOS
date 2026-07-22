@@ -1,6 +1,6 @@
 neuros (1.0.0) noble; urgency=medium
 
-  * Initial release of NeurOS — Ubuntu 24.04 LTS with local LLM integration.
+  * Initial release of NeurOS - Ubuntu 24.04 LTS with local LLM integration.
   * Core tools: nn (terminal assistant), neuros-tray, neuros-welcome
   * Build system: live-build configs, hooks, package lists
   * AI features: neuros-chat (web GUI), neuros-model (model manager)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — NeurOS ISO Build Automation
+# build.sh - NeurOS ISO Build Automation
 # Automates the full build pipeline from clean checkout to bootable ISO.
 #
 # Usage:

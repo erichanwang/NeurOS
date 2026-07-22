@@ -94,10 +94,10 @@ Include:
 {content[:8000]}
 
 Provide:
-## Purpose — what this project does
-## Architecture — key components
-## Dependencies — what it uses
-## Entry Points — how to run/use it"""
+## Purpose - what this project does
+## Architecture - key components
+## Dependencies - what it uses
+## Entry Points - how to run/use it"""
     else:
         prompt = f"""Summarize this content. Title: {title}
 

@@ -5,7 +5,7 @@ set -e
 
 echo "[NeurOS] Installing NeurOS tools..."
 
-# No additional Python dependencies needed — all tools use stdlib
+# No additional Python dependencies needed - all tools use stdlib
 
 # Make all neuros tools executable
 NEUROS_TOOLS=(

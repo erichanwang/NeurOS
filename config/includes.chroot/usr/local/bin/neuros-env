@@ -370,7 +370,7 @@ def _decrypt_value(encrypted_b64, key):
             except UnicodeDecodeError:
                 return None
     else:
-        # Legacy v1 XOR ciphertexts (no prefix) — try simple XOR
+        # Legacy v1 XOR ciphertexts (no prefix) - try simple XOR
         try:
             result = bytearray()
             for i, b in enumerate(raw):

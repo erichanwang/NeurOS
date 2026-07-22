@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate-build.sh — Pre-build validation of all NeurOS component files.
+# validate-build.sh - Pre-build validation of all NeurOS component files.
 # Run this BEFORE building the ISO to catch configuration errors early.
 #
 # Usage:

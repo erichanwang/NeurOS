@@ -217,7 +217,7 @@ class MCPServer(BaseHTTPRequestHandler):
         cmd = args.get("command", "")
         timeout = args.get("timeout", 30)
         try:
-            # Use shlex.split for safe argument parsing — no shell injection
+            # Use shlex.split for safe argument parsing - no shell injection
             result = subprocess.run(
                 shlex.split(cmd), capture_output=True, text=True, timeout=timeout
             )

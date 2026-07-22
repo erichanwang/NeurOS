@@ -15,15 +15,15 @@ Description: NeurOS AI-powered tools and utilities
  with local LLM integration (Ollama + Mistral 7B) baked in.
  .
  This package contains the core NeurOS command-line tools:
-  * nn — Terminal AI assistant with file/context awareness
-  * neuros-chat — Local web chat GUI (Flask + HTML/CSS/JS)
-  * neuros-model — Model manager (list, pull, switch, benchmark)
-  * neuros-git — AI-powered git assistant (commits, reviews, PRs)
-  * neuros-agent — System context agent (clipboard, windows, RAG)
-  * neuros-snippets — Code snippet manager with AI search
-  * neuros-voice — Speech-to-text input
-  * neuros-speak — Text-to-speech output
-  * neuros-mcp — Model Context Protocol server
+  * nn - Terminal AI assistant with file/context awareness
+  * neuros-chat - Local web chat GUI (Flask + HTML/CSS/JS)
+  * neuros-model - Model manager (list, pull, switch, benchmark)
+  * neuros-git - AI-powered git assistant (commits, reviews, PRs)
+  * neuros-agent - System context agent (clipboard, windows, RAG)
+  * neuros-snippets - Code snippet manager with AI search
+  * neuros-voice - Speech-to-text input
+  * neuros-speak - Text-to-speech output
+  * neuros-mcp - Model Context Protocol server
 
 Package: neuros-desktop
 Architecture: all
