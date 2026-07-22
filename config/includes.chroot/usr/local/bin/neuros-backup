@@ -182,7 +182,20 @@ def restore_backup(backup_id, target_dir):
     os.makedirs(target_dir, exist_ok=True)
     print(f"Restoring {entry['archive']} to {target_dir}...")
     with tarfile.open(archive_path, "r:gz") as tar:
-        tar.extractall(target_dir)
+        target_root = os.path.realpath(target_dir)
+        members = tar.getmembers()
+        for member in members:
+            member_path = os.path.realpath(os.path.join(target_root, member.name))
+            if os.path.commonpath((target_root, member_path)) != target_root:
+                print(f"Refusing unsafe archive member: {member.name}")
+                return
+            if member.issym() or member.islnk():
+                link_target = os.path.realpath(os.path.join(
+                    os.path.dirname(member_path), member.linkname))
+                if os.path.commonpath((target_root, link_target)) != target_root:
+                    print(f"Refusing unsafe archive link: {member.name}")
+                    return
+        tar.extractall(target_root, members=members)
     print(f"Restored {entry['files']} files to {target_dir}")
 
 

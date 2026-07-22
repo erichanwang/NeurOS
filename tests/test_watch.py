@@ -83,6 +83,11 @@ class TestLintFileInjection(unittest.TestCase):
         # boundaries either.
         result = self._watcher().lint_file("my file.py")
 
+    def test_quotes_in_filename_still_do_not_escape(self):
+        for quote in ('"', "'"):
+            self._watcher().lint_file(f"safe{quote}quoted.py")
+        self.assertFalse(os.path.exists(MARKER))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

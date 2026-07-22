@@ -69,6 +69,23 @@ def fast_hash(filepath):
     return hashlib.md5(head + str(size).encode()).hexdigest()
 
 
+def remove_if_unchanged(filepath, expected_hash):
+    """Remove only a regular file whose identity and content are unchanged."""
+    try:
+        before = os.stat(filepath, follow_symlinks=False)
+        if not os.path.isfile(filepath) or file_hash(filepath) != expected_hash:
+            return False
+        after = os.stat(filepath, follow_symlinks=False)
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        current = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if identity != current:
+            return False
+        os.remove(filepath)
+        return True
+    except OSError:
+        return False
+
+
 def find_duplicates(directory, min_size=1):
     """Two-pass dedup: fast hash first, then full hash."""
     size_map = defaultdict(list)
@@ -155,11 +172,10 @@ def main():
 
         if args.delete:
             for p in paths[1:]:
-                try:
-                    os.remove(p)
+                if remove_if_unchanged(p, fhash):
                     print(f"    🗑️  Deleted: {p}")
-                except Exception as e:
-                    print(f"    ❌ {e}")
+                else:
+                    print(f"    ⚠️  Skipped changed or unsafe file: {p}")
         elif args.interactive:
             for i, p in enumerate(paths):
                 print(f"    [{i+1}] {p}")

@@ -448,6 +448,9 @@ def cmd_secret_remove(args):
     """Remove a secret."""
     secrets = load_secrets()
     if args.key in secrets:
+        if not args.yes and input(f"Remove secret '{args.key}'? [y/N]: ").lower() != "y":
+            print("Cancelled.")
+            return
         del secrets[args.key]
         save_secrets(secrets)
         print(f"✅ Removed: {args.key}")
@@ -597,6 +600,9 @@ def cmd_remove(args):
     """Remove a saved environment."""
     fpath = os.path.join(ENV_DIR, f"{args.name}.json")
     if os.path.exists(fpath):
+        if not args.yes and input(f"Remove environment '{args.name}'? [y/N]: ").lower() != "y":
+            print("Cancelled.")
+            return
         os.remove(fpath)
         print(f"✅ Removed: {args.name}")
     else:
@@ -632,6 +638,7 @@ def main():
     # remove
     p_remove = sub.add_parser("remove", aliases=["rm"], help="Remove saved environment")
     p_remove.add_argument("name", help="Environment name")
+    p_remove.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
     # doctor
     sub.add_parser("doctor", help="Diagnose environment issues")
@@ -657,6 +664,7 @@ def main():
 
     p_srm = p_secret_sub.add_parser("remove", aliases=["rm"], help="Remove a secret")
     p_srm.add_argument("key", help="Secret key")
+    p_srm.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
     args = parser.parse_args()
 

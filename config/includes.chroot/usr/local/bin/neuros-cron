@@ -305,6 +305,9 @@ def cmd_remove(args):
         print(f"❌ No cron found with ID: {args.id}")
         sys.exit(1)
 
+    if not args.yes and input(f"Remove cron {db['crons'][match]['id']}? [y/N]: ").lower() != "y":
+        print("Cancelled.")
+        return
     removed = db["crons"].pop(match)
     save_db(db)
     install_crontab(db)
@@ -518,6 +521,7 @@ def main():
     # remove
     p_rm = sub.add_parser("remove", aliases=["rm", "delete"], help="Remove a cron job")
     p_rm.add_argument("id", help="Cron job ID (or prefix)")
+    p_rm.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
     # edit
     p_edit = sub.add_parser("edit", help="Edit a cron job")

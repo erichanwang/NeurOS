@@ -149,6 +149,12 @@ def cmd_list(args):
 
 def cmd_remove(args):
     schedule = load_schedule()
+    if not any(s["id"] == args.id for s in schedule):
+        print(f"Schedule {args.id} not found")
+        return
+    if not args.yes and input(f"Remove schedule {args.id}? [y/N]: ").lower() != "y":
+        print("Cancelled.")
+        return
     schedule = [s for s in schedule if s["id"] != args.id]
     save_schedule(schedule)
     install_crontab(schedule)
@@ -191,6 +197,7 @@ def main():
 
     rm_p = sub.add_parser("remove", help="Remove a scheduled task")
     rm_p.add_argument("id", help="Task ID to remove")
+    rm_p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
     edit_p = sub.add_parser("edit", help="Edit a scheduled task")
     edit_p.add_argument("id", help="Task ID to edit")

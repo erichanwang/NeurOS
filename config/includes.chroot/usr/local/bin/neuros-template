@@ -23,6 +23,12 @@ TEMPLATE_DIR = os.path.expanduser("~/.local/share/neuros/templates")
 INDEX_FILE = os.path.join(TEMPLATE_DIR, "index.json")
 
 
+def _template_path(name):
+    if not name or os.path.basename(name) != name or name in (".", ".."):
+        raise ValueError("template name must be a single directory name")
+    return os.path.join(TEMPLATE_DIR, name)
+
+
 def ensure_dirs():
     os.makedirs(TEMPLATE_DIR, exist_ok=True)
     if not os.path.exists(INDEX_FILE):
@@ -66,7 +72,11 @@ def create_from_template(template_name, target_dir):
         print(f"Template '{template_name}' not found.")
         return
 
-    src = os.path.join(TEMPLATE_DIR, template_name)
+    try:
+        src = _template_path(template_name)
+    except ValueError as e:
+        print(f"Invalid template name: {e}")
+        return
     if not os.path.isdir(src):
         print(f"Template source not found: {src}")
         return
@@ -89,7 +99,11 @@ def save_as_template(name, source_dir):
         print(f"Not a directory: {source_dir}")
         return
 
-    dest = os.path.join(TEMPLATE_DIR, name)
+    try:
+        dest = _template_path(name)
+    except ValueError as e:
+        print(f"Invalid template name: {e}")
+        return
     if os.path.exists(dest):
         shutil.rmtree(dest)
     shutil.copytree(source_dir, dest, ignore=shutil.ignore_patterns(
@@ -179,9 +193,11 @@ def main():
     save_p = sub.add_parser("save", help="Save as template")
     save_p.add_argument("name", help="Template name")
     save_p.add_argument("dir", help="Source directory")
+    save_p.add_argument("--yes", "-y", action="store_true", help="Replace existing template without confirmation")
 
     rm_p = sub.add_parser("remove", help="Remove a template")
     rm_p.add_argument("name", help="Template name")
+    rm_p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
     ai_p = sub.add_parser("ai", help="AI generate template")
     ai_p.add_argument("description", help="Project description")
@@ -195,12 +211,28 @@ def main():
     elif args.cmd == "create":
         create_from_template(args.name, args.dir)
     elif args.cmd == "save":
+        try:
+            existing = _template_path(args.name)
+        except ValueError as e:
+            print(f"Invalid template name: {e}")
+            return
+        if os.path.exists(existing) and not args.yes:
+            if input(f"Replace template '{args.name}'? [y/N]: ").lower() != "y":
+                print("Cancelled.")
+                return
         save_as_template(args.name, args.dir)
     elif args.cmd == "remove":
+        try:
+            tpl_dir = _template_path(args.name)
+        except ValueError as e:
+            print(f"Invalid template name: {e}")
+            return
+        if not args.yes and input(f"Remove template '{args.name}'? [y/N]: ").lower() != "y":
+            print("Cancelled.")
+            return
         index = load_index()
         index = [t for t in index if t["name"] != args.name]
         save_index(index)
-        tpl_dir = os.path.join(TEMPLATE_DIR, args.name)
         if os.path.exists(tpl_dir):
             shutil.rmtree(tpl_dir)
         print(f"Removed: {args.name}")
