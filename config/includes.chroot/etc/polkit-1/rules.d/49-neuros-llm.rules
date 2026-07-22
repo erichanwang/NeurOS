@@ -1,0 +1,14 @@
+// Allow the active local desktop user to start/stop/restart the neuros-llm
+// service without a password prompt. Scoped to this one unit only -- it
+// does not grant control over any other systemd unit.
+//
+// Needed so neuros-tray's "Pause LLM" / "Resume LLM" menu item (which runs
+// `systemctl stop|start neuros-llm`) works as a one-click action instead of
+// prompting for an admin password every time.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "neuros-llm.service" &&
+        subject.active && subject.local) {
+        return polkit.Result.YES;
+    }
+});
