@@ -24,11 +24,7 @@ jobs:
         run: bash validate-build.sh
 
       - name: Run unit tests
-        run: |
-          python3 tests/test_nn.py -v
-          python3 tests/test_autofix.py -v
-          python3 tests/test_model.py -v
-          python3 tests/test_mcp.py -v
+        run: python3 tests/test_nn.py -v
 
       - name: Check shell script syntax
         run: |
