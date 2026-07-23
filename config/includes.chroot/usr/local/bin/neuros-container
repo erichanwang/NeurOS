@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""
+neuros-container - a container primitive built from Linux namespaces and
+cgroups v2, no runc/containerd/libcontainer involved.
+
+Isolation comes from three unshare(2) namespace groups (mount, UTS, PID,
+IPC, and network) plus an optional chroot into a rootfs directory.
+Resource limits come from a real cgroup v2 leaf: memory.max, pids.max,
+and cpu.max when the cpu controller is delegated.
+
+Usage:
+  neuros-container run [--mem SIZE] [--pids N] [--cpu WEIGHT]
+                        [--hostname NAME] [--rootfs DIR] -- CMD [ARGS...]
+  neuros-container list
+
+Namespace isolation needs either root, or (best effort, and blocked by
+default on Ubuntu 24.04+ via AppArmor's unprivileged-userns restriction)
+an unprivileged user namespace. Without either, the command still runs
+under the cgroup limits but without namespace isolation, and this tool
+says so rather than pretending otherwise.
+"""
+
+import argparse
+import os
+import re
+import sys
+import time
+
+CGROUP_ROOT = "/sys/fs/cgroup"
+
+
+def die(msg):
+    print(f"neuros-container: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def parse_size(text):
+    """Parse '128M', '1G', '512K', a bare byte count, or 'max' into cgroup
+    file syntax (a byte count string, or the literal 'max')."""
+    if text is None:
+        return None
+    text = text.strip()
+    if text.lower() == "max":
+        return "max"
+    m = re.fullmatch(r"(\d+)([KMG]?)", text, re.IGNORECASE)
+    if not m:
+        die(f"invalid size '{text}' (expected e.g. 256M, 1G, or a byte count)")
+    n = int(m.group(1))
+    mult = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}[m.group(2).upper()]
+    return str(n * mult)
+
+
+def own_cgroup_path():
+    """Absolute filesystem path of the cgroup this process currently lives
+    in, from /proc/self/cgroup (cgroup v2 always has a single '0::' line)."""
+    with open("/proc/self/cgroup") as f:
+        for line in f:
+            _, _, rel = line.strip().partition("::")
+            if rel:
+                return CGROUP_ROOT + rel
+    return CGROUP_ROOT
+
+
+def find_delegating_ancestor(wanted):
+    """Cgroup v2's 'no internal process' rule means a cgroup that already
+    holds member processes (a systemd scope or service, typically) cannot
+    itself enable subtree_control for a new child. The interactive shell
+    this tool is invoked from usually lives in exactly such a cgroup, so
+    walk up to the nearest ancestor that already delegates one of the
+    wanted controllers (a slice, ordinarily) and nest the new leaf there
+    as a sibling instead."""
+    path = own_cgroup_path()
+    wanted = set(wanted)
+    while True:
+        try:
+            with open(os.path.join(path, "cgroup.subtree_control")) as f:
+                already = set(f.read().split())
+        except OSError:
+            already = set()
+        if already & wanted:
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return path
+        path = parent
+
+
+def enable_controllers(parent, wanted):
+    """Best-effort: ask the parent cgroup to hand the given controllers
+    down to its children. Already-delegated controllers are a no-op;
+    controllers we have no permission to enable are dropped with a
+    warning rather than aborting the run."""
+    available = set()
+    try:
+        with open(os.path.join(parent, "cgroup.controllers")) as f:
+            available = set(f.read().split())
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(parent, "cgroup.subtree_control")) as f:
+            already = set(f.read().split())
+    except OSError:
+        already = set()
+
+    ready = set()
+    missing = [c for c in wanted if c in available and c not in already]
+    if missing:
+        try:
+            with open(os.path.join(parent, "cgroup.subtree_control"), "w") as f:
+                f.write(" ".join(f"+{c}" for c in missing))
+            already |= set(missing)
+        except OSError:
+            pass
+    for c in wanted:
+        if c in available and c in already:
+            ready.add(c)
+        elif c in wanted:
+            print(f"neuros-container: cgroup controller '{c}' not delegated here, "
+                  f"skipping that limit", file=sys.stderr)
+    return ready
+
+
+def make_cgroup(name, mem, pids, cpu_weight):
+    wanted = [c for c, v in (("memory", mem), ("pids", pids), ("cpu", cpu_weight)) if v]
+    parent = find_delegating_ancestor(wanted)
+    ready = enable_controllers(parent, wanted)
+
+    cg = os.path.join(parent, name)
+    os.makedirs(cg, exist_ok=True)
+
+    if mem and "memory" in ready:
+        with open(os.path.join(cg, "memory.max"), "w") as f:
+            f.write(mem)
+    if pids and "pids" in ready:
+        with open(os.path.join(cg, "pids.max"), "w") as f:
+            f.write(pids)
+    if cpu_weight and "cpu" in ready:
+        with open(os.path.join(cg, "cpu.weight"), "w") as f:
+            f.write(str(cpu_weight))
+    return cg
+
+
+def join_cgroup(cg, pid):
+    with open(os.path.join(cg, "cgroup.procs"), "w") as f:
+        f.write(str(pid))
+
+
+def cgroup_report(cg):
+    report = {}
+    for key, fname in (("memory_peak", "memory.peak"), ("pids_current", "pids.current")):
+        path = os.path.join(cg, fname)
+        if os.path.exists(path):
+            with open(path) as f:
+                report[key] = f.read().strip()
+    return report
+
+
+def try_unprivileged_userns():
+    """Best-effort unshare(CLONE_NEWUSER) with a 1:1 uid/gid map, so the
+    calling user appears as root inside the new namespace. Returns True if
+    it worked. On Ubuntu 24.04+ this is blocked by default for unconfined
+    processes (see /proc/sys/kernel/apparmor_restrict_unprivileged_userns);
+    EPERM there is expected, not a bug."""
+    try:
+        os.unshare(os.CLONE_NEWUSER)
+        uid, gid = os.getuid(), os.getgid()
+        with open("/proc/self/setgroups", "w") as f:
+            f.write("deny\n")
+        with open("/proc/self/uid_map", "w") as f:
+            f.write(f"0 {uid} 1\n")
+        with open("/proc/self/gid_map", "w") as f:
+            f.write(f"0 {gid} 1\n")
+    except OSError:
+        return False
+    return True
+
+
+def enter_namespaces():
+    """Returns 'full' if mount/uts/pid/ipc namespaces were entered, 'none'
+    if we ran with no isolation at all (insufficient privilege)."""
+    have_caps = os.geteuid() == 0
+    if not have_caps:
+        have_caps = try_unprivileged_userns()
+
+    if not have_caps:
+        print("neuros-container: no root and unprivileged user namespaces "
+              "are unavailable; running without namespace isolation "
+              "(cgroup limits above still apply)", file=sys.stderr)
+        return "none"
+
+    try:
+        os.unshare(os.CLONE_NEWNS | os.CLONE_NEWUTS | os.CLONE_NEWPID | os.CLONE_NEWIPC)
+    except OSError as e:
+        print(f"neuros-container: got a user namespace but not the rest ({e}); "
+              "running without namespace isolation (cgroup limits above still apply)",
+              file=sys.stderr)
+        return "none"
+    # hostname and rootfs are applied in the PID-1 child after the second
+    # fork below, since the UTS/mount namespaces are entered here but this
+    # process itself stays in the old PID namespace.
+    return "full"
+
+
+def run_container(args):
+    name = f"neuros-{os.getpid()}"
+    mem = parse_size(args.mem)
+    pids = args.pids
+    cg = make_cgroup(name, mem, pids, args.cpu)
+
+    pid = os.fork()
+    if pid == 0:
+        join_cgroup(cg, os.getpid())
+        mode = enter_namespaces()
+
+        if mode == "full":
+            # A second fork is required for CLONE_NEWPID: unshare() only
+            # affects children created after the call, so this process
+            # stays in the old PID namespace and the next fork's child
+            # becomes PID 1 in the new one.
+            inner = os.fork()
+            if inner == 0:
+                if args.hostname:
+                    import socket
+                    socket.sethostname(args.hostname)
+                if args.rootfs:
+                    os.chroot(args.rootfs)
+                    os.chdir("/")
+                try:
+                    os.mount(b"proc", b"/proc", b"proc", 0, b"")
+                except (AttributeError, OSError):
+                    # os.mount is only available on Python 3.13+; fall back
+                    # to mount(8), which is present on every target host.
+                    os.system("mount -t proc proc /proc")
+                os.execvp(args.cmd[0], args.cmd)
+            else:
+                _, status = os.waitpid(inner, 0)
+                os._exit(os.waitstatus_to_exitcode(status))
+        else:
+            os.execvp(args.cmd[0], args.cmd)
+        os._exit(1)
+
+    _, status = os.waitpid(pid, 0)
+    report = cgroup_report(cg)
+    try:
+        os.rmdir(cg)
+    except OSError:
+        pass
+    if report:
+        peak = report.get("memory_peak")
+        if peak:
+            print(f"neuros-container: peak memory {int(peak) / 1024 / 1024:.1f} MiB", file=sys.stderr)
+    return os.waitstatus_to_exitcode(status)
+
+
+def list_cgroups():
+    parent = own_cgroup_path()
+    found = False
+    for entry in sorted(os.listdir(parent)):
+        if entry.startswith("neuros-"):
+            found = True
+            path = os.path.join(parent, entry)
+            procs_path = os.path.join(path, "cgroup.procs")
+            n = 0
+            if os.path.exists(procs_path):
+                with open(procs_path) as f:
+                    n = len(f.read().split())
+            print(f"{entry}  ({n} process{'es' if n != 1 else ''})")
+    if not found:
+        print("no active neuros-container cgroups")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="neuros-container")
+    sub = parser.add_subparsers(dest="command")
+
+    run = sub.add_parser("run", help="run a command in a cgroup-limited, namespace-isolated child")
+    run.add_argument("--mem", help="memory limit, e.g. 256M, 1G")
+    run.add_argument("--pids", help="max number of processes/threads")
+    run.add_argument("--cpu", type=int, help="cpu.weight (1-10000, default cgroup weight is 100)")
+    run.add_argument("--hostname", help="hostname to set inside the UTS namespace")
+    run.add_argument("--rootfs", help="directory to chroot into before exec")
+    run.add_argument("cmd", nargs=argparse.REMAINDER, help="-- command and arguments to run")
+
+    sub.add_parser("list", help="list active neuros-container cgroups")
+
+    args = parser.parse_args()
+
+    if args.command == "run":
+        cmd = args.cmd
+        if cmd and cmd[0] == "--":
+            cmd = cmd[1:]
+        if not cmd:
+            die("no command given (usage: neuros-container run [opts] -- CMD [ARGS...])")
+        args.cmd = cmd
+        sys.exit(run_container(args))
+    elif args.command == "list":
+        list_cgroups()
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
