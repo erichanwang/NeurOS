@@ -74,6 +74,37 @@ tools for `read_file`, `list_directory`, `run_command`, `ask_llm`,
 `get_system_info`, and `git_status`. `run_command` is checked against
 shell-metacharacter injection; see `tests/test_mcp.py`.
 
+### Container primitive (`neuros-container`)
+
+A from-scratch container runner built directly on `unshare(2)` and
+cgroup v2, no runc/containerd/libcontainer:
+
+```sh
+neuros-container run --mem 256M --pids 64 --hostname box -- bash
+neuros-container list
+```
+
+Resource limits are real cgroup v2 accounting: `--mem` sets
+`memory.max` on a fresh leaf cgroup, `--pids` sets `pids.max`, and
+`--cpu` sets `cpu.weight` when the controller is delegated. Because a
+cgroup that already holds member processes can't enable
+`subtree_control` for children (cgroup v2's "no internal process"
+rule), the tool walks up from its own cgroup to the nearest ancestor
+that already delegates the wanted controller, so it works from an
+ordinary interactive shell without root. Verified on this machine:
+a `--mem 16M` cgroup holding a process that touches 200MB of
+`bytearray` keeps `memory.current` at the 16MB ceiling instead of
+growing past it, and a `--pids 4` cgroup stops a 20-iteration fork
+loop after 3 children (see `tests/test_container.py`).
+
+Namespace isolation (mount, UTS, PID, IPC) needs either root or an
+unprivileged user namespace; on Ubuntu 24.04+ the latter is blocked by
+default for unconfined processes
+(`kernel.apparmor_restrict_unprivileged_userns=1`). Without either,
+`neuros-container` says so on stderr and runs the command under the
+cgroup limits without namespace isolation, rather than silently
+pretending to sandbox it.
+
 ### Code completion
 
 VS Code ships with Continue.dev pre-installed, pointed at local Ollama.
@@ -174,6 +205,7 @@ NeurOS/
 │   │   │   ├── neuros-tray     # system tray applet
 │   │   │   ├── neuros-model    # model manager CLI
 │   │   │   ├── neuros-mcp      # MCP server
+│   │   │   ├── neuros-container # namespace + cgroup container runner
 │   │   │   ├── neuros-welcome  # first-boot welcome screen
 │   │   │   └── ...             # 70+ additional neuros-* utilities
 │   │   ├── etc/systemd/system/
@@ -228,6 +260,11 @@ Past MVP:
   Nothing is transmitted anywhere but the local Ollama prompt.
 - GUI chat application: a local browser-based chat UI exists
   (`neuros-chat`), not a native Tauri app.
+- Container primitive: done. `neuros-container` runs a command under a
+  real cgroup v2 leaf (memory/pids/cpu limits) and, given root or an
+  unprivileged user namespace, Linux namespace isolation, without
+  runc/containerd. See `tests/test_container.py` for the measured
+  memory-cap and pids-cap enforcement.
 - Still open: voice input and output, a fine-tuning pipeline, and
   ARM/CUDA builds.
 
@@ -243,6 +280,7 @@ python3 tests/test_nn.py
 python3 tests/test_autofix.py
 python3 tests/test_model.py
 python3 tests/test_mcp.py
+python3 tests/test_container.py
 ./validate-build.sh
 ```
 
