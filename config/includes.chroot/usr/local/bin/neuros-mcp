@@ -362,7 +362,7 @@ def main():
 
     print(f"""
 ╔══════════════════════════════════════════╗
-║       🧠 NeurOS MCP Server               ║
+║            NeurOS MCP Server             ║
 ║       Model Context Protocol v1.0         ║
 ╠══════════════════════════════════════════╣
 ║  URL:   http://{args.host}:{args.port:<5}             ║

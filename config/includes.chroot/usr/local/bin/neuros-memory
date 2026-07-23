@@ -62,7 +62,7 @@ def remember(text, importance="medium", category=None):
     memories.append(memory)
     save_memories(memories)
 
-    print(f"🧠 Remembered: {text}")
+    print(f"Remembered: {text}")
     print(f"   ID: {memory['id']} | Category: {cat} | Importance: {importance}")
 
 def recall(query, limit=10):
@@ -89,7 +89,7 @@ def recall(query, limit=10):
 
     scored.sort(key=lambda x: -x[0])
 
-    print(f"\n🧠 Recalling: {query}\n{'─'*50}")
+    print(f"\nRecalling: {query}\n{'─'*50}")
 
     for i, (score, m) in enumerate(scored[:limit]):
         age = datetime.now() - datetime.fromisoformat(m["created"])
@@ -129,9 +129,9 @@ def list_memories(category=None, importance=None):
     if importance:
         memories = [m for m in memories if m["importance"] == importance]
 
-    print(f"\n🧠 {len(memories)} memories\n{'─'*50}")
+    print(f"\n{len(memories)} memories\n{'─'*50}")
     for m in sorted(memories, key=lambda x: x["created"], reverse=True):
-        imp_indicator = {"high": "⭐", "medium": "  ", "low": "  "}.get(m["importance"], "  ")
+        imp_indicator = {"high": "*", "medium": "  ", "low": "  "}.get(m["importance"], "  ")
         print(f"{imp_indicator} [{m['category']:<12}] {m['text']}")
     print()
 
@@ -141,7 +141,7 @@ def forget(memory_id):
         if m["id"] == memory_id:
             memories.remove(m)
             save_memories(memories)
-            print(f"✅ Forgotten: {m['text']}")
+            print(f"[ok] Forgotten: {m['text']}")
             return
     print(f"Memory {memory_id} not found.")
 
@@ -163,9 +163,9 @@ def prune(days=30, keep_important=True):
             removed.append(m)
 
     save_memories(new_memories)
-    print(f"🧹 Pruned {len(removed)} old memories ({len(new_memories)} remaining)")
+    print(f"Pruned {len(removed)} old memories ({len(new_memories)} remaining)")
     for m in removed:
-        print(f"   💨 {m['text']}")
+        print(f"   {m['text']}")
 
 def summarize_memories():
     memories = load_memories()
@@ -190,7 +190,7 @@ Return a structured summary:
         req = Request(OLLAMA_URL, data=data, headers={"Content-Type": "application/json"})
         with urlopen(req, timeout=120) as resp:
             summary = json.loads(resp.read()).get("response", "")
-        print(f"\n🧠 Memory Summary\n{'─'*50}")
+        print(f"\nMemory Summary\n{'─'*50}")
         print(summary)
     except Exception as e:
         print(f"Error: {e}")

@@ -26,7 +26,7 @@ log() {
 }
 
 success() {
-    echo -e "${GREEN}[✓]${NC} $1"
+    echo -e "${GREEN}[OK]${NC} $1"
 }
 
 warn() {
@@ -34,7 +34,7 @@ warn() {
 }
 
 error() {
-    echo -e "${RED}[✗]${NC} $1"
+    echo -e "${RED}[FAIL]${NC} $1"
     exit 1
 }
 

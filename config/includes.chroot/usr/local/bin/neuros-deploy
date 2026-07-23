@@ -106,22 +106,22 @@ def deploy_docker(path, info):
     dockerfile = os.path.join(path, "Dockerfile")
     if not os.path.exists(dockerfile):
         generate_dockerfile(path, info)
-    print("🐳 Building Docker image...")
+    print("Building Docker image...")
     result = subprocess.run(
         ["docker", "build", "-t", os.path.basename(path), path],
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        print(f"  ❌ Docker build failed:\n{result.stderr[:500]}")
+        print(f"  [fail] Docker build failed:\n{result.stderr[:500]}")
         return False
-    print("  ✅ Built")
+    print("  [ok] Built")
     return True
 
 
 def deploy_ssh(host, path, info):
     name = os.path.basename(path)
     remote_path = f"/opt/{name}"
-    print(f"🚀 Deploying to {host}...")
+    print(f"Deploying to {host}...")
 
     cmds = [
         (["rsync", "-avz", "--exclude=.git", "--exclude=node_modules",
@@ -135,9 +135,9 @@ def deploy_ssh(host, path, info):
         print(f"  {desc}...")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"  ❌ {desc} failed: {result.stderr[:200]}")
+            print(f"  [fail] {desc} failed: {result.stderr[:200]}")
             return False
-        print(f"  ✅ {desc}")
+        print(f"  [ok] {desc}")
     return True
 
 
@@ -150,7 +150,7 @@ def generate_dockerfile(path, info):
     content = templates.get(info["type"], templates["node"])
     with open(os.path.join(path, "Dockerfile"), "w") as f:
         f.write(content)
-    print(f"  📄 Generated Dockerfile")
+    print(f"  Generated Dockerfile")
 
 
 def main():
@@ -182,7 +182,7 @@ def main():
         return
 
     info = detect_project(path)
-    print(f"\n📦 Detected: {info['type']} project")
+    print(f"\nDetected: {info['type']} project")
     print(f"   Build: {info['build']}")
     print(f"   Run:   {info['run']}")
     print(f"   Port:  {info['port']}")

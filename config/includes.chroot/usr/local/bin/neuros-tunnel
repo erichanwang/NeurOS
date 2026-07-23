@@ -160,7 +160,7 @@ def cmd_create(args):
         port_to_check = getattr(args, 'port', None)
 
     if port_to_check and check_port(port_to_check):
-        print(f"⚠️  Port {port_to_check} is already in use")
+        print(f"[warn] Port {port_to_check} is already in use")
         if not args.force:
             sys.exit(1)
 
@@ -182,7 +182,7 @@ def cmd_create(args):
         time.sleep(0.5)
 
         if proc.poll() is not None:
-            print(f"❌ Tunnel failed to start (exit code: {proc.returncode})")
+            print(f"[fail] Tunnel failed to start (exit code: {proc.returncode})")
             print(f"   Command: {' '.join(cmd)}")
             sys.exit(1)
 
@@ -200,16 +200,16 @@ def cmd_create(args):
         with LOCK:
             TUNNELS[tid] = proc
 
-        print(f"✅ Tunnel created: {tid}")
+        print(f"[ok] Tunnel created: {tid}")
         print(f"   Type: {args.type}")
         print(f"   PID: {proc.pid}")
         print(f"   Command: {' '.join(cmd)}")
 
     except FileNotFoundError:
-        print("❌ SSH not found. Install openssh-client.")
+        print("[fail] SSH not found. Install openssh-client.")
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"[fail] Error: {e}")
         sys.exit(1)
 
 
@@ -258,10 +258,10 @@ def cmd_kill(args):
                 if t["id"] in TUNNELS:
                     del TUNNELS[t["id"]]
 
-            print(f"✅ Killed tunnel {t['id']}: {t['command'][:60]}")
+            print(f"[ok] Killed tunnel {t['id']}: {t['command'][:60]}")
             return
 
-    print(f"❌ No tunnel found: {args.id}")
+    print(f"[fail] No tunnel found: {args.id}")
 
 
 def cmd_status(args):
@@ -337,10 +337,10 @@ def cmd_autossh(args):
         with LOCK:
             TUNNELS[tid] = proc
 
-        print(f"✅ Persistent tunnel created: {tid}")
-        print(f"   {local_port} → {remote} (autossh)")
+        print(f"[ok] Persistent tunnel created: {tid}")
+        print(f"   {local_port} -> {remote} (autossh)")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"[fail] Error: {e}")
         sys.exit(1)
 
 
@@ -365,7 +365,7 @@ def cmd_expose(args):
             "status": "active",
         })
         save_db(db)
-        print(f"✅ Tunnel: {tid} (bore)")
+        print(f"[ok] Tunnel: {tid} (bore)")
         print("   Check bore output above for the public URL.")
         return
     except Exception:
@@ -403,7 +403,7 @@ def cmd_diagnose(args):
         issues.append("SSH (port 22) is not listening locally")
 
     if not issues:
-        print("✅ No issues detected.")
+        print("[ok] No issues detected.")
         return
 
     print("Issues detected:")
@@ -414,7 +414,7 @@ def cmd_diagnose(args):
     prompt = "Diagnose these SSH tunnel issues and suggest fixes:\n" + "\n".join(issues)
     diagnosis = query_llm(prompt, "You are a networking and SSH expert. Give concise fixes.")
     if diagnosis:
-        print(f"\n🧠 AI Diagnosis:\n{diagnosis}")
+        print(f"\nAI Diagnosis:\n{diagnosis}")
 
 
 def cmd_cleanup(args):
@@ -435,7 +435,7 @@ def cmd_cleanup(args):
 
     db["tunnels"] = alive
     save_db(db)
-    print(f"✅ Cleaned {cleaned} dead tunnel(s). {len(alive)} active.")
+    print(f"[ok] Cleaned {cleaned} dead tunnel(s). {len(alive)} active.")
 
 
 def main():

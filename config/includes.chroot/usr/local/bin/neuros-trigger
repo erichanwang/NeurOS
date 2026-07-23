@@ -318,9 +318,9 @@ def cmd_watch(args):
     save_db(db)
 
     if start_trigger(trigger):
-        print(f"✅ File watcher started: {tid}")
+        print(f"[ok] File watcher started: {tid}")
         print(f"   Path: {args.path}")
-        print(f"   On: {trigger.action_on} → {trigger.action_cmd}")
+        print(f"   On: {trigger.action_on} -> {trigger.action_cmd}")
 
 
 def cmd_process(args):
@@ -336,9 +336,9 @@ def cmd_process(args):
     save_db(db)
 
     if start_trigger(trigger):
-        print(f"✅ Process watcher started: {tid}")
+        print(f"[ok] Process watcher started: {tid}")
         print(f"   Process: {args.name}")
-        print(f"   On {action_on} → {cmd}")
+        print(f"   On {action_on} -> {cmd}")
 
 
 def cmd_port(args):
@@ -351,9 +351,9 @@ def cmd_port(args):
     save_db(db)
 
     if start_trigger(trigger):
-        print(f"✅ Port watcher started: {tid}")
+        print(f"[ok] Port watcher started: {tid}")
         print(f"   Port: {args.port}")
-        print(f"   On connect → {args.cmd}")
+        print(f"   On connect -> {args.cmd}")
 
 
 def cmd_resource(args):
@@ -368,8 +368,8 @@ def cmd_resource(args):
     save_db(db)
 
     if start_trigger(trigger):
-        print(f"✅ Resource watcher started: {tid}")
-        print(f"   {args.resource} ≥ {args.threshold}% → {args.then}")
+        print(f"[ok] Resource watcher started: {tid}")
+        print(f"   {args.resource} ≥ {args.threshold}% -> {args.then}")
 
 
 def cmd_list(args):
@@ -398,10 +398,10 @@ def cmd_remove(args):
             if removed["id"] in TRIGGERS:
                 del TRIGGERS[removed["id"]]
             log_event(removed["id"], "removed")
-            print(f"✅ Removed trigger {removed['id']}: {removed['action_cmd'][:60]}")
+            print(f"[ok] Removed trigger {removed['id']}: {removed['action_cmd'][:60]}")
             return
 
-    print(f"❌ No trigger found: {args.id}")
+    print(f"[fail] No trigger found: {args.id}")
 
 
 def cmd_log(args):
@@ -439,7 +439,7 @@ def cmd_daemon(args):
         )
         trigger.fire_count = tdata.get("fire_count", 0)
         start_trigger(trigger)
-        print(f"  ▶ {trigger.id}: {trigger.type}/{trigger.action_on}")
+        print(f"  {trigger.id}: {trigger.type}/{trigger.action_on}")
 
     print("\nTriggers running. Press Ctrl+C to stop.")
 

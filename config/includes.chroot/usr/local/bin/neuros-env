@@ -137,7 +137,7 @@ def cmd_save(args):
     with open(fpath, "w") as f:
         json.dump(env, f, indent=2)
 
-    print(f"✅ Environment saved: {args.name}")
+    print(f"[ok] Environment saved: {args.name}")
     print(f"   File: {fpath}")
     print(f"   PWD: {env['pwd']}")
     if env["git_branches"]:
@@ -150,7 +150,7 @@ def cmd_load(args):
     """Restore a saved environment."""
     fpath = os.path.join(ENV_DIR, f"{args.name}.json")
     if not os.path.exists(fpath):
-        print(f"❌ Environment not found: {args.name}")
+        print(f"[fail] Environment not found: {args.name}")
         print(f"   Available: {', '.join(list_environments())}")
         sys.exit(1)
 
@@ -189,9 +189,9 @@ def cmd_load(args):
         print(f"\nExecuting {len(commands)} commands...")
         try:
             subprocess.run(["bash", "-c", script])
-            print("✅ Environment loaded.")
+            print("[ok] Environment loaded.")
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"[fail] Error: {e}")
     else:
         print(f"\nRun with --execute to apply these changes, or source:")
         print(f"  eval \"$(neuros-env load {args.name} --shell)\"")
@@ -249,7 +249,7 @@ def cmd_diff(args):
     """Show differences between saved and current environment."""
     fpath = os.path.join(ENV_DIR, f"{args.name}.json")
     if not os.path.exists(fpath):
-        print(f"❌ Environment not found: {args.name}")
+        print(f"[fail] Environment not found: {args.name}")
         sys.exit(1)
 
     with open(fpath) as f:
@@ -260,28 +260,28 @@ def cmd_diff(args):
 
     # Check PWD
     if saved.get("pwd") != current["pwd"]:
-        changes.append(f"PWD: {saved.get('pwd')} → {current['pwd']}")
+        changes.append(f"PWD: {saved.get('pwd')} -> {current['pwd']}")
 
     # Check env vars
     for key in set(list(saved.get("env_vars", {}).keys()) + list(current["env_vars"].keys())):
         old = saved["env_vars"].get(key, "(unset)")
         new = current["env_vars"].get(key, "(unset)")
         if old != new:
-            changes.append(f"${key}: {old} → {new}")
+            changes.append(f"${key}: {old} -> {new}")
 
     # Check git branches
     for repo in set(list(saved.get("git_branches", {}).keys()) + list(current["git_branches"].keys())):
         old_b = saved["git_branches"].get(repo, "?")
         new_b = current["git_branches"].get(repo, "?")
         if old_b != new_b:
-            changes.append(f"Git {repo}: {old_b} → {new_b}")
+            changes.append(f"Git {repo}: {old_b} -> {new_b}")
 
     if changes:
         print(f"Changes since {saved['timestamp'][:19]}:")
         for change in changes:
             print(f"  {change}")
     else:
-        print("✅ No changes detected.")
+        print("[ok] No changes detected.")
 
 
 def cmd_export(args):
@@ -407,14 +407,14 @@ def cmd_secret_set(args):
         k, v = args.keyvalue.split("=", 1)
         secrets[k] = _encrypt_value(v, key)
         save_secrets(secrets)
-        print(f"✅ Secret stored: {k}")
+        print(f"[ok] Secret stored: {k}")
     else:
         # Read from stdin
         k = args.keyvalue
         v = sys.stdin.read().strip()
         secrets[k] = _encrypt_value(v, key)
         save_secrets(secrets)
-        print(f"✅ Secret stored: {k} (from stdin)")
+        print(f"[ok] Secret stored: {k} (from stdin)")
 
 
 def cmd_secret_get(args):
@@ -423,12 +423,12 @@ def cmd_secret_get(args):
     key = _get_encryption_key()
 
     if args.key not in secrets:
-        print(f"❌ Secret not found: {args.key}")
+        print(f"[fail] Secret not found: {args.key}")
         sys.exit(1)
 
     decrypted = _decrypt_value(secrets[args.key], key)
     if decrypted is None:
-        print(f"❌ Failed to decrypt: {args.key}")
+        print(f"[fail] Failed to decrypt: {args.key}")
         sys.exit(1)
 
     print(decrypted, end="" if args.no_newline else "\n")
@@ -441,7 +441,7 @@ def cmd_secret_list(args):
         print("No stored secrets.")
         return
     for k in sorted(secrets.keys()):
-        print(f"  🔒 {k}")
+        print(f"  {k}")
 
 
 def cmd_secret_remove(args):
@@ -450,15 +450,15 @@ def cmd_secret_remove(args):
     if args.key in secrets:
         del secrets[args.key]
         save_secrets(secrets)
-        print(f"✅ Removed: {args.key}")
+        print(f"[ok] Removed: {args.key}")
     else:
-        print(f"❌ Not found: {args.key}")
+        print(f"[fail] Not found: {args.key}")
 
 
 # === Doctor ===
 def cmd_doctor(args):
     """Diagnose environment issues."""
-    print("🔍 NeurOS Environment Doctor")
+    print("NeurOS Environment Doctor")
     print("=" * 40)
     issues = []
 
@@ -467,7 +467,7 @@ def cmd_doctor(args):
     home_bin = os.path.expanduser("~/.local/bin")
     if home_bin not in path:
         issues.append(f"~/.local/bin not in PATH")
-        print(f"  ⚠️  ~/.local/bin not in PATH")
+        print(f"  [warn] ~/.local/bin not in PATH")
 
     # Check shell
     shell = os.getenv("SHELL", "")
@@ -480,7 +480,7 @@ def cmd_doctor(args):
         subprocess.run(["git", "--version"], capture_output=True, check=True)
     except Exception:
         issues.append("git not found")
-        print("  ⚠️  git not found")
+        print("  [warn] git not found")
 
     # Check Python
     try:
@@ -488,7 +488,7 @@ def cmd_doctor(args):
         print(f"  Python: {result.stdout.strip()}")
     except Exception:
         issues.append("python3 not found")
-        print("  ⚠️  python3 not found")
+        print("  [warn] python3 not found")
 
     # Check Ollama
     config = load_config()
@@ -496,10 +496,10 @@ def cmd_doctor(args):
         import urllib.request
         url = f"http://{config['host']}:{config['port']}/api/tags"
         urllib.request.urlopen(url, timeout=5)
-        print(f"  Ollama: ✅ running on {config['host']}:{config['port']}")
+        print(f"  Ollama: [ok] running on {config['host']}:{config['port']}")
     except Exception:
         issues.append("Ollama not reachable")
-        print(f"  ⚠️  Ollama not reachable on {config['host']}:{config['port']}")
+        print(f"  [warn] Ollama not reachable on {config['host']}:{config['port']}")
 
     # Check disk
     try:
@@ -524,9 +524,9 @@ def cmd_doctor(args):
         prompt = "Diagnose these dev environment issues and suggest fixes:\n" + "\n".join(issues)
         diagnosis = query_llm(prompt)
         if diagnosis:
-            print(f"\n🧠 Suggestions:\n{diagnosis}")
+            print(f"\nSuggestions:\n{diagnosis}")
     else:
-        print("✅ Environment looks healthy!")
+        print("[ok] Environment looks healthy!")
 
 
 def cmd_clone(args):
@@ -540,11 +540,11 @@ def cmd_clone(args):
         name = repo.rstrip("/").split("/")[-1].replace(".git", "")
         target = os.path.join(os.getcwd(), name)
 
-    print(f"Cloning {repo} → {target}")
+    print(f"Cloning {repo} -> {target}")
 
     try:
         subprocess.run(["git", "clone", repo, target], check=True)
-        print(f"✅ Cloned to {target}")
+        print(f"[ok] Cloned to {target}")
 
         # Auto-detect project type and suggest setup
         os.chdir(target)
@@ -575,7 +575,7 @@ def cmd_clone(args):
                     try:
                         subprocess.run(shlex.split(hint), cwd=target)
                     except Exception as e:
-                        print(f"  ⚠️  Failed: {e}")
+                        print(f"  [warn] Failed: {e}")
 
         # Save the environment
         env_name = os.path.basename(target)
@@ -586,10 +586,10 @@ def cmd_clone(args):
         fpath = os.path.join(ENV_DIR, f"{env_name}.json")
         with open(fpath, "w") as f:
             json.dump(env, f, indent=2)
-        print(f"\n✅ Environment saved: {env_name}")
+        print(f"\n[ok] Environment saved: {env_name}")
 
     except subprocess.CalledProcessError as e:
-        print(f"❌ Clone failed: {e}")
+        print(f"[fail] Clone failed: {e}")
         sys.exit(1)
 
 
@@ -598,9 +598,9 @@ def cmd_remove(args):
     fpath = os.path.join(ENV_DIR, f"{args.name}.json")
     if os.path.exists(fpath):
         os.remove(fpath)
-        print(f"✅ Removed: {args.name}")
+        print(f"[ok] Removed: {args.name}")
     else:
-        print(f"❌ Not found: {args.name}")
+        print(f"[fail] Not found: {args.name}")
 
 
 def main():

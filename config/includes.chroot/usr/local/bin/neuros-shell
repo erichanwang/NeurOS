@@ -94,13 +94,13 @@ def save_to_history(description, command):
         json.dump(history[-100:], f, indent=2)
 
 def interactive_mode():
-    print("🐚 NeurOS Shell Assistant — describe what you want to do")
+    print("NeurOS Shell Assistant — describe what you want to do")
     print("   Commands: 'explain <cmd>', 'history', 'safety on/off', 'exit'\n")
 
     safety = True
     while True:
         try:
-            user_input = input("🐚> ").strip()
+            user_input = input("> ").strip()
             if not user_input:
                 continue
             if user_input.lower() == 'exit':
@@ -122,9 +122,9 @@ def interactive_mode():
                 print(f"\n{explain_command(cmd)}\n")
                 continue
 
-            print("🤖 Generating...")
+            print("Generating...")
             cmd = generate_command(user_input, safety)
-            print(f"\n  💡 {cmd}\n")
+            print(f"\n  {cmd}\n")
             save_to_history(user_input, cmd)
 
             if safety:
@@ -165,7 +165,7 @@ def main():
         return
 
     cmd = generate_command(args.request, args.safety == "on")
-    print(f"\n💡 {cmd}\n")
+    print(f"\n{cmd}\n")
 
     if args.execute or args.safety == "on":
         choice = input("Execute? [y/N/e(xplain)]: ").strip().lower()

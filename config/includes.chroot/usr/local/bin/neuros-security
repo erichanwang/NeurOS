@@ -26,7 +26,7 @@ def query_ollama(prompt):
     except: return None
 
 def security_audit():
-    print("🛡️ Security Audit\n" + "=" * 50)
+    print("Security Audit\n" + "=" * 50)
     findings = []
 
     # UFW status
@@ -95,7 +95,7 @@ def security_audit():
 
     # Print findings
     for severity, finding in findings:
-        icon = {"OK": "✅", "INFO": "ℹ️ ", "WARN": "⚠️ ", "HIGH": "🔴"}
+        icon = {"OK": "[ok]", "INFO": "INFO ", "WARN": "[warn] ", "HIGH": "[red]"}
         print(f"  {icon.get(severity, '  ')} [{severity}] {finding}")
 
     # AI Summary
@@ -108,16 +108,16 @@ Be concise and actionable."""
 
     insight = query_ollama(prompt)
     if insight:
-        print(f"\n🤖 AI Summary\n{'─'*40}")
+        print(f"\nAI Summary\n{'─'*40}")
         print(insight)
 
     high_count = sum(1 for s, _ in findings if s == "HIGH")
     warn_count = sum(1 for s, _ in findings if s == "WARN")
     ok_count = sum(1 for s, _ in findings if s == "OK")
-    print(f"\n📊 {ok_count} OK | {warn_count} Warnings | {high_count} Critical")
+    print(f"\n{ok_count} OK | {warn_count} Warnings | {high_count} Critical")
 
 def ssh_hardening():
-    print("🔐 SSH Hardening Recommendations\n" + "=" * 40)
+    print("SSH Hardening Recommendations\n" + "=" * 40)
     
     if os.path.exists("/etc/ssh/sshd_config"):
         with open("/etc/ssh/sshd_config") as f:
@@ -167,11 +167,11 @@ Check for:
 - Unsafe defaults
 - Missing error handling"""
 
-    print(f"🔍 Security Review: {filepath}\n{'─'*40}")
+    print(f"Security Review: {filepath}\n{'─'*40}")
     print(query_ollama(prompt))
 
 def password_check():
-    print("🔑 Password Hygiene Check\n" + "=" * 40)
+    print("Password Hygiene Check\n" + "=" * 40)
     print("  (Checks local system only — nothing leaves this machine)\n")
 
     checks = []
@@ -205,11 +205,11 @@ def password_check():
     except: pass
 
     for s, c in checks:
-        icon = {"OK": "✅", "WARN": "⚠️", "HIGH": "🔴"}
+        icon = {"OK": "[ok]", "WARN": "[warn]", "HIGH": "[red]"}
         print(f"  {icon.get(s, '  ')} [{s}] {c}")
 
 def checklist():
-    print("🛡️ Security Best Practices Checklist\n" + "=" * 40)
+    print("Security Best Practices Checklist\n" + "=" * 40)
     items = [
         "UFW firewall enabled (sudo ufw enable)",
         "SSH key-based auth only (PasswordAuthentication no)",
@@ -226,7 +226,7 @@ def checklist():
         "No unnecessary ports exposed",
     ]
     for i, item in enumerate(items, 1):
-        print(f"  {'☐'} {i}. {item}")
+        print(f"  {'[ ]'} {i}. {item}")
 
 def main():
     parser = argparse.ArgumentParser(description="NeurOS Security Assistant")

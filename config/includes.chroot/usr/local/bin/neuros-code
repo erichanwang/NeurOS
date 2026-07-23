@@ -72,7 +72,7 @@ Requirements:
 - Follow best practices for the language
 - Return ONLY the code, no explanations."""
 
-    print(f"🤖 Generating code{lang_hint}...\n")
+    print(f"Generating code{lang_hint}...\n")
     result = query_ollama(prompt)
     print(result)
 
@@ -85,7 +85,7 @@ Requirements:
                 lines = [l for l in lines if not l.startswith("```")]
                 clean = '\n'.join(lines)
             f.write(clean)
-        print(f"\n✅ Saved to: {output}")
+        print(f"\n[ok] Saved to: {output}")
 
 def cmd_refactor(filepath):
     content = read_file(filepath)
@@ -103,7 +103,7 @@ Provide:
 3. **Refactored Code** (key sections rewritten)
 4. **Benefits** (what improves)"""
 
-    print(f"🤖 Analyzing {filepath} for refactoring...\n")
+    print(f"Analyzing {filepath} for refactoring...\n")
     print(query_ollama(prompt))
 
 def cmd_explain(filepath):
@@ -122,7 +122,7 @@ Provide:
 4. **Dependencies** (what it depends on)
 5. **Potential issues** (if any)"""
 
-    print(f"🤖 Explaining {filepath}...\n")
+    print(f"Explaining {filepath}...\n")
     print(query_ollama(prompt))
 
 def cmd_optimize(filepath):
@@ -143,7 +143,7 @@ Focus on:
 
 Provide specific, actionable suggestions with code examples."""
 
-    print(f"🤖 Optimizing {filepath}...\n")
+    print(f"Optimizing {filepath}...\n")
     print(query_ollama(prompt))
 
 def cmd_review(filepath):
@@ -165,7 +165,7 @@ Rate each category (1-10) and provide details:
 
 End with an overall score and top 3 action items."""
 
-    print(f"🤖 Reviewing {filepath}...\n")
+    print(f"Reviewing {filepath}...\n")
     print(query_ollama(prompt))
 
 def cmd_convert(filepath, target_lang):
@@ -180,7 +180,7 @@ Source ({source_lang}):
 
 Return ONLY the converted {target_lang} code. No explanations."""
 
-    print(f"🤖 Converting {source_lang} → {target_lang}...\n")
+    print(f"Converting {source_lang} -> {target_lang}...\n")
     print(query_ollama(prompt))
 
 def cmd_complete(filepath, line_num):
@@ -197,7 +197,7 @@ Context:
 
 Return ONLY the completion (what should follow). Keep it concise."""
 
-    print(f"🤖 Completing code at {filepath}:{line_num}...\n")
+    print(f"Completing code at {filepath}:{line_num}...\n")
     print(query_ollama(prompt))
 
 def cmd_test(filepath):
@@ -217,7 +217,7 @@ Requirements:
 - Include imports and setup
 - Return ONLY the test code."""
 
-    print(f"🤖 Generating tests for {filepath}...\n")
+    print(f"Generating tests for {filepath}...\n")
     result = query_ollama(prompt)
     print(result)
 
@@ -236,7 +236,7 @@ Requirements:
                 lines = [l for l in lines if not l.startswith("```")]
                 clean = '\n'.join(lines)
             f.write(clean)
-        print(f"✅ Saved: {test_ext}")
+        print(f"[ok] Saved: {test_ext}")
 
 def main():
     parser = argparse.ArgumentParser(description="NeurOS Code Assistant")

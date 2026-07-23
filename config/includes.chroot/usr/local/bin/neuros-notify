@@ -65,7 +65,7 @@ def notify(message, priority="normal", persistent=False, action=None, icon="neur
     except Exception as e:
         print(f"Notification failed: {e}", file=sys.stderr)
         # Fallback: write to terminal
-        print(f"\n🧠 [NEUROS {priority.upper()}] {display_msg}\n")
+        print(f"\n[NEUROS {priority.upper()}] {display_msg}\n")
         return False
 
 
@@ -164,8 +164,8 @@ def show_history(limit=50):
         return
     for entry in history[-limit:]:
         ts = entry["timestamp"][:19].replace("T", " ")
-        prio_marker = {"high": "🔴", "normal": "🟡", "low": "🟢"}.get(
-            entry["priority"], "⚪"
+        prio_marker = {"high": "[red]", "normal": "[yellow]", "low": "[green]"}.get(
+            entry["priority"], "[white]"
         )
         print(f"  {prio_marker} [{ts}] {entry['message'][:100]}")
 

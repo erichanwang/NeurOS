@@ -51,7 +51,7 @@ Requirements:
 
 Return ONLY the test code."""
 
-    print(f"🤖 Generating tests ({framework})...\n")
+    print(f"Generating tests ({framework})...\n")
     result = query_ollama(prompt)
     print(result)
 
@@ -66,7 +66,7 @@ Return ONLY the test code."""
             clean = result
             if clean.startswith("```"): clean = '\n'.join(l for l in clean.split('\n') if not l.startswith("```"))
             f.write(clean)
-        print(f"✅ Saved: {suggest}")
+        print(f"[ok] Saved: {suggest}")
 
 def analyze_coverage(directory):
     # Try to run pytest coverage
@@ -105,7 +105,7 @@ Provide:
 3. Three most important tests to add
 4. Overall coverage quality assessment"""
 
-    print(f"🤖 Analyzing coverage...\n")
+    print(f"Analyzing coverage...\n")
     print(query_ollama(prompt))
 
 def fix_tests(test_file):
@@ -135,7 +135,7 @@ For each failure:
 2. How to fix (specific code)
 3. The corrected test code"""
 
-    print(f"🤖 Analyzing test failures...\n")
+    print(f"Analyzing test failures...\n")
     print(query_ollama(prompt))
 
 def main():

@@ -111,7 +111,7 @@ def generate_svg(prompt, output_path, width=800, height=600):
 
     svg = query_llm(prompt_full, system)
     if not svg:
-        print("❌ AI generation failed.")
+        print("[fail] AI generation failed.")
         return False
 
     # Extract SVG if wrapped in code blocks
@@ -150,7 +150,7 @@ def generate_diagram(prompt, output_path):
 
     diagram = query_llm(full_prompt, system)
     if not diagram:
-        print("❌ AI diagram generation failed.")
+        print("[fail] AI diagram generation failed.")
         return False
 
     # Clean up code blocks
@@ -192,7 +192,7 @@ def cmd_draw(args):
             ext = ".svg"
         output = os.path.join(DRAW_DIR, f"{safe_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}{ext}")
 
-    print(f"🎨 Generating: '{prompt}'")
+    print(f"Generating: '{prompt}'")
 
     # Enhance the prompt
     enhanced = enhance_prompt(prompt, style, args.diagram)
@@ -262,11 +262,11 @@ def cmd_draw(args):
                         success = True
                         method = "Stable Diffusion"
                 except Exception as e:
-                    print(f"⚠️  SD WebUI error: {e}")
+                    print(f"[warn] SD WebUI error: {e}")
 
         if not success:
             # Fallback: generate as ASCII art + save enhanced prompt
-            print("⚠️  No image generation backend found.")
+            print("[warn] No image generation backend found.")
             print("   Install: Stable Diffusion WebUI or ComfyUI")
             print()
             print("   Generating ASCII art instead...")
@@ -287,7 +287,7 @@ def cmd_draw(args):
             return
 
     if success:
-        print(f"✅ Saved: {output}")
+        print(f"[ok] Saved: {output}")
 
         # Add to gallery
         gallery = load_gallery()
@@ -309,11 +309,11 @@ def cmd_gallery(args):
         print("No images generated yet. Try: neuros-draw 'your prompt'")
         return
 
-    print(f"🖼️  Gallery ({len(gallery['images'])} images)")
+    print(f"Gallery ({len(gallery['images'])} images)")
     print("-" * 60)
     for i, img in enumerate(gallery["images"]):
         ts = img.get("created", "")[:19]
-        exists = "✅" if os.path.exists(img["output"]) else "❌"
+        exists = "[ok]" if os.path.exists(img["output"]) else "[fail]"
         print(f"{i+1}. {exists} {ts} | {img.get('method', '?')}")
         print(f"   '{img['prompt'][:50]}'")
         path = img["output"].replace(os.path.expanduser("~"), "~")

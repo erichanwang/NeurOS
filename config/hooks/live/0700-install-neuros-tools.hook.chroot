@@ -93,9 +93,9 @@ NEUROS_TOOLS=(
 for tool in "${NEUROS_TOOLS[@]}"; do
     if [ -f "$tool" ]; then
         chmod +x "$tool"
-        echo "  ✅ $(basename "$tool")"
+        echo "  [ok] $(basename "$tool")"
     else
-        echo "  ⚠️  $(basename "$tool") not found"
+        echo "  [warn] $(basename "$tool") not found"
     fi
 done
 
@@ -107,17 +107,17 @@ if [ -f /etc/neuros-completions.bash ]; then
         echo "# NeurOS completions" >> /etc/skel/.bashrc
         echo "source /etc/neuros-completions.bash 2>/dev/null" >> /etc/skel/.bashrc
     fi
-    echo "  ✅ bash completions"
+    echo "  [ok] bash completions"
 fi
 
 # Install zsh completions
 if [ -d /usr/share/zsh/site-functions ]; then
-    echo "  ✅ zsh completions"
+    echo "  [ok] zsh completions"
 fi
 
 # Install fish completions (if fish is installed)
 if [ -d /etc/skel/.config/fish/completions ]; then
-    echo "  ✅ fish completions"
+    echo "  [ok] fish completions"
 fi
 
 # Create symlinks for convenience
@@ -152,15 +152,15 @@ DESKTOP
 if [ -f /etc/systemd/system/neuros-autofix.service ]; then
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable neuros-autofix.service 2>/dev/null && \
-        echo "  ✅ neuros-autofix service enabled" || \
-        echo "  ⚠️  neuros-autofix service enable skipped (no systemd)"
+        echo "  [ok] neuros-autofix service enabled" || \
+        echo "  [warn] neuros-autofix service enable skipped (no systemd)"
 fi
 
 # Refresh the hicolor icon theme cache so the tray icon (neuros-symbolic) is found
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null && \
-        echo "  ✅ icon cache updated" || \
-        echo "  ⚠️  icon cache update skipped"
+        echo "  [ok] icon cache updated" || \
+        echo "  [warn] icon cache update skipped"
 fi
 
 echo "[NeurOS] Tools installation complete."

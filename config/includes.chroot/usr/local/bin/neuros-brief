@@ -115,13 +115,13 @@ def show_full_briefing(weather=False, news=False):
 
     print(f"""
 ╔══════════════════════════════════════════════════════╗
-║              🧠  NeurOS Daily Briefing               ║
+║                NeurOS Daily Briefing                 ║
 ║              {now.strftime('%A, %B %d %Y'):<40}║
 ╚══════════════════════════════════════════════════════╝
 """)
 
     # System health
-    print("🖥️  System Health")
+    print("System Health")
     print("  ──────────────")
     for k, v in sys_info.items():
         print(f"  {k:<10} {v}")
@@ -129,25 +129,25 @@ def show_full_briefing(weather=False, news=False):
 
     # Git activity
     if repos:
-        print("📦 Git Repositories")
+        print("Git Repositories")
         print("  ────────────────")
         for r in repos:
             status = f"{r['commits_today']} commits today" if r['commits_today'] else "no commits today"
-            dirty = " ⚠️ uncommitted" if r['dirty'] else ""
+            dirty = " [warn] uncommitted" if r['dirty'] else ""
             print(f"  {r['name']:<20} [{r['branch']}] {status}{dirty}")
         print()
 
     # TODOs
     if todos:
-        print("📋 Today's Tasks")
+        print("Today's Tasks")
         print("  ─────────────")
         for todo in todos[:5]:
-            print(f"  ☐ {todo}")
+            print(f"  [ ] {todo}")
         print()
 
     # Memories
     if memories:
-        print("🧠 Remembered")
+        print("Remembered")
         print("  ───────────")
         for m in memories:
             print(f"  • {m}")
@@ -164,7 +164,7 @@ Be encouraging and concise. Mention if there's anything interesting to work on."
 
     insight = query_ollama(prompt)
     if insight:
-        print("🤖 AI Insight")
+        print("AI Insight")
         print("  ──────────")
         print(f"  {insight}")
         print()
@@ -181,7 +181,7 @@ Be friendly and concise. Include any system warnings if relevant."""
 
     insight = query_ollama(prompt)
     if insight:
-        print(f"\n🧠 {insight}\n")
+        print(f"\n{insight}\n")
 
 def main():
     parser = argparse.ArgumentParser(description="NeurOS Daily Briefing")

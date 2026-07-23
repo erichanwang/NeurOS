@@ -97,17 +97,17 @@ def generate_from_spec(spec_path):
 
 
 def display_plan(plan):
-    print(f"\n📋 PROJECT PLAN: {plan.get('goal', 'Untitled')}\n")
+    print(f"\nPROJECT PLAN: {plan.get('goal', 'Untitled')}\n")
     print("=" * 60)
     total_hours = 0
     total_tasks = 0
 
     for phase in plan.get("phases", []):
-        print(f"\n🔹 PHASE: {phase['name']}")
+        print(f"\nPHASE: {phase['name']}")
         print("-" * 40)
         for task in phase.get("tasks", []):
-            priority_icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(
-                task.get("priority", "medium"), "⚪"
+            priority_icon = {"high": "[red]", "medium": "[yellow]", "low": "[green]"}.get(
+                task.get("priority", "medium"), "[white]"
             )
             deps = f" (depends on: {', '.join(map(str, task.get('dependencies', [])))})" if task.get("dependencies") else ""
             hours = task.get("hours", 0)
@@ -118,8 +118,8 @@ def display_plan(plan):
             total_tasks += 1
 
     print(f"\n{'='*60}")
-    print(f"  📊 {total_tasks} tasks across {len(plan.get('phases', []))} phases")
-    print(f"  ⏱️  Estimated total: {total_hours:.0f} hours ({total_hours/8:.1f} days)")
+    print(f"  {total_tasks} tasks across {len(plan.get('phases', []))} phases")
+    print(f"  Estimated total: {total_hours:.0f} hours ({total_hours/8:.1f} days)")
     print()
 
 
@@ -164,7 +164,7 @@ def main():
                 plan_path = os.path.join(PLAN_DIR, p)
                 with open(plan_path) as f:
                     data = json.load(f)
-                print(f"  📋 {p}: {data.get('goal', 'Untitled')[:60]}")
+                print(f"  {p}: {data.get('goal', 'Untitled')[:60]}")
         else:
             print("No saved plans.")
         return
@@ -199,7 +199,7 @@ def main():
     if args.from_spec:
         plan = generate_from_spec(args.from_spec)
     elif args.goal:
-        print(f"🧠 Generating plan for: {args.goal}\n")
+        print(f"Generating plan for: {args.goal}\n")
         plan = generate_plan(args.goal)
     else:
         parser.print_help()
@@ -215,7 +215,7 @@ def main():
             plan["goal"] = plan.get("goal", args.goal or "Untitled")
             with open(fpath, "w") as f:
                 json.dump(plan, f, indent=2)
-            print(f"  💾 Saved to: {fpath}")
+            print(f"  Saved to: {fpath}")
     else:
         print("Failed to generate plan. Is Ollama running?")
 

@@ -41,7 +41,7 @@ Provide:
 
 Be specific and actionable."""
 
-    print(f"🐛 Analyzing error...\n")
+    print(f"Analyzing error...\n")
     print(query_ollama(prompt))
 
 def analyze_log(filepath):
@@ -71,11 +71,11 @@ Provide:
 ## Root Cause Analysis
 ## Recommended Actions (ordered by priority)"""
 
-    print(f"📋 Analyzing log: {filepath}\n")
+    print(f"Analyzing log: {filepath}\n")
     print(query_ollama(prompt))
 
 def interactive_debug():
-    print("🐛 NeurOS Debug Console")
+    print("NeurOS Debug Console")
     print("   Paste your error/stack trace. Type 'END' on a new line when done.\n")
 
     lines = []

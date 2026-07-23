@@ -147,13 +147,13 @@ def ai_extract(content, pattern):
 def cmd_edit(args):
     """Edit a file with AI."""
     if not os.path.exists(args.file):
-        print(f"❌ File not found: {args.file}")
+        print(f"[fail] File not found: {args.file}")
         sys.exit(1)
 
     with open(args.file, "r", encoding="utf-8", errors="replace") as f:
         original = f.read()
 
-    print(f"📝 Editing: {args.file}")
+    print(f"Editing: {args.file}")
     print(f"   Size: {len(original)} bytes")
     print()
 
@@ -161,12 +161,12 @@ def cmd_edit(args):
         # Simple find and replace
         modified = original.replace(args.replace[0], args.replace[1])
         count = original.count(args.replace[0])
-        print(f"   {count} replacement(s): '{args.replace[0]}' → '{args.replace[1]}'")
+        print(f"   {count} replacement(s): '{args.replace[0]}' -> '{args.replace[1]}'")
     elif args.spellcheck:
         print("   Running AI spellcheck...")
         modified = ai_spellcheck(original)
         if modified is None:
-            print("❌ AI spellcheck failed.")
+            print("[fail] AI spellcheck failed.")
             sys.exit(1)
     elif args.extract:
         print(f"   Extracting {args.extract}...")
@@ -178,12 +178,12 @@ def cmd_edit(args):
         print(f"   AI instruction: {args.prompt}")
         modified = ai_edit(original, args.prompt, os.path.basename(args.file))
         if modified is None:
-            print("❌ AI edit failed.")
+            print("[fail] AI edit failed.")
             sys.exit(1)
     elif args.format:
         modified = ai_edit(original, "Format this file properly with consistent indentation and spacing. Fix any formatting issues.", os.path.basename(args.file))
         if modified is None:
-            print("❌ AI format failed.")
+            print("[fail] AI format failed.")
             return
     else:
         # Interactive mode: read instruction from stdin
@@ -194,7 +194,7 @@ def cmd_edit(args):
             return
         modified = ai_edit(original, instruction, os.path.basename(args.file))
         if modified is None:
-            print("❌ AI edit failed.")
+            print("[fail] AI edit failed.")
             sys.exit(1)
 
     if modified == original:
@@ -244,7 +244,7 @@ def cmd_edit(args):
     })
     save_history(history)
 
-    print(f"✅ Saved: {args.file}")
+    print(f"[ok] Saved: {args.file}")
     print(f"   Backup: {backup_path}")
     print(f"   Changes: {len(modified) - len(original):+d} bytes")
 
@@ -298,7 +298,7 @@ def cmd_batch(args):
         shutil.copy2(f, backup)
         with open(f, "w", encoding="utf-8") as fh:
             fh.write(modified)
-        print(f"  ✅ Saved (backup: {backup})")
+        print(f"  [ok] Saved (backup: {backup})")
 
 
 def cmd_undo(args):
@@ -307,9 +307,9 @@ def cmd_undo(args):
         backup = args.file + ".neuros-bak"
         if os.path.exists(backup):
             shutil.copy2(backup, args.file)
-            print(f"✅ Restored {args.file} from {backup}")
+            print(f"[ok] Restored {args.file} from {backup}")
         else:
-            print(f"❌ No backup found for {args.file}")
+            print(f"[fail] No backup found for {args.file}")
         return
 
     # Undo most recent edit from history
@@ -324,9 +324,9 @@ def cmd_undo(args):
         os.remove(last["backup"])
         history["edits"].pop()
         save_history(history)
-        print(f"✅ Undid edit to {last['file']}")
+        print(f"[ok] Undid edit to {last['file']}")
     else:
-        print(f"❌ Backup no longer exists: {last['backup']}")
+        print(f"[fail] Backup no longer exists: {last['backup']}")
 
 
 def cmd_diff(args):

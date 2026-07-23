@@ -195,7 +195,7 @@ def main():
         all_findings.extend(findings)
         print(f"System scan: {len(findings)} issues found")
         for f in findings:
-            print(f"  ⚠  {f['check']}: {f['issue']}")
+            print(f"  [warn] {f['check']}: {f['issue']}")
 
     if args.deps:
         findings = scan_dependencies(args.path)
@@ -230,8 +230,8 @@ def main():
             for cat, items in by_cat.items():
                 print(f"  [{cat.upper()}] {len(items)} issues")
                 for item in items[:5]:
-                    print(f"    ⚠ {item['file']}:{item['line']} - {item['issue']}")
-                    print(f"      → {item['match']}")
+                    print(f"    [warn] {item['file']}:{item['line']} - {item['issue']}")
+                    print(f"      -> {item['match']}")
                 if len(items) > 5:
                     print(f"    ... and {len(items) - 5} more")
 

@@ -4,8 +4,8 @@ neuros-translate — NeurOS Local Translator
 Translate text between languages using the local LLM. No cloud. No API keys.
 
 Usage:
-  neuros-translate "Hello world" --to es          English → Spanish
-  neuros-translate "Bonjour le monde" --from fr    Auto-detect → English
+  neuros-translate "Hello world" --to es          English -> Spanish
+  neuros-translate "Bonjour le monde" --from fr    Auto-detect -> English
   neuros-translate ./document.txt --to ja          Translate a file
   neuros-translate --pipe --to de                  Read from stdin
   neuros-translate --interactive                   Interactive translation mode
@@ -70,29 +70,29 @@ def translate_file(filepath, source_lang=None, target_lang="en", style="natural"
     if chunk:
         chunks.append(chunk)
 
-    print(f"📄 Translating {filepath} ({len(content)} chars, {len(chunks)} chunks)...")
+    print(f"Translating {filepath} ({len(content)} chars, {len(chunks)} chunks)...")
 
     results = []
     for i, chunk in enumerate(chunks):
         print(f"  Chunk {i+1}/{len(chunks)}...", end=" ", flush=True)
         results.append(translate(chunk, source_lang, target_lang, style))
-        print("✅")
+        print("[ok]")
 
     # Save translation
     base, ext = os.path.splitext(filepath)
     outpath = f"{base}.{target_lang}{ext}"
     with open(outpath, 'w') as f:
         f.write('\n\n'.join(results))
-    print(f"✅ Saved: {outpath}")
+    print(f"[ok] Saved: {outpath}")
 
 def interactive_mode(target_lang="en"):
-    print(f"🌐 Interactive Translator (→ {LANGUAGES.get(target_lang, target_lang)})")
+    print(f"Interactive Translator (-> {LANGUAGES.get(target_lang, target_lang)})")
     print("   Type text to translate. 'lang XX' to switch. 'exit' to quit.\n")
     cur_lang = target_lang
 
     while True:
         try:
-            text = input("🌐> ").strip()
+            text = input("> ").strip()
             if not text:
                 continue
             if text.lower() == 'exit':

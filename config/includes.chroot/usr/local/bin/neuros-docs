@@ -93,17 +93,17 @@ The README should include:
 
 Return the full README in markdown."""
 
-    print(f"🤖 Generating README for {proj_name}...")
+    print(f"Generating README for {proj_name}...")
     readme = query_ollama(prompt)
     os.makedirs(output_dir, exist_ok=True)
     outpath = os.path.join(output_dir, "README.md")
     with open(outpath, 'w') as f:
         f.write(readme)
-    print(f"✅ Saved: {outpath} ({len(readme)} chars)")
+    print(f"[ok] Saved: {outpath} ({len(readme)} chars)")
 
 def generate_api_docs(directory, output_dir, fmt="md"):
     files = get_project_files(directory)
-    print(f"📁 Found {len(files)} source files")
+    print(f"Found {len(files)} source files")
     os.makedirs(output_dir, exist_ok=True)
 
     for i, fpath in enumerate(files):
@@ -135,10 +135,10 @@ Be concise. Focus on the public interface."""
             outpath = os.path.join(output_dir, outname)
             with open(outpath, 'w') as f:
                 f.write(f"# API: {rel}\n\n{docs}")
-            print("✅")
+            print("[ok]")
 
         except Exception as e:
-            print(f"❌ {e}")
+            print(f"[fail] {e}")
 
     # Generate index
     index = f"# API Documentation\n\nGenerated: {datetime.now().isoformat()}\n\n"
@@ -150,7 +150,7 @@ Be concise. Focus on the public interface."""
     with open(os.path.join(output_dir, f"index.{fmt}"), 'w') as f:
         f.write(index)
 
-    print(f"\n✅ API docs generated in {output_dir}/")
+    print(f"\n[ok] API docs generated in {output_dir}/")
 
 def generate_file_docs(filepath, output_dir, fmt="md"):
     with open(filepath, 'r', errors='replace') as f:
@@ -166,7 +166,7 @@ Code:
 
 Return the complete file with documentation added. Use the standard docstring format for the language."""
 
-    print(f"🤖 Adding docs to {fname}...")
+    print(f"Adding docs to {fname}...")
     documented = query_ollama(prompt)
 
     os.makedirs(output_dir, exist_ok=True)
@@ -179,7 +179,7 @@ Return the complete file with documentation added. Use the standard docstring fo
             lines = clean.split('\n')
             clean = '\n'.join(l for l in lines if not l.startswith("```"))
         f.write(clean)
-    print(f"✅ Saved: {outpath}")
+    print(f"[ok] Saved: {outpath}")
 
 def main():
     parser = argparse.ArgumentParser(description="NeurOS Documentation Generator")

@@ -104,7 +104,7 @@ def save_history(entries):
         json.dump(entries[-500:], f, indent=2)
 
 
-# Natural language → cron expression patterns
+# Natural language -> cron expression patterns
 NL_PATTERNS = [
     (r"every\s+(\d+)\s+min(?:ute)?s?", r"*/\1 * * * *"),
     (r"every\s+hour", r"0 * * * *"),
@@ -245,12 +245,12 @@ def cmd_add(args):
 
     cron_expr = nl_to_cron(args.schedule)
     if not cron_expr:
-        print(f"❌ Could not parse schedule: '{args.schedule}'")
+        print(f"[fail] Could not parse schedule: '{args.schedule}'")
         print("   Try: 'every Monday at 6am', 'daily', 'every 30 minutes'")
         sys.exit(1)
 
     if not validate_cron(cron_expr):
-        print(f"❌ Invalid cron expression: {cron_expr}")
+        print(f"[fail] Invalid cron expression: {cron_expr}")
         sys.exit(1)
 
     # Generate deterministic ID
@@ -269,11 +269,11 @@ def cmd_add(args):
     save_db(db)
 
     if install_crontab(db):
-        print(f"✅ Cron added: {hid}")
-        print(f"   Schedule: {args.schedule} → {cron_expr}")
+        print(f"[ok] Cron added: {hid}")
+        print(f"   Schedule: {args.schedule} -> {cron_expr}")
         print(f"   Command:  {args.cmd}")
     else:
-        print(f"⚠️  Cron saved to DB but crontab install failed")
+        print(f"[warn] Cron saved to DB but crontab install failed")
 
 
 def cmd_list(args):
@@ -286,7 +286,7 @@ def cmd_list(args):
     print(f"{'ID':<10} {'Status':<8} {'Schedule (NL)':<30} {'Cron':<20} {'Command'}")
     print("-" * 100)
     for entry in db["crons"]:
-        status = "⏸ DISABLED" if entry.get("disabled") else "▶ ACTIVE"
+        status = "DISABLED" if entry.get("disabled") else "ACTIVE"
         print(f"{entry['id']:<10} {status:<8} {entry.get('schedule_nl', ''):<30} {entry['cron']:<20} {entry['command']}")
 
     print(f"\n{len(db['crons'])} cron job(s) managed by NeurOS.")
@@ -302,13 +302,13 @@ def cmd_remove(args):
             break
 
     if match is None:
-        print(f"❌ No cron found with ID: {args.id}")
+        print(f"[fail] No cron found with ID: {args.id}")
         sys.exit(1)
 
     removed = db["crons"].pop(match)
     save_db(db)
     install_crontab(db)
-    print(f"✅ Removed cron {removed['id']}: {removed['command']}")
+    print(f"[ok] Removed cron {removed['id']}: {removed['command']}")
 
 
 def cmd_edit(args):
@@ -319,7 +319,7 @@ def cmd_edit(args):
             if args.schedule:
                 cron_expr = nl_to_cron(args.schedule)
                 if not cron_expr:
-                    print(f"❌ Could not parse: {args.schedule}")
+                    print(f"[fail] Could not parse: {args.schedule}")
                     sys.exit(1)
                 entry["cron"] = cron_expr
                 entry["schedule_nl"] = args.schedule
@@ -331,10 +331,10 @@ def cmd_edit(args):
                 entry["disabled"] = False
             save_db(db)
             install_crontab(db)
-            print(f"✅ Updated cron {entry['id']}")
+            print(f"[ok] Updated cron {entry['id']}")
             return
 
-    print(f"❌ No cron found: {args.id}")
+    print(f"[fail] No cron found: {args.id}")
     sys.exit(1)
 
 
@@ -347,26 +347,26 @@ def cmd_validate(args):
         for b in db["crons"][i + 1:]:
             # Check for near-identical schedules
             if a["cron"] == b["cron"] and a["cron"] != "@reboot":
-                issues.append(f"⚠️  {a['id']} and {b['id']} have identical schedule ({a['cron']})")
+                issues.append(f"[warn] {a['id']} and {b['id']} have identical schedule ({a['cron']})")
             # Check for overlapping execution windows
             a_min = cron_to_minutes(a["cron"])
             b_min = cron_to_minutes(b["cron"])
             if a_min is not None and b_min is not None and abs(a_min - b_min) < 5:
-                issues.append(f"⚠️  {a['id']} and {b['id']} run within 5 min of each other")
+                issues.append(f"[warn] {a['id']} and {b['id']} run within 5 min of each other")
 
     if issues:
         print("Cron validation issues found:")
         for issue in issues:
             print(f"  {issue}")
     else:
-        print("✅ All cron jobs look good — no conflicts detected.")
+        print("[ok] All cron jobs look good — no conflicts detected.")
 
     # Check for disabled jobs
     disabled = [e for e in db["crons"] if e.get("disabled")]
     if disabled:
         print(f"\n{len(disabled)} disabled job(s):")
         for e in disabled:
-            print(f"  ⏸  {e['id']}: {e.get('schedule_nl', e['cron'])}")
+            print(f"  {e['id']}: {e.get('schedule_nl', e['cron'])}")
 
 
 def cron_to_minutes(cron):
@@ -409,12 +409,12 @@ def cmd_test(args):
                 })
                 save_history(history)
             except subprocess.TimeoutExpired:
-                print("⚠️  Command timed out after 30s")
+                print("[warn] Command timed out after 30s")
             except Exception as e:
-                print(f"❌ Error: {e}")
+                print(f"[fail] Error: {e}")
             return
 
-    print(f"❌ No cron found: {args.id}")
+    print(f"[fail] No cron found: {args.id}")
 
 
 def cmd_explain(args):
@@ -435,13 +435,13 @@ def cmd_explain(args):
                 print(f"  Meaning:    (AI unavailable — cron expression: {cron})")
             return
 
-    print(f"❌ No cron found: {args.id}")
+    print(f"[fail] No cron found: {args.id}")
 
 
 def cmd_import(args):
     """Import crontab entries from a file."""
     if not os.path.exists(args.file):
-        print(f"❌ File not found: {args.file}")
+        print(f"[fail] File not found: {args.file}")
         sys.exit(1)
 
     db = load_db()
@@ -473,7 +473,7 @@ def cmd_import(args):
     if imported > 0:
         save_db(db)
         install_crontab(db)
-        print(f"✅ Imported {imported} cron job(s) from {args.file}")
+        print(f"[ok] Imported {imported} cron job(s) from {args.file}")
     else:
         print("No valid cron entries found in file.")
 

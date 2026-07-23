@@ -102,7 +102,7 @@ Return the optimized Dockerfile."""
             clean = result
             if clean.startswith("```"): clean = '\n'.join(l for l in clean.split('\n') if not l.startswith("```"))
             f.write(clean)
-        print(f"✅ Saved: {filepath}.optimized")
+        print(f"[ok] Saved: {filepath}.optimized")
 
 def scan_dockerfile(filepath):
     try:
@@ -155,7 +155,7 @@ def main():
                 clean = result
                 if clean.startswith("```"): clean = '\n'.join(l for l in clean.split('\n') if not l.startswith("```"))
                 f.write(clean)
-            print("✅ Saved: Dockerfile")
+            print("[ok] Saved: Dockerfile")
     elif args.command == "compose":
         result = generate_compose(args.description)
         print(result)

@@ -237,7 +237,7 @@ header h1 { font-size: 20px; background: linear-gradient(135deg, var(--accent), 
 </head>
 <body>
 <header>
-  <span style="font-size:24px;">🧠</span>
+  <span style="font-size:24px;"></span>
   <h1>NeurOS Dashboard</h1>
   <span style="margin-left:auto;font-size:13px;color:var(--text-dim);" id="clock"></span>
 </header>
@@ -268,18 +268,18 @@ header h1 { font-size: 20px; background: linear-gradient(135deg, var(--accent), 
     </svg>
   </div>
   <div style="display:flex;gap:16px;font-size:11px;color:var(--text-dim);margin-top:8px;">
-    <span>🟣 CPU</span><span>🟢 Memory</span><span>🟡 Disk</span>
+    <span>[purple] CPU</span><span>[green] Memory</span><span>[yellow] Disk</span>
   </div>
 </div>
 
 <div class="alerts">
   <div class="card">
-    <h3>🔧 Recent Autofix Actions</h3>
-    <div id="autofixLog"><div class="log-entry"><span class="log-icon">✅</span> Loading...</div></div>
+    <h3>Recent Autofix Actions</h3>
+    <div id="autofixLog"><div class="log-entry"><span class="log-icon">[ok]</span> Loading...</div></div>
   </div>
   <div class="card">
-    <h3>📦 Recent Updates</h3>
-    <div id="updateLog"><div class="log-entry"><span class="log-icon">📦</span> Loading...</div></div>
+    <h3>Recent Updates</h3>
+    <div id="updateLog"><div class="log-entry"><span class="log-icon"></span> Loading...</div></div>
   </div>
 </div>
 
@@ -336,9 +336,9 @@ async function refresh() {
     // Autofix log
     const afDiv = document.getElementById('autofixLog');
     afDiv.innerHTML = af.length === 0
-      ? '<div class="log-entry"><span class="log-icon">✅</span> No autofix actions yet</div>'
+      ? '<div class="log-entry"><span class="log-icon">[ok]</span> No autofix actions yet</div>'
       : af.slice(-10).reverse().map(h => {
-          const icon = h.success ? '✅' : '❌';
+          const icon = h.success ? '[ok]' : '[fail]';
           const ts = (h.timestamp || '').slice(11, 19);
           return `<div class="log-entry"><span class="log-icon">${icon}</span><span class="time">${ts}</span>${h.action}: ${(h.target || h.command || '').slice(0, 50)}</div>`;
         }).join('');
@@ -346,9 +346,9 @@ async function refresh() {
     // Update log
     const upDiv = document.getElementById('updateLog');
     upDiv.innerHTML = up.length === 0
-      ? '<div class="log-entry"><span class="log-icon">📦</span> No updates yet</div>'
+      ? '<div class="log-entry"><span class="log-icon"></span> No updates yet</div>'
       : up.slice(-10).reverse().map(h => {
-          const icon = h.success ? '✅' : '❌';
+          const icon = h.success ? '[ok]' : '[fail]';
           const ts = (h.timestamp || '').slice(11, 19);
           return `<div class="log-entry"><span class="log-icon">${icon}</span><span class="time">${ts}</span>${h.action}: ${(h.details || '').slice(0, 40)}</div>`;
         }).join('');
@@ -385,7 +385,7 @@ def main():
 
     print(f"""
 ╔══════════════════════════════════════════╗
-║       🧠 NeurOS System Dashboard         ║
+║         NeurOS System Dashboard          ║
 ║       Real-time system monitoring        ║
 ╠══════════════════════════════════════════╣
 ║  URL:  {url:<32}║

@@ -56,7 +56,7 @@ def check_tool(name, install_hint=""):
         subprocess.run(["which", name], capture_output=True, check=True)
         return True
     except Exception:
-        print(f"❌ {name} not found. {install_hint}")
+        print(f"[fail] {name} not found. {install_hint}")
         return False
 
 
@@ -88,12 +88,12 @@ def start_recording(cmd, rtype, output):
     try:
         recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         save_recording_pid(recording_process.pid, rtype, output)
-        print(f"🔴 Recording started: {rtype}")
+        print(f"[red] Recording started: {rtype}")
         print(f"   Output: {output}")
         print(f"   PID: {recording_process.pid}")
         print(f"   Run 'neuros-record stop' to stop.")
     except Exception as e:
-        print(f"❌ Failed to start recording: {e}")
+        print(f"[fail] Failed to start recording: {e}")
 
 
 def cmd_screen(args):
@@ -152,7 +152,7 @@ def cmd_window(args):
         start_recording(cmd, "window", output)
 
     except Exception as e:
-        print(f"❌ Error detecting window: {e}")
+        print(f"[fail] Error detecting window: {e}")
         print("   Install: sudo apt install xdotool")
 
 
@@ -191,7 +191,7 @@ def cmd_region(args):
         start_recording(cmd, "region", output)
 
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"[fail] Error: {e}")
 
 
 def cmd_audio(args):
@@ -233,14 +233,14 @@ def cmd_terminal(args):
     os.makedirs(RECORD_DIR, exist_ok=True)
     output = os.path.join(RECORD_DIR, f"terminal_{datetime.now().strftime('%Y%m%d-%H%M%S')}.log")
 
-    print(f"📝 Recording terminal session to {output}")
+    print(f"Recording terminal session to {output}")
     print("   Type 'exit' or press Ctrl+D to stop.")
 
     try:
         subprocess.run(["script", "-q", output])
-        print(f"✅ Recording saved: {output}")
+        print(f"[ok] Recording saved: {output}")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"[fail] Error: {e}")
 
 
 def cmd_stop(args):
@@ -260,7 +260,7 @@ def cmd_stop(args):
             pass
 
         clear_recording_pid()
-        print(f"✅ Stopped {data['type']} recording")
+        print(f"[ok] Stopped {data['type']} recording")
         print(f"   Output: {data['output']}")
         print(f"   Started: {data['started'][:19]}")
 
@@ -274,7 +274,7 @@ def cmd_stop(args):
                 size /= 1024
 
     except Exception as e:
-        print(f"❌ Error stopping recording: {e}")
+        print(f"[fail] Error stopping recording: {e}")
         clear_recording_pid()
 
 
@@ -309,7 +309,7 @@ def cmd_list(args):
 def cmd_compress(args):
     """AI-optimized compression of a recording."""
     if not os.path.exists(args.file):
-        print(f"❌ File not found: {args.file}")
+        print(f"[fail] File not found: {args.file}")
         return
 
     if not check_tool("ffmpeg", "Install: sudo apt install ffmpeg"):
@@ -333,16 +333,16 @@ def cmd_compress(args):
         subprocess.run(cmd, check=True)
         new_size = os.path.getsize(output)
         ratio = (1 - new_size / orig_size) * 100
-        print(f"✅ Compressed: {output}")
+        print(f"[ok] Compressed: {output}")
         print(f"   New size: {new_size / (1024*1024):.1f} MB ({ratio:.0f}% smaller)")
     except Exception as e:
-        print(f"❌ Compression failed: {e}")
+        print(f"[fail] Compression failed: {e}")
 
 
 def cmd_transcribe(args):
     """Transcribe audio to text using AI."""
     if not os.path.exists(args.file):
-        print(f"❌ File not found: {args.file}")
+        print(f"[fail] File not found: {args.file}")
         return
 
     config = load_config()
@@ -359,7 +359,7 @@ def cmd_transcribe(args):
             result = json.loads(resp.read()).get("response", "").strip()
             print(result)
     except Exception as e:
-        print(f"❌ Transcription failed: {e}")
+        print(f"[fail] Transcription failed: {e}")
         print("   For better results, use Whisper:")
         print("   whisper {args.file} --model small")
 

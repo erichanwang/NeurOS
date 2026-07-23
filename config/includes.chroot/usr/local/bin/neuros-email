@@ -82,7 +82,7 @@ def get_body(msg):
 
 def cmd_compose(args):
     """AI-draft an email."""
-    print("📧 Email Composer")
+    print("Email Composer")
     print("-" * 40)
 
     # Gather context
@@ -131,18 +131,18 @@ def cmd_compose(args):
         fpath = os.path.join(EMAIL_DIR, fname)
         with open(fpath, "w") as f:
             f.write(draft)
-        print(f"✅ Saved draft: {fpath}")
+        print(f"[ok] Saved draft: {fpath}")
 
         if args.send:
             cmd_send_internal(fpath, args)
     else:
-        print("❌ AI draft generation failed.")
+        print("[fail] AI draft generation failed.")
 
 
 def cmd_reply(args):
     """AI-draft a reply to an email."""
     if not os.path.exists(args.email):
-        print(f"❌ File not found: {args.email}")
+        print(f"[fail] File not found: {args.email}")
         return
 
     msg = parse_email_file(args.email)
@@ -174,15 +174,15 @@ def cmd_reply(args):
         fpath = os.path.join(EMAIL_DIR, fname)
         with open(fpath, "w") as f:
             f.write(reply)
-        print(f"✅ Saved reply: {fpath}")
+        print(f"[ok] Saved reply: {fpath}")
     else:
-        print("❌ AI reply generation failed.")
+        print("[fail] AI reply generation failed.")
 
 
 def cmd_summarize(args):
     """Summarize an email."""
     if not os.path.exists(args.email):
-        print(f"❌ File not found: {args.email}")
+        print(f"[fail] File not found: {args.email}")
         return
 
     msg = parse_email_file(args.email)
@@ -196,20 +196,20 @@ def cmd_summarize(args):
     summary = query_llm(prompt, "You summarize emails concisely.")
 
     if summary:
-        print(f"📧 {msg['Subject']}")
+        print(f"{msg['Subject']}")
         print(f"   From: {msg['From']}")
         print(f"   Date: {msg['Date']}")
         print()
         print(summary)
     else:
-        print("❌ Summarization failed.")
+        print("[fail] Summarization failed.")
 
 
 def cmd_summarize_inbox(args):
     """Summarize recent emails from a maildir or mbox."""
     mail_dir = args.maildir or os.path.expanduser("~/Mail")
     if not os.path.exists(mail_dir):
-        print(f"❌ Mail directory not found: {mail_dir}")
+        print(f"[fail] Mail directory not found: {mail_dir}")
         print("   Specify with --maildir or set up ~/Mail")
         return
 
@@ -249,17 +249,17 @@ def cmd_summarize_inbox(args):
     summary = query_llm(prompt, "You summarize inboxes efficiently. List key items and action items.")
 
     if summary:
-        print(f"📬 Inbox Summary ({len(emails)} recent emails)")
+        print(f"Inbox Summary ({len(emails)} recent emails)")
         print("─" * 40)
         print(summary)
     else:
-        print("❌ Summarization failed.")
+        print("[fail] Summarization failed.")
 
 
 def cmd_extract(args):
     """Extract action items, dates, contacts from email."""
     if not os.path.exists(args.email):
-        print(f"❌ File not found: {args.email}")
+        print(f"[fail] File not found: {args.email}")
         return
 
     msg = parse_email_file(args.email)
@@ -277,11 +277,11 @@ def cmd_extract(args):
     extracted = query_llm(prompt)
 
     if extracted:
-        print(f"📧 {msg['Subject']}")
+        print(f"{msg['Subject']}")
         print("─" * 40)
         print(extracted)
     else:
-        print("❌ Extraction failed.")
+        print("[fail] Extraction failed.")
 
 
 def cmd_templates(args):
@@ -295,7 +295,7 @@ def cmd_templates(args):
             return
         print("Email templates:")
         for t in sorted(templates):
-            print(f"  📧 {t}")
+            print(f"  {t}")
         return
 
     if args.show:
@@ -311,7 +311,7 @@ def cmd_templates(args):
 def cmd_send_internal(filepath, args):
     """Send an email file."""
     if not args.to:
-        print("❌ --to required for sending")
+        print("[fail] --to required for sending")
         return
 
     # Try msmtp first
@@ -321,28 +321,28 @@ def cmd_send_internal(filepath, args):
             cmd = [sendmail, args.to]
             with open(filepath, "r") as f:
                 subprocess.run(cmd, input=f.read(), text=True, check=True)
-            print(f"✅ Email sent to {args.to} via {sendmail}")
+            print(f"[ok] Email sent to {args.to} via {sendmail}")
             return
         except subprocess.CalledProcessError:
             pass
         except FileNotFoundError:
             pass
 
-    print("❌ No mail transport found. Install msmtp or sendmail.")
+    print("[fail] No mail transport found. Install msmtp or sendmail.")
     print(f"   Draft saved: {filepath}")
 
 
 def cmd_send(args):
     """Send a draft email."""
     if not os.path.exists(args.file):
-        print(f"❌ File not found: {args.file}")
+        print(f"[fail] File not found: {args.file}")
         return
     cmd_send_internal(args.file, args)
 
 
 def cmd_filter(args):
     """Create AI-based email filter rule."""
-    print("🤖 AI Email Filter")
+    print("AI Email Filter")
     print(f"Rule: {args.rule}")
     print()
 
@@ -355,9 +355,9 @@ def cmd_filter(args):
             fpath = os.path.join(CONFIG_DIR, "email-filters.txt")
             with open(fpath, "a") as f:
                 f.write(f"\n# {args.rule}\n{rule}\n\n")
-            print(f"\n✅ Filter appended to {fpath}")
+            print(f"\n[ok] Filter appended to {fpath}")
     else:
-        print("❌ Filter generation failed.")
+        print("[fail] Filter generation failed.")
 
 
 def main():

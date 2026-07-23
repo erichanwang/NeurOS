@@ -28,7 +28,7 @@ def record_audio(duration=5, output_file=None):
     if output_file is None:
         output_file = tempfile.mktemp(suffix=".wav")
 
-    print(f"🎤 Recording for {duration} seconds...")
+    print(f"Recording for {duration} seconds...")
 
     try:
         # Try arecord (ALSA) first with 16000Hz mono for STT compatibility
@@ -50,7 +50,7 @@ def record_audio(duration=5, output_file=None):
             sys.exit(1)
 
     if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-        print(f"✅ Recorded to {output_file}")
+        print(f"[ok] Recorded to {output_file}")
         return output_file
     else:
         print("Error: Recording failed or produced empty file")
@@ -118,7 +118,7 @@ def send_to_llm(text):
 
 def continuous_mode():
     """Continuous dictation mode."""
-    print("🎙️  Continuous dictation mode")
+    print("Continuous dictation mode")
     print("   Speak into your microphone. Press Ctrl+C to stop.\n")
 
     try:
@@ -130,10 +130,10 @@ def continuous_mode():
 
             text = transcribe_audio(audio_file)
             if text:
-                print(f"\n📝 You said: {text}")
+                print(f"\nYou said: {text}")
 
                 response = send_to_llm(text)
-                print(f"🤖 NeurOS: {response}\n")
+                print(f"NeurOS: {response}\n")
             else:
                 print("   (no speech detected)")
 
@@ -144,7 +144,7 @@ def continuous_mode():
                 pass
 
     except KeyboardInterrupt:
-        print("\n👋 Dictation stopped.")
+        print("\nDictation stopped.")
 
 
 def list_devices():
@@ -192,14 +192,14 @@ def main():
         print("No audio to transcribe.")
         sys.exit(1)
 
-    print("🔊 Transcribing...")
+    print("Transcribing...")
     text = transcribe_audio(audio_file)
 
     if text:
-        print(f"\n📝 Transcription: {text}")
+        print(f"\nTranscription: {text}")
 
         if not args.no_response:
-            print("\n🤖 NeurOS response:")
+            print("\nNeurOS response:")
             response = send_to_llm(text)
             print(response)
     else:

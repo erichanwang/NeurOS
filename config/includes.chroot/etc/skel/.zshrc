@@ -162,7 +162,7 @@ bindkey '^@' nn-widget
 
 # === Prompt customization ===
 # Add NeurOS indicator to prompt
-NEUROS_INDICATOR="🧠"
+NEUROS_INDICATOR=""
 
 # === Environment ===
 export EDITOR="nvim"
@@ -186,7 +186,7 @@ zstyle ':completion:*' matcher-list 'm:{a-z}={A-Za-z}'
 # === Welcome (first run) ===
 if [ ! -f "$HOME/.config/neuros/.welcome-shown" ]; then
     echo ""
-    echo "  🧠 Welcome to NeurOS!"
+    echo "  Welcome to NeurOS!"
     echo "  Type 'nn \"your question\"' to ask the local AI."
     echo "  Type 'nn -i' for interactive mode."
     echo ""

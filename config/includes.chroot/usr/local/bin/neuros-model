@@ -86,9 +86,9 @@ def pull_model(name):
                     print(f"  {line.strip()}")
 
         if result.returncode == 0:
-            print(f"\n✅ {name} pulled successfully!")
+            print(f"\n[ok] {name} pulled successfully!")
         else:
-            print(f"\n❌ Failed to pull {name}")
+            print(f"\n[fail] Failed to pull {name}")
             sys.exit(1)
 
     except FileNotFoundError:
@@ -104,7 +104,7 @@ def remove_model(name):
 
     data = api_request("delete", method="DELETE", data={"name": name})
     if data is not None:
-        print(f"✅ {name} removed.")
+        print(f"[ok] {name} removed.")
 
 def switch_model(name):
     """Set the default model in llm.conf."""
@@ -137,7 +137,7 @@ def switch_model(name):
     with open(CONFIG_PATH, 'w') as f:
         f.writelines(lines)
 
-    print(f"✅ Default model set to '{name}'.")
+    print(f"[ok] Default model set to '{name}'.")
 
 def model_info(name):
     """Show detailed info about a model."""
@@ -243,7 +243,7 @@ def compare_models(models, prompt="Write a haiku about Linux."):
 
     for model in models:
         print(f"\n{'─'*60}")
-        print(f"  🤖 {model}")
+        print(f"  {model}")
         print(f"{'─'*60}")
 
         data = {

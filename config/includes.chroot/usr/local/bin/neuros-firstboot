@@ -19,7 +19,7 @@ if [ -f "$MARKER" ]; then
 fi
 
 echo "=============================================="
-echo "  🧠 NeurOS — First Boot Setup"
+echo "  NeurOS — First Boot Setup"
 echo "=============================================="
 echo ""
 
@@ -45,9 +45,9 @@ check_ollama() {
     echo "[2/5] Checking Ollama daemon..."
 
     if systemctl is-active neuros-llm.service &>/dev/null; then
-        echo "  ✅ Ollama daemon is running."
+        echo "  [ok] Ollama daemon is running."
     else
-        echo "  ⚠️  Ollama daemon not running yet. Starting..."
+        echo "  [warn] Ollama daemon not running yet. Starting..."
         sudo systemctl start neuros-llm.service 2>/dev/null || true
         echo "  It may take a moment for the model to load."
     fi
@@ -60,13 +60,13 @@ check_model() {
     # Wait a bit for ollama to start
     for i in {1..10}; do
         if curl -s http://localhost:11434/api/tags 2>/dev/null | grep -q "mistral"; then
-            echo "  ✅ Mistral model is available."
+            echo "  [ok] Mistral model is available."
             return 0
         fi
         sleep 2
     done
 
-    echo "  ⚠️  Mistral model not found. It will be pulled on first use."
+    echo "  [warn] Mistral model not found. It will be pulled on first use."
     echo "  Run: ollama pull mistral"
 }
 
@@ -76,7 +76,7 @@ setup_shell() {
 
     if command -v zsh &>/dev/null; then
         # Don't change shell automatically, but remind
-        echo "  ℹ️  zsh is available. Switch with: chsh -s /usr/bin/zsh"
+        echo "  INFO zsh is available. Switch with: chsh -s /usr/bin/zsh"
     fi
 }
 
@@ -110,4 +110,4 @@ show_welcome
 mkdir -p "$(dirname "$MARKER")"
 echo "$(date -Iseconds)" > "$MARKER"
 
-echo "Setup complete! 🎉"
+echo "Setup complete! "

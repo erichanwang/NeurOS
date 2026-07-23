@@ -79,7 +79,7 @@ def add_entry(content, tags=None, source=None):
     kb.append(entry)
     save_kb(kb)
     
-    print(f"✅ Added: {title}")
+    print(f"[ok] Added: {title}")
     print(f"   ID: {entry['id']}")
     print(f"   Tags: {', '.join(entry['tags']) if entry['tags'] else '(none)'}")
     print(f"   Size: {entry['size']} chars")
@@ -124,7 +124,7 @@ def search_entries(query, limit=10):
     
     scored.sort(key=lambda x: -x[0])
     
-    print(f"\n🔍 Results for: {query}\n{'─'*50}")
+    print(f"\nResults for: {query}\n{'─'*50}")
     
     shown = 0
     for score, entry in scored:
@@ -173,7 +173,7 @@ If the knowledge doesn't contain the answer, say so. Be concise."""
         with urlopen(req, timeout=120) as resp:
             answer = json.loads(resp.read()).get("response", "")
         
-        print(f"\n🤖 Answer\n{'─'*50}")
+        print(f"\nAnswer\n{'─'*50}")
         print(answer)
         print(f"\n(Based on {len(context_entries)} knowledge entries)")
     except Exception as e:
@@ -188,7 +188,7 @@ def list_entries(tag=None):
     if tag:
         kb = [e for e in kb if tag.lower() in [t.lower() for t in e.get('tags', [])]]
     
-    print(f"\n📚 Knowledge Base ({len(kb)} entries)\n{'─'*60}")
+    print(f"\nKnowledge Base ({len(kb)} entries)\n{'─'*60}")
     print(f"{'ID':<14} {'Title':<30} {'Tags':<20} {'Size':>8}")
     print('-' * 72)
     
@@ -204,7 +204,7 @@ def delete_entry(entry_id):
             if confirm.lower() == 'y':
                 kb.remove(e)
                 save_kb(kb)
-                print(f"✅ Deleted: {e['title']}")
+                print(f"[ok] Deleted: {e['title']}")
             return
     print(f"Entry {entry_id} not found.")
 
@@ -219,7 +219,7 @@ def import_directory(directory):
                     add_file(os.path.join(root, fname))
                     count += 1
                 except: pass
-    print(f"\n✅ Imported {count} files from {directory}")
+    print(f"\n[ok] Imported {count} files from {directory}")
 
 def export_kb():
     kb = load_kb()
@@ -228,7 +228,7 @@ def export_kb():
     export_data = [{k: v for k, v in e.items() if k != 'embedding'} for e in kb]
     with open(outpath, 'w') as f:
         json.dump(export_data, f, indent=2)
-    print(f"✅ Exported {len(kb)} entries to {outpath}")
+    print(f"[ok] Exported {len(kb)} entries to {outpath}")
 
 def main():
     parser = argparse.ArgumentParser(description="NeurOS Knowledge Base")

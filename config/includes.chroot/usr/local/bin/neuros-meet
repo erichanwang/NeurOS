@@ -94,7 +94,7 @@ END:VCALENDAR"""
     with open(ics_path, "w") as f:
         f.write(ics)
 
-    print(f"📅 Meeting Scheduled: {title}")
+    print(f"Meeting Scheduled: {title}")
     print(f"   Duration: {duration} min")
     print(f"   Attendees: {', '.join(attendees) if attendees else 'None specified'}")
     print(f"   Calendar: {ics_path}")
@@ -150,7 +150,7 @@ def cmd_notes(args):
             print("No existing notes to resume.")
             return
 
-    print(f"📝 Meeting Notes: {title}")
+    print(f"Meeting Notes: {title}")
     print(f"   Saving to: {fpath}")
     print("   Type your notes. Press Ctrl+D on a new line to finish.")
     print("   Commands: /ai <question>  /action <item>  /decision <text>")
@@ -171,16 +171,16 @@ def cmd_notes(args):
                 question = line[4:]
                 answer = query_llm(question, "You are a helpful meeting assistant. Be concise.")
                 if answer:
-                    print(f"🤖 {answer}")
+                    print(f"{answer}")
                     notes.append(f"> **AI:** {answer}")
             elif line.startswith("/action "):
                 item = line[8:]
                 notes.append(f"- [ ] **ACTION:** {item}")
-                print(f"✅ Action added: {item}")
+                print(f"[ok] Action added: {item}")
             elif line.startswith("/decision "):
                 d = line[10:]
                 notes.append(f"**Decision:** {d}")
-                print(f"🔨 Decision recorded: {d}")
+                print(f"Decision recorded: {d}")
             else:
                 notes.append(line)
     except (EOFError, KeyboardInterrupt):
@@ -191,7 +191,7 @@ def cmd_notes(args):
     with open(fpath, "w") as f:
         f.write(content)
 
-    print(f"✅ Notes saved: {fpath}")
+    print(f"[ok] Notes saved: {fpath}")
 
     # Offer to summarize
     print("\nRun 'neuros-meet summarize' to generate meeting summary.")
@@ -200,7 +200,7 @@ def cmd_notes(args):
 def cmd_summarize(args):
     """Summarize meeting notes."""
     if not os.path.exists(args.notes):
-        print(f"❌ Notes file not found: {args.notes}")
+        print(f"[fail] Notes file not found: {args.notes}")
         return
 
     with open(args.notes, "r", encoding="utf-8", errors="replace") as f:
@@ -216,7 +216,7 @@ def cmd_summarize(args):
 
     summary = query_llm(prompt, "You create structured meeting summaries.")
     if summary:
-        print(f"📋 Meeting Summary")
+        print(f"Meeting Summary")
         print("═" * 40)
         print(summary)
 
@@ -227,15 +227,15 @@ def cmd_summarize(args):
             f.write(f"**Original notes:** {args.notes}\n")
             f.write(f"**Generated:** {datetime.now().isoformat()}\n\n")
             f.write(summary)
-        print(f"\n✅ Summary saved: {summary_path}")
+        print(f"\n[ok] Summary saved: {summary_path}")
     else:
-        print("❌ Summarization failed.")
+        print("[fail] Summarization failed.")
 
 
 def cmd_action_items(args):
     """Extract action items from meeting notes."""
     if not os.path.exists(args.notes):
-        print(f"❌ Notes file not found: {args.notes}")
+        print(f"[fail] Notes file not found: {args.notes}")
         return
 
     with open(args.notes, "r", encoding="utf-8", errors="replace") as f:
@@ -270,7 +270,7 @@ def cmd_agenda(args):
 
     agenda = query_llm(prompt, "You create professional meeting agendas.")
     if agenda:
-        print(f"📋 Agenda: {title}")
+        print(f"Agenda: {title}")
         print("═" * 40)
         print(agenda)
 
@@ -282,15 +282,15 @@ def cmd_agenda(args):
             f.write(f"# Agenda: {title}\n\n")
             f.write(f"Generated: {datetime.now().isoformat()}\n\n")
             f.write(agenda)
-        print(f"\n✅ Saved: {fpath}")
+        print(f"\n[ok] Saved: {fpath}")
     else:
-        print("❌ Agenda generation failed.")
+        print("[fail] Agenda generation failed.")
 
 
 def cmd_followup(args):
     """Generate follow-up email from meeting notes."""
     if not os.path.exists(args.notes):
-        print(f"❌ Notes file not found: {args.notes}")
+        print(f"[fail] Notes file not found: {args.notes}")
         return
 
     with open(args.notes, "r", encoding="utf-8", errors="replace") as f:
@@ -300,16 +300,16 @@ def cmd_followup(args):
 
     followup = query_llm(prompt, "You write professional follow-up emails.")
     if followup:
-        print("📧 Follow-up Email Draft")
+        print("Follow-up Email Draft")
         print("─" * 40)
         print(followup)
 
         fpath = args.notes.replace(".md", "_followup.txt")
         with open(fpath, "w") as f:
             f.write(followup)
-        print(f"\n✅ Saved: {fpath}")
+        print(f"\n[ok] Saved: {fpath}")
     else:
-        print("❌ Follow-up generation failed.")
+        print("[fail] Follow-up generation failed.")
 
 
 def cmd_schedule_find(args):
@@ -324,21 +324,21 @@ def cmd_schedule_find(args):
 
     slots = query_llm(prompt, "You help with scheduling. Be specific about times.")
     if slots:
-        print(f"🕐 Available slots for: {when}")
+        print(f"Available slots for: {when}")
         print("─" * 40)
         print(slots)
     else:
-        print("❌ Scheduling failed.")
+        print("[fail] Scheduling failed.")
 
 
 def cmd_transcribe(args):
     """Transcribe meeting audio recording."""
     if not args.audio or not os.path.exists(args.audio):
-        print(f"❌ Audio file not found: {args.audio}")
+        print(f"[fail] Audio file not found: {args.audio}")
         print("Usage: neuros-meet transcribe <audio.mp3>")
         return
 
-    print(f"🎙️ Transcribing: {args.audio}")
+    print(f"Transcribing: {args.audio}")
 
     # Try whisper first
     try:
@@ -346,7 +346,7 @@ def cmd_transcribe(args):
         output_dir = os.path.join(MEET_DIR, "transcripts")
         os.makedirs(output_dir, exist_ok=True)
         subprocess.run(["whisper", args.audio, "--model", "small", "--output_dir", output_dir])
-        print(f"✅ Transcript saved to {output_dir}")
+        print(f"[ok] Transcript saved to {output_dir}")
         return
     except Exception:
         pass

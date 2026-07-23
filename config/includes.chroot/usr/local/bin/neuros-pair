@@ -111,7 +111,7 @@ def explain_context(filepath, context_around=None):
 
 
 def chat_mode():
-    print("👥 NeurOS Pair Programmer — Chat Mode")
+    print("NeurOS Pair Programmer — Chat Mode")
     print("   I can help you code, debug, and design.")
     print("   Commands: 'review <file>', 'refactor <file>', 'explain <file>',")
     print("   'ask <question>', 'exit'")
@@ -119,7 +119,7 @@ def chat_mode():
 
     while True:
         try:
-            cmd = input("👥> ").strip()
+            cmd = input("> ").strip()
         except (KeyboardInterrupt, EOFError):
             break
 

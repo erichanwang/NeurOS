@@ -141,7 +141,7 @@ def cmd_list(args):
     print(f"{'ID':<4} {'Enabled':<8} {'Cron':<20} {'Description'}")
     print("-" * 70)
     for item in schedule:
-        status = "✔" if item.get("enabled", True) else "✘"
+        status = "[ok]" if item.get("enabled", True) else "[fail]"
         cron = item.get("cron", "N/A")
         desc = item["description"][:40]
         print(f"{item['id']:<4} {status:<8} {cron:<20} {desc}")

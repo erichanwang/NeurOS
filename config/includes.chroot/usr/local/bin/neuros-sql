@@ -145,7 +145,7 @@ def execute_sql(db_path, sql):
             print(f"\n{len(rows)} rows returned")
         else:
             conn.commit()
-            print(f"✅ Query executed successfully. {cur.rowcount} rows affected.")
+            print(f"[ok] Query executed successfully. {cur.rowcount} rows affected.")
 
         conn.close()
     except Exception as e:
@@ -153,7 +153,7 @@ def execute_sql(db_path, sql):
 
 def explore_schema(db_path):
     schema = get_schema(db_path)
-    print(f"\n📊 Database: {os.path.basename(db_path)}\n{'═'*40}")
+    print(f"\nDatabase: {os.path.basename(db_path)}\n{'═'*40}")
     print(schema)
 
     # Sample data
@@ -161,7 +161,7 @@ def explore_schema(db_path):
 {schema[:2000]}
 
 Give a 2-3 sentence overview and suggest 3 interesting queries."""
-    print(f"\n🤖 Analysis:\n{query_ollama(prompt)}")
+    print(f"\nAnalysis:\n{query_ollama(prompt)}")
 
 def main():
     parser = argparse.ArgumentParser(description="NeurOS SQL Assistant")
@@ -202,7 +202,7 @@ def main():
         return
 
     sql = generate_sql(question, args.db)
-    print(f"\n💡 SQL:\n{'─'*40}\n{sql}\n")
+    print(f"\nSQL:\n{'─'*40}\n{sql}\n")
 
     if args.db and (args.execute or input("Execute? [y/N]: ").lower() == 'y'):
         execute_sql(args.db, sql)

@@ -184,7 +184,7 @@ def main():
         if shares:
             print(f"\n  Active shares ({len(shares)}):\n")
             for s in shares:
-                print(f"  🔗 {s['code']}  {s['type']}: {s.get('filename','?')[:30]}  "
+                print(f"  {s['code']}  {s['type']}: {s.get('filename','?')[:30]}  "
                       f"({_format_size(s['size'])})  expires {s['expires']}")
         else:
             print("No active shares.")
@@ -193,9 +193,9 @@ def main():
     if args.receive:
         result, error = receive_share(args.receive, args.password, args.output)
         if error:
-            print(f"  ❌ {error}")
+            print(f"  [fail] {error}")
         else:
-            print(f"  ✅ {result}")
+            print(f"  [ok] {result}")
         return
 
     expire_units = {"h": 1, "d": 24, "m": 0.016}
@@ -215,9 +215,9 @@ def main():
         return
 
     if error:
-        print(f"  ❌ {error}")
+        print(f"  [fail] {error}")
     else:
-        print(f"\n  ✅ Shared! Code: {code}")
+        print(f"\n  [ok] Shared! Code: {code}")
         print(f"  Receive: neuros-share --receive {code}")
         print(f"  Expires in: {args.expire}\n")
 

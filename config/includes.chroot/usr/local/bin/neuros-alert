@@ -92,14 +92,14 @@ def run_script(script_path, message):
 
 
 def listen_stdin():
-    print("👂 Alert listener active (Ctrl+C to stop)")
+    print("Alert listener active (Ctrl+C to stop)")
     try:
         for line in sys.stdin:
             line = line.strip()
             if not line:
                 continue
             send_desktop("NeurOS Alert", line)
-            print(f"  🔔 {line}")
+            print(f"  {line}")
     except KeyboardInterrupt:
         pass
 
@@ -132,22 +132,22 @@ def main():
     if args.webhook:
         ok = send_webhook(args.webhook, args.message)
         log_alert("webhook", args.message, ok)
-        results.append(f"{'✅' if ok else '❌'} webhook")
+        results.append(f"{'[ok]' if ok else '[fail]'} webhook")
 
     if args.email:
         ok = send_email(args.email, args.title, args.message)
         log_alert("email", args.message, ok)
-        results.append(f"{'✅' if ok else '❌'} email")
+        results.append(f"{'[ok]' if ok else '[fail]'} email")
 
     if args.script:
         ok = run_script(args.script, args.message)
         log_alert("script", args.message, ok)
-        results.append(f"{'✅' if ok else '❌'} script")
+        results.append(f"{'[ok]' if ok else '[fail]'} script")
 
     if not (args.webhook or args.email or args.script):
         ok = send_desktop(args.title, args.message, args.urgency)
         log_alert("desktop", args.message, ok)
-        results.append(f"{'✅' if ok else '❌'} desktop")
+        results.append(f"{'[ok]' if ok else '[fail]'} desktop")
 
     if results:
         print(f"  Alert: {' '.join(results)}")

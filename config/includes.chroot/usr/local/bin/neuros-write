@@ -118,7 +118,7 @@ def summarize_text(filepath):
 
 
 def interactive_write():
-    print("✍️  NeurOS Writing Assistant — Interactive Mode")
+    print("NeurOS Writing Assistant — Interactive Mode")
     print("   Describe what you want to write, or use commands:")
     print("   'email <topic>', 'blog <topic>', 'improve <file>',")
     print("   'summarize <file>', 'tone <style>', 'exit'")
@@ -127,7 +127,7 @@ def interactive_write():
     tone = "professional"
     while True:
         try:
-            cmd = input(f"✍️ [{tone}]> ").strip()
+            cmd = input(f"[{tone}]> ").strip()
         except (KeyboardInterrupt, EOFError):
             break
 

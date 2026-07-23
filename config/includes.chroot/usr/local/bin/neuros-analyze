@@ -86,17 +86,17 @@ def analyze_data(filepath):
             print(f"Error: Could not read {filepath}")
             return
 
-        print(f"\n📊 Analyzing {fname}")
+        print(f"\nAnalyzing {fname}")
         print(f"   {len(headers)} columns, {len(rows)} rows sampled\n")
 
         # Show column stats
         for col, info in stats.items():
             if isinstance(info, dict):
                 if info.get("type") == "numeric":
-                    print(f"  📈 {col}: avg={info['avg']:.2f}, min={info['min']}, max={info['max']}")
+                    print(f"  {col}: avg={info['avg']:.2f}, min={info['min']}, max={info['max']}")
                 else:
                     samples = ', '.join(str(v) for v in info.get('sample_values', [])[:5])
-                    print(f"  🏷️  {col}: {info['unique_count']} unique values ({samples}...)")
+                    print(f"  {col}: {info['unique_count']} unique values ({samples}...)")
 
         # AI analysis
         sample_data = json.dumps([dict(r) for r in rows[:15]], indent=2)
@@ -104,7 +104,7 @@ def analyze_data(filepath):
 
     elif ext == '.json':
         content = read_json(filepath)
-        print(f"\n📊 Analyzing {fname}")
+        print(f"\nAnalyzing {fname}")
         stats_json = "(see sample below)"
         sample_data = content
     else:
@@ -127,7 +127,7 @@ Provide:
 
 Be specific and data-driven."""
 
-    print(f"\n🤖 AI Analysis\n{'─'*50}")
+    print(f"\nAI Analysis\n{'─'*50}")
     print(query_ollama(prompt))
 
 def natural_sql(db_path, question):
@@ -165,7 +165,7 @@ Return ONLY the SQL query. No explanation."""
     if sql.startswith('sql'):
         sql = sql[3:].strip()
 
-    print(f"\n💡 SQL:\n{sql}\n")
+    print(f"\nSQL:\n{sql}\n")
 
     choice = input("Execute? [y/N]: ")
     if choice.lower() == 'y':

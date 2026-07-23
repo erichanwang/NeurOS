@@ -311,7 +311,7 @@ def fix_disk_full(issue):
         out, err, rc = run_cmd(cmd, sudo=True, timeout=30)
         success = rc == 0
         log_action("fix_disk", desc, cmd, out or err, success)
-        results.append(f"{'✅' if success else '❌'} {desc}")
+        results.append(f"{'[ok]' if success else '[fail]'} {desc}")
 
     return "\n".join(results)
 
@@ -326,7 +326,7 @@ def fix_disk_low(issue):
         out, err, rc = run_cmd(cmd, sudo=True, timeout=30)
         success = rc == 0
         log_action("fix_disk_low", desc, cmd, out or err, success)
-        results.append(f"{'✅' if success else '❌'} {desc}")
+        results.append(f"{'[ok]' if success else '[fail]'} {desc}")
 
     return "\n".join(results)
 
@@ -344,7 +344,7 @@ def fix_broken_package(issue):
         )
         log_action("fix_broken_pkg", "apt-fix", ["apt-get", "install", "-f", "-y"],
                    out2 or err2, rc2 == 0)
-    return f"{'✅' if success else '❌'} dpkg --configure -a"
+    return f"{'[ok]' if success else '[fail]'} dpkg --configure -a"
 
 
 def fix_failed_service(issue):
@@ -355,7 +355,7 @@ def fix_failed_service(issue):
     log_action("fix_failed_svc", svc,
                ["systemctl", "reset-failed", svc, "&&", "systemctl", "restart", svc],
                out2 or err2, success)
-    return f"{'✅' if success else '❌'} Reset + restart {svc}"
+    return f"{'[ok]' if success else '[fail]'} Reset + restart {svc}"
 
 
 def fix_wrong_owner(issue):
@@ -372,7 +372,7 @@ def fix_wrong_owner(issue):
         success = rc == 0
         log_action("fix_owner", path, ["chown", "-R", f"{user}:{user}", path],
                    out or err, success)
-        results.append(f"{'✅' if success else '❌'} {f}")
+        results.append(f"{'[ok]' if success else '[fail]'} {f}")
     return "\n".join(results)
 
 
@@ -386,7 +386,7 @@ def fix_memory_low(issue):
     success = rc == 0
     log_action("fix_memory", "drop_caches", ["sysctl", "-w", "vm.drop_caches=3"],
                out or err, success)
-    results.append(f"{'✅' if success else '❌'} Dropped page cache")
+    results.append(f"{'[ok]' if success else '[fail]'} Dropped page cache")
     return "\n".join(results)
 
 
@@ -398,23 +398,23 @@ def fix_swap_high(issue):
 
     out, err, rc = run_cmd(["sysctl", "-w", "vm.drop_caches=3"], sudo=True, timeout=10)
     if rc == 0:
-        results.append("✅ Dropped page cache")
+        results.append("[ok] Dropped page cache")
     else:
-        results.append(f"❌ drop_caches failed: {err}")
+        results.append(f"[fail] drop_caches failed: {err}")
 
     out, err, rc = run_cmd(["swapoff", "-a"], sudo=True, timeout=30)
     if rc == 0:
         out2, err2, rc2 = run_cmd(["swapon", "-a"], sudo=True, timeout=30)
         if rc2 == 0:
-            results.append("✅ Swap cycled (swapped out memory is being reclaimed)")
+            results.append("[ok] Swap cycled (swapped out memory is being reclaimed)")
             log_action("fix_swap", "cycle", ["swapoff", "-a", "&&", "swapon", "-a"],
                        "Swap cycled successfully", True)
         else:
-            results.append(f"❌ swapon failed: {err2}")
+            results.append(f"[fail] swapon failed: {err2}")
             log_action("fix_swap", "cycle", ["swapoff", "-a"],
                        "swapoff ok, swapon failed", False)
     else:
-        results.append(f"⚠  swapoff skipped (busy): {err[:80]}")
+        results.append(f"[warn] swapoff skipped (busy): {err[:80]}")
     return "\n".join(results)
 
 
@@ -453,7 +453,7 @@ def ai_generate_fix(issue, context):
 # ─── MAIN LOGIC ─────────────────────────────────────────────
 
 def collect_all_checks():
-    print("🔍 Running system diagnostics...\n")
+    print("Running system diagnostics...\n")
     checks = [
         ("Services", check_services()),
         ("Disk Space", check_disk_space()),
@@ -467,20 +467,20 @@ def collect_all_checks():
     all_issues = []
     for name, issues in checks:
         if issues:
-            print(f"  ⚠  {name}: {len(issues)} issue(s)")
+            print(f"  [warn] {name}: {len(issues)} issue(s)")
             for issue in issues:
                 sev = issue.get("severity", "low")
-                icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(sev, "⚪")
+                icon = {"critical": "[red]", "high": "[orange]", "medium": "[yellow]", "low": "[green]"}.get(sev, "[white]")
                 print(f"    {icon} [{sev.upper()}] {issue.get('type', '?')} {issue.get('service', issue.get('detail', ''))}")
                 all_issues.append(issue)
         else:
-            print(f"  ✅ {name}: OK")
+            print(f"  [ok] {name}: OK")
     return all_issues
 
 
 def run_fixes(issues, dry_run=False):
     if not issues:
-        print("\n✅ Nothing to fix. System is healthy.")
+        print("\n[ok] Nothing to fix. System is healthy.")
         return
 
     fix_map = {
@@ -495,18 +495,18 @@ def run_fixes(issues, dry_run=False):
     }
 
     if dry_run:
-        print("\n🔮 DRY RUN — would fix these issues:\n")
+        print("\nDRY RUN — would fix these issues:\n")
         for issue in issues:
             fixer = fix_map.get(issue["type"])
             if fixer:
                 print(f"  Would fix: {issue['type']} - {issue.get('service', issue.get('detail', ''))}")
             else:
-                print(f"  ⚠  No automated fix for: {issue['type']} - needs AI")
+                print(f"  [warn] No automated fix for: {issue['type']} - needs AI")
         print(f"\n{len(issues)} issue(s) would be addressed.")
         return
 
     if not check_sudo():
-        print("\n⚠️  Passwordless sudo not available. Some fixes may fail.")
+        print("\n[warn] Passwordless sudo not available. Some fixes may fail.")
         print("   Set up: sudo visudo -f /etc/sudoers.d/neuros-autofix")
         print("   Add:    %sudo ALL=(ALL) NOPASSWD: ALL\n")
 
@@ -519,10 +519,10 @@ def run_fixes(issues, dry_run=False):
     }.get(x.get("severity", "low"), 4)):
         fixer = fix_map.get(issue["type"])
         if fixer:
-            print(f"\n  🔧 Fixing: {issue['type']}...")
+            print(f"\n  Fixing: {issue['type']}...")
             result = fixer(issue)
             print(f"    {result}")
-            if "❌" in result:
+            if "[fail]" in result:
                 failed += 1
             else:
                 fixed += 1
@@ -530,7 +530,7 @@ def run_fixes(issues, dry_run=False):
             ai_needed.append(issue)
 
     for i, issue in enumerate(ai_needed):
-        print(f"\n  🤖 AI fix attempt {i+1}/{len(ai_needed)} for: {issue['type']}...")
+        print(f"\n  AI fix attempt {i+1}/{len(ai_needed)} for: {issue['type']}...")
         cmd = ai_generate_fix(issue, {"hostname": os.uname().nodename if hasattr(os, "uname") else "neurOS"})
         if cmd:
             print(f"    AI suggests: {cmd}")
@@ -542,27 +542,27 @@ def run_fixes(issues, dry_run=False):
                             out, err, rc = run_cmd(args, sudo="sudo" in line, timeout=60)
                             success = rc == 0
                             log_action("ai_fix", issue["type"], line, out or err, success)
-                            icon = "✅" if success else "❌"
+                            icon = "[ok]" if success else "[fail]"
                             print(f"    {icon} {line}")
                             if success:
                                 fixed += 1
                             else:
                                 failed += 1
                         except Exception as e:
-                            print(f"    ❌ Error: {e}")
+                            print(f"    [fail] Error: {e}")
                             failed += 1
 
-    print(f"\n📊 Fix summary: {fixed} fixed, {failed} failed, {len(ai_needed)} required AI")
+    print(f"\nFix summary: {fixed} fixed, {failed} failed, {len(ai_needed)} required AI")
 
 
 def daemon_mode(interval=300):
-    print(f"🔄 Neuros Autofix Daemon (checking every {interval}s)")
+    print(f"Neuros Autofix Daemon (checking every {interval}s)")
     print(f"   PID: {os.getpid()}")
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
     def handle_signal(signum, frame):
-        print("\n🛑 Daemon stopping...")
+        print("\nDaemon stopping...")
         if os.path.exists(PID_FILE):
             os.unlink(PID_FILE)
         sys.exit(0)
@@ -584,12 +584,12 @@ def daemon_mode(interval=300):
         except KeyboardInterrupt:
             handle_signal(None, None)
         except Exception as e:
-            print(f"  ⚠️  Daemon error: {e}")
+            print(f"  [warn] Daemon error: {e}")
             time.sleep(interval)
 
 
 def interactive_mode():
-    print("🧠 NeurOS Autonomous Sysadmin — Interactive Mode")
+    print("NeurOS Autonomous Sysadmin — Interactive Mode")
     print("   I can navigate your system, run sudo commands, and fix problems.")
     print("   Commands: 'scan', 'fix <issue>', 'cd <dir>', 'ls', 'sudo <cmd>',")
     print("   'cat <file>', 'find <pattern>', 'explain <file>', 'logs', 'exit'")
@@ -598,7 +598,7 @@ def interactive_mode():
     cwd = os.getcwd()
     while True:
         try:
-            user_input = input(f"🧠 {cwd}> ").strip()
+            user_input = input(f"{cwd}> ").strip()
             if not user_input:
                 continue
             if user_input.lower() == "exit":
@@ -606,16 +606,16 @@ def interactive_mode():
             if user_input.lower() == "scan":
                 issues = collect_all_checks()
                 if issues:
-                    print(f"\n  ⚠  {len(issues)} issue(s) found. Type 'fix-all' to fix them.")
+                    print(f"\n  [warn] {len(issues)} issue(s) found. Type 'fix-all' to fix them.")
                 else:
-                    print("  ✅ All checks passed.")
+                    print("  [ok] All checks passed.")
                 continue
             if user_input.lower() == "fix-all":
                 issues = collect_all_checks()
                 if issues:
                     run_fixes(issues)
                 else:
-                    print("  ✅ Nothing to fix.")
+                    print("  [ok] Nothing to fix.")
                 continue
             if user_input.lower() == "logs":
                 if os.path.exists(LOG_FILE):
@@ -623,7 +623,7 @@ def interactive_mode():
                         history = json.load(f)
                     for h in history[-20:]:
                         ts = h["timestamp"][:16].replace("T", " ")
-                        icon = "✅" if h["success"] else "❌"
+                        icon = "[ok]" if h["success"] else "[fail]"
                         print(f"  {icon} [{ts}] {h['action']}: {h.get('target', h['command'][:40])}")
                 else:
                     print("  No fix history yet.")
@@ -649,7 +649,7 @@ def interactive_mode():
                     items = os.listdir(path)
                     for item in sorted(items):
                         full = os.path.join(path, item)
-                        prefix = "📁" if os.path.isdir(full) else "📄"
+                        prefix = "" if os.path.isdir(full) else ""
                         try:
                             size = os.path.getsize(full)
                             size_str = f" ({_format_size(size)})"
@@ -712,7 +712,7 @@ def interactive_mode():
                     )
                     explanation = ollama_generate(prompt, max_tokens=800)
                     if explanation:
-                        print(f"\n🤖 AI Analysis:\n{explanation}\n")
+                        print(f"\nAI Analysis:\n{explanation}\n")
                         action = input("  Apply fix? [y/N]: ").lower()
                         if action == "y":
                             run_fixes(issues)
@@ -740,7 +740,7 @@ def show_logs(n=50):
     print("-" * 80)
     for h in history[-n:]:
         ts = h["timestamp"][:16].replace("T", " ")
-        icon = "✅" if h["success"] else "❌"
+        icon = "[ok]" if h["success"] else "[fail]"
         target = h.get("target", h.get("command", ""))[:40]
         print(f"{ts:<18} {h['action']:<12} {icon:<8} {target}")
 
@@ -788,9 +788,9 @@ def main():
 
     if args.check:
         if not issues:
-            print("\n✅ All checks passed.")
+            print("\n[ok] All checks passed.")
         else:
-            print(f"\n⚠  {len(issues)} issue(s) found. Run 'neuros-autofix' to fix.")
+            print(f"\n[warn] {len(issues)} issue(s) found. Run 'neuros-autofix' to fix.")
         return
 
     if args.fix:
@@ -809,13 +809,13 @@ def main():
             "shell": os.environ.get("SHELL", ""),
         }
         analysis = ai_diagnose(issues, context)
-        print("\n🤖 AI Root Cause Analysis:\n")
+        print("\nAI Root Cause Analysis:\n")
         print(analysis)
 
     if issues:
         run_fixes(issues, dry_run=args.dry_run)
     elif not args.ai and not args.check:
-        print("\n✅ System is healthy — no issues detected.")
+        print("\n[ok] System is healthy — no issues detected.")
         print("   Run 'neuros-autofix --daemon' for continuous monitoring.")
 
 

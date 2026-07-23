@@ -116,9 +116,9 @@ def do_undo():
     for op in reversed(ops):
         try:
             shutil.move(op["new"], op["old"])
-            print(f"  ↩  {op['new']} -> {op['old']}")
+            print(f"  <- {op['new']} -> {op['old']}")
         except Exception as e:
-            print(f"  ❌ {e}")
+            print(f"  [fail] {e}")
     os.remove(fpath)
     print(f"  Undid {len(ops)} rename(s)")
 
@@ -156,10 +156,10 @@ def main():
 
     for old, new in zip(args.files, new_names):
         if old == new:
-            print(f"  ⏭  {old} (unchanged)")
+            print(f"  [skip] {old} (unchanged)")
             continue
         operations.append({"old": old, "new": new})
-        icon = "🔍" if args.dry_run else "✅"
+        icon = "" if args.dry_run else "[ok]"
         print(f"  {icon} {old} -> {new}")
 
     if args.dry_run:
@@ -172,7 +172,7 @@ def main():
             try:
                 shutil.move(op["old"], op["new"])
             except Exception as e:
-                print(f"  ❌ {op['old']}: {e}")
+                print(f"  [fail] {op['old']}: {e}")
         print(f"\n  Renamed {len(operations)} file(s). Undo with: neuros-rename --undo")
 
 

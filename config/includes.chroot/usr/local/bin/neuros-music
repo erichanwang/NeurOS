@@ -130,7 +130,7 @@ def cmd_generate(args):
     """Generate AI music description/notation."""
     prompt = args.prompt
 
-    print(f"🎵 Generating: {prompt}")
+    print(f"Generating: {prompt}")
 
     # AI creates musical notation or description
     system = "You are a music composer. Create musical descriptions or ABC notation."
@@ -159,7 +159,7 @@ def cmd_generate(args):
         if "X:" in result and "K:" in result:
             print("\n(ABC notation detected — install 'abcmidi' to render as MIDI)")
     else:
-        print("❌ Generation failed. Ollama not available.")
+        print("[fail] Generation failed. Ollama not available.")
 
 
 def cmd_playlist(args):
@@ -167,7 +167,7 @@ def cmd_playlist(args):
     music_dir = args.dir or os.path.expanduser("~/Music")
 
     if not os.path.exists(music_dir):
-        print(f"❌ Directory not found: {music_dir}")
+        print(f"[fail] Directory not found: {music_dir}")
         return
 
     files = find_music_files(music_dir)
@@ -187,7 +187,7 @@ def cmd_playlist(args):
 
     selection = query_llm(prompt)
     if not selection:
-        print("❌ AI playlist generation failed.")
+        print("[fail] AI playlist generation failed.")
         return
 
     # Match back to full paths
@@ -200,7 +200,7 @@ def cmd_playlist(args):
                     playlist.append(f)
                 break
 
-    print(f"\n🎧 Playlist: '{args.theme}'")
+    print(f"\nPlaylist: '{args.theme}'")
     print(f"   {len(playlist)} track(s)")
     print()
 
@@ -222,7 +222,7 @@ def cmd_playlist(args):
         "created": datetime.now().isoformat(),
     })
     save_cache(cache)
-    print(f"\n✅ Playlist saved: {playlist_name}")
+    print(f"\n[ok] Playlist saved: {playlist_name}")
 
 
 def cmd_discover(args):
@@ -233,18 +233,18 @@ def cmd_discover(args):
     recommendations = query_llm(prompt, "You are a music recommendation expert.")
 
     if recommendations:
-        print(f"🎧 Similar to: {query}")
+        print(f"Similar to: {query}")
         print()
         print(recommendations)
     else:
-        print("❌ Recommendation failed.")
+        print("[fail] Recommendation failed.")
 
 
 def cmd_organize(args):
     """AI-organize music library by genre/mood."""
     music_dir = args.dir
     if not os.path.exists(music_dir):
-        print(f"❌ Directory not found: {music_dir}")
+        print(f"[fail] Directory not found: {music_dir}")
         return
 
     files = find_music_files(music_dir)
@@ -269,7 +269,7 @@ def cmd_organize(args):
 
     classifications = query_llm(prompt, "You are a music classifier. Be precise.")
     if not classifications:
-        print("❌ Classification failed.")
+        print("[fail] Classification failed.")
         return
 
     # Parse and organize
@@ -310,7 +310,7 @@ def cmd_organize(args):
     if args.dry_run:
         print(f"\n(Dry run — {len(files)} files would be organized)")
     else:
-        print(f"\n✅ Organized {moved} file(s) into genre folders")
+        print(f"\n[ok] Organized {moved} file(s) into genre folders")
 
 
 def cmd_mood(args):
@@ -322,7 +322,7 @@ def cmd_mood(args):
         print(f"Unknown mood: '{mood}'. Did you mean '{closest}'?")
         return
 
-    print(f"🎭 Mood: {mood}")
+    print(f"Mood: {mood}")
 
     prompt = f"Suggest 15 songs for a '{mood}' mood playlist. Include artist and title for each."
     result = query_llm(prompt)
@@ -330,17 +330,17 @@ def cmd_mood(args):
         print()
         print(result)
     else:
-        print("❌ Mood playlist generation failed.")
+        print("[fail] Mood playlist generation failed.")
 
 
 def cmd_analyze(args):
     """Analyze a music file."""
     if not os.path.exists(args.file):
-        print(f"❌ File not found: {args.file}")
+        print(f"[fail] File not found: {args.file}")
         return
 
     info = get_audio_info(args.file)
-    print(f"🎵 {os.path.basename(args.file)}")
+    print(f"{os.path.basename(args.file)}")
     print(f"   Duration: {info['duration']:.0f}s ({info['duration']/60:.1f} min)")
     print(f"   Bitrate: {info['bitrate']/1000:.0f} kbps")
 
@@ -360,7 +360,7 @@ def cmd_radio(args):
         return
 
     url = INTERNET_RADIOS[genre]
-    print(f"📻 Streaming {genre} radio...")
+    print(f"Streaming {genre} radio...")
     print(f"   URL: {url}")
 
     # Try to open in browser or stream with mpv

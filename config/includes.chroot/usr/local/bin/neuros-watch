@@ -102,7 +102,7 @@ class FileWatcher:
             output = result.stdout.strip() or result.stderr.strip()
             if output:
                 rel = os.path.relpath(filepath, self.path)
-                print(f"  🔍 {rel}: {output[:200]}")
+                print(f"  {rel}: {output[:200]}")
 
     def review_file(self, filepath):
         try:
@@ -112,7 +112,7 @@ class FileWatcher:
             result = query_ollama(prompt)
             if result:
                 rel = os.path.relpath(filepath, self.path)
-                print(f"\n  📋 Review: {rel}")
+                print(f"\n  Review: {rel}")
                 print(f"  {'─'*40}")
                 for line in result.strip().split('\n')[:5]:
                     print(f"  {line}")
@@ -127,7 +127,7 @@ class FileWatcher:
             result = query_ollama(prompt)
             if result:
                 rel = os.path.relpath(filepath, self.path)
-                print(f"  📝 {rel}: documentation suggested")
+                print(f"  {rel}: documentation suggested")
         except: pass
 
     def translate_file(self, filepath):
@@ -150,13 +150,13 @@ class FileWatcher:
                 capture_output=True, text=True, timeout=60
             )
             if result.returncode == 0:
-                print(f"  ✅ Tests passed: {os.path.basename(filepath)}")
+                print(f"  [ok] Tests passed: {os.path.basename(filepath)}")
             else:
-                print(f"  ❌ Tests failed: {os.path.basename(filepath)}")
+                print(f"  [fail] Tests failed: {os.path.basename(filepath)}")
                 print(f"  {result.stdout.strip()[:200]}")
 
     def run(self):
-        print(f"👁️  Watching: {self.path}")
+        print(f"Watching: {self.path}")
         print(f"   Action: {self.action}")
         print(f"   Pattern: {self.pattern}")
         print(f"   Press Ctrl+C to stop.\n")
@@ -169,12 +169,12 @@ class FileWatcher:
                 changed = self.get_changed()
                 for filepath, mtime in changed:
                     rel = os.path.relpath(filepath, self.path)
-                    print(f"  📄 Changed: {rel}")
+                    print(f"  Changed: {rel}")
                     self.on_change(filepath, self.action)
 
                 time.sleep(self.debounce)
             except KeyboardInterrupt:
-                print("\n👋 Watcher stopped.")
+                print("\nWatcher stopped.")
                 break
 
 def main():

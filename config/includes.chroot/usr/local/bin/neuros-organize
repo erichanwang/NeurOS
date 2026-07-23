@@ -132,7 +132,7 @@ def apply_plan(plan, directory, dry_run=False):
 
     for category, files in sorted(plan.items()):
         cat_dir = os.path.join(directory, category)
-        print(f"  📁 {category}/ ({len(files)} file(s))")
+        print(f"  {category}/ ({len(files)} file(s))")
 
         if not dry_run:
             os.makedirs(cat_dir, exist_ok=True)
@@ -140,18 +140,18 @@ def apply_plan(plan, directory, dry_run=False):
         for f in files:
             src = os.path.join(directory, f)
             dst = os.path.join(cat_dir, f)
-            print(f"    {'📄' if dry_run else '✅'} {f}")
+            print(f"    {'' if dry_run else '[ok]'} {f}")
 
             if not dry_run:
                 try:
                     shutil.move(src, dst)
                 except Exception as e:
-                    print(f"      ❌ {e}")
+                    print(f"      [fail] {e}")
 
     if dry_run:
         print(f"\n  Dry run complete. Run without --dry-run to apply.")
     else:
-        print(f"\n  ✅ Organized {total} file(s).")
+        print(f"\n  [ok] Organized {total} file(s).")
 
 
 def main():
@@ -170,7 +170,7 @@ def main():
         return
 
     if args.by_ai:
-        print("🤖 AI analyzing files...")
+        print("AI analyzing files...")
         plan = organize_by_ai(directory)
     elif args.by_date:
         plan = organize_by_date(directory)

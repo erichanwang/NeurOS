@@ -117,7 +117,7 @@ Full diff:
 
 Return ONLY the commit message. No explanations."""
 
-    print("🤖 Generating commit message...\n")
+    print("Generating commit message...\n")
     message = query_ollama(prompt)
     print(message)
     print()
@@ -130,7 +130,7 @@ Return ONLY the commit message. No explanations."""
             tmp_path = f.name
         try:
             subprocess.run(["git", "commit", "-F", tmp_path])
-            print("✅ Committed!")
+            print("[ok] Committed!")
         finally:
             os.unlink(tmp_path)
 
@@ -167,7 +167,7 @@ Be concise but thorough.
 Diff:
 {diff}"""
 
-    print("🤖 Analyzing code...\n")
+    print("Analyzing code...\n")
     review = query_ollama(prompt)
     print(review)
 
@@ -218,7 +218,7 @@ Diff:
 
 Return the PR description in markdown."""
 
-    print("🤖 Generating PR description...\n")
+    print("Generating PR description...\n")
     pr_desc = query_ollama(prompt)
     print(pr_desc)
 
@@ -247,7 +247,7 @@ Format:
 
 Return ONLY the changelog in markdown."""
 
-    print("🤖 Generating changelog...\n")
+    print("Generating changelog...\n")
     changelog = query_ollama(prompt)
     print(changelog)
 
@@ -270,7 +270,7 @@ Commit:
 
 Return ONLY the explanation. No preamble."""
 
-    print(f"🤖 Explaining {commit_hash[:8]}...\n")
+    print(f"Explaining {commit_hash[:8]}...\n")
     explanation = query_ollama(prompt)
     print(explanation)
 

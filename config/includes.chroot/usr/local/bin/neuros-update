@@ -179,7 +179,7 @@ def create_snapshot():
         snapshot["uname"] = out
     with open(snap_file, "w") as f:
         json.dump(snapshot, f, indent=2)
-    print(f"  📸 Snapshot saved: {snap_file}")
+    print(f"  Snapshot saved: {snap_file}")
     return snap_file
 
 
@@ -211,7 +211,7 @@ def apply_pip_updates(packages):
         out, err, rc = run_cmd(
             ["pip3", "install", "--upgrade", pkg["name"]], timeout=60
         )
-        results.append(f"{'✅' if rc == 0 else '❌'} {pkg['name']}")
+        results.append(f"{'[ok]' if rc == 0 else '[fail]'} {pkg['name']}")
     return "\\n".join(results)
 
 
@@ -243,7 +243,7 @@ def show_report():
     print("-" * 80)
     for h in history[-30:]:
         ts = h["timestamp"][:19].replace("T", " ")
-        icon = "✅" if h["success"] else "❌"
+        icon = "[ok]" if h["success"] else "[fail]"
         print(f"{ts:<20} {h['action']:<15} {icon:<8} {h['details'][:50]}")
 
 
@@ -263,7 +263,7 @@ def main():
         show_report()
         return
 
-    print("🔍 Checking for updates across all package managers...\\n")
+    print("Checking for updates across all package managers...\\n")
 
     all_updates = []
     for label, fetcher in [
@@ -271,18 +271,18 @@ def main():
         ("flatpak", get_flatpak_updates), ("pip", get_pip_updates)
     ]:
         updates = fetcher()
-        print(f"  {'📦' if updates else '✅'} {label}: {len(updates)} update(s)")
+        print(f"  {'' if updates else '[ok]'} {label}: {len(updates)} update(s)")
         all_updates.extend(updates)
 
     if not all_updates:
-        print("\\n✅ System is up to date!")
+        print("\\n[ok] System is up to date!")
         return
 
     security = get_security_updates()
     if security:
-        print(f"\\n  🔐 Security updates: {len(security)}")
+        print(f"\\n  Security updates: {len(security)}")
 
-    print("\\n🤖 Running AI risk assessment...")
+    print("\\nRunning AI risk assessment...")
     risk = ai_assess_risk(all_updates)
     if risk.get("overall_risk"):
         print(f"  Overall risk: {risk['overall_risk']}")
@@ -296,41 +296,41 @@ def main():
 
     if args.apply or args.full:
         if args.snapshot is False and args.full:
-            print("\\n⚠️  No snapshot created. Consider --snapshot before --full.")
+            print("\\n[warn] No snapshot created. Consider --snapshot before --full.")
             if input("Continue? [y/N]: ").lower() != "y":
                 return
 
-        print("\\n📦 Applying updates...\\n")
+        print("\\nApplying updates...\\n")
         snap = create_snapshot() if not args.snapshot else None
 
         success = True
         if args.security_only:
             success, detail = apply_apt_updates(security, security_only=True)
-            print(f"  {'✅' if success else '❌'} apt security updates")
+            print(f"  {'[ok]' if success else '[fail]'} apt security updates")
         elif args.full:
             out, err, rc = run_cmd(
                 ["apt-get", "dist-upgrade", "-y"], sudo=True, timeout=600
             )
             success = rc == 0
-            print(f"  {'✅' if success else '❌'} apt dist-upgrade")
+            print(f"  {'[ok]' if success else '[fail]'} apt dist-upgrade")
         else:
             apt_pkgs = [u for u in all_updates if u["source"] == "apt"]
             if apt_pkgs:
                 success, detail = apply_apt_updates(apt_pkgs)
-                print(f"  {'✅' if success else '❌'} apt: {len(apt_pkgs)} packages")
+                print(f"  {'[ok]' if success else '[fail]'} apt: {len(apt_pkgs)} packages")
 
         snap_updates = [u for u in all_updates if u["source"] == "snap"]
         if snap_updates:
             ok, _ = apply_snap_updates()
-            print(f"  {'✅' if ok else '❌'} snap: {len(snap_updates)} packages")
+            print(f"  {'[ok]' if ok else '[fail]'} snap: {len(snap_updates)} packages")
 
         flatpak_updates = [u for u in all_updates if u["source"] == "flatpak"]
         if flatpak_updates:
             ok, _ = apply_flatpak_updates()
-            print(f"  {'✅' if ok else '❌'} flatpak: {len(flatpak_updates)} packages")
+            print(f"  {'[ok]' if ok else '[fail]'} flatpak: {len(flatpak_updates)} packages")
 
         log_update("update", f"Applied {len(all_updates)} updates", success)
-        print(f"\\n{'✅' if success else '❌'} Update complete.")
+        print(f"\\n{'[ok]' if success else '[fail]'} Update complete.")
 
 
 if __name__ == "__main__":

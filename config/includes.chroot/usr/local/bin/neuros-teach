@@ -108,12 +108,12 @@ def interactive_mode(topic, level):
     key = f"{topic}_{level}"
     lesson = progress.get(key, {}).get("lesson", 1)
 
-    print(f"\n🧑‍🏫 NeurOS Tutor — {topic.upper()} ({level.upper()})\n")
+    print(f"\n‍NeurOS Tutor — {topic.upper()} ({level.upper()})\n")
     print(f"   Commands: 'next' (next lesson), 'quiz', 'ask <question>', 'progress', 'exit'\n")
 
     while True:
         try:
-            cmd = input(f"📖 [{topic} L{lesson}]> ").strip().lower()
+            cmd = input(f"[{topic} L{lesson}]> ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             break
 
@@ -136,12 +136,12 @@ def interactive_mode(topic, level):
             completed = lesson - 1
             quiz = generate_quiz(topic, level, completed)
             if quiz:
-                print(f"\n📝 QUIZ: {topic}\n{quiz}\n")
+                print(f"\nQUIZ: {topic}\n{quiz}\n")
             else:
                 print("AI unavailable.")
         elif cmd == "progress":
             total = progress.get(key, {}).get("lesson", 1) - 1
-            print(f"  📊 Topic: {topic} | Level: {level} | Lessons: {total}")
+            print(f"  Topic: {topic} | Level: {level} | Lessons: {total}")
         elif cmd.startswith("ask "):
             question = cmd[4:]
             prompt = (
@@ -179,7 +179,7 @@ def main():
         else:
             for key, data in progress.items():
                 topic, level = key.rsplit("_", 1)
-                print(f"  📚 {topic} ({level}): Lesson {data.get('lesson', 1)-1}")
+                print(f"  {topic} ({level}): Lesson {data.get('lesson', 1)-1}")
         return
 
     if not args.topic:
@@ -192,7 +192,7 @@ def main():
         completed = progress.get(key, {}).get("lesson", 1) - 1
         quiz = generate_quiz(args.topic, args.level, completed)
         if quiz:
-            print(f"\n📝 QUIZ: {args.topic}\n\n{quiz}\n")
+            print(f"\nQUIZ: {args.topic}\n\n{quiz}\n")
         else:
             print("AI unavailable.")
         return

@@ -187,7 +187,7 @@ def main():
             if files:
                 print(f"Found {len(files)} matching file(s):\n")
                 for f in files[:30]:
-                    print(f"  📄 {f}")
+                    print(f"  {f}")
             else:
                 print(f"No files match: {args.query}")
     elif args.web:
@@ -197,16 +197,16 @@ def main():
     elif args.knowledge:
         print(search_knowledge(args.query))
     else:
-        print("🔍 Searching across all sources...\n")
-        print("📂 Files:")
+        print("Searching across all sources...\n")
+        print("Files:")
         files = search_files(args.query, args.directory)
         if files:
             for f in files[:5]:
-                print(f"  📄 {f}")
+                print(f"  {f}")
         else:
             print("  No matches")
 
-        print("\n🌐 AI Knowledge:")
+        print("\nAI Knowledge:")
         web_result = search_web(args.query)
         if web_result:
             print(f"  {web_result[:500]}...")
@@ -215,7 +215,7 @@ def main():
 
         kb = search_knowledge(args.query)
         if kb and "No knowledge base" not in kb:
-            print(f"\n📚 Knowledge Base:\n  {kb[:300]}...")
+            print(f"\nKnowledge Base:\n  {kb[:300]}...")
 
 
 if __name__ == "__main__":

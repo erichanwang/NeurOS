@@ -42,7 +42,7 @@ def query_ollama(prompt, stream=False):
         sys.exit(1)
 
 def course_mode(topic):
-    print(f"\n🧠 NeurOS Learn: {topic}")
+    print(f"\nNeurOS Learn: {topic}")
     print("=" * 50)
     print("Type 'next' to continue, 'quiz' for a quiz, 'exit' to quit.\n")
 
@@ -72,13 +72,13 @@ Lesson {lesson_num}:
 
 Return the lesson in markdown."""
 
-        print(f"\n📖 Lesson {lesson_num}\n{'─'*40}")
+        print(f"\nLesson {lesson_num}\n{'─'*40}")
         response = query_ollama(prompt)
         print(response)
         history.append(response[:200])
 
         while True:
-            cmd = input("\n⏭️  [next/quiz/deeper/exit]: ").strip().lower()
+            cmd = input("\n[skip] [next/quiz/deeper/exit]: ").strip().lower()
             if cmd == 'next':
                 lesson_num += 1
                 break
@@ -86,14 +86,14 @@ Return the lesson in markdown."""
                 quiz_mode(topic, history)
             elif cmd == 'deeper':
                 deeper = query_ollama(f"Go deeper on the last lesson about {topic}. Provide more examples and technical details.")
-                print(f"\n🔬 Deep Dive\n{'─'*40}")
+                print(f"\nDeep Dive\n{'─'*40}")
                 print(deeper)
             elif cmd == 'exit':
                 return
             elif cmd:
                 # User asked a specific question
                 answer = query_ollama(f"Student question about {topic}: {cmd}\n\nContext from lessons: {' '.join(history[-2:])}")
-                print(f"\n💡 Answer\n{'─'*40}")
+                print(f"\nAnswer\n{'─'*40}")
                 print(answer)
 
 def quiz_mode(topic, context=None):
@@ -130,7 +130,7 @@ D) [option]
     if current_q:
         quiz_items.append('\n'.join(current_q))
 
-    print(f"\n📝 Quiz: {topic}\n{'─'*40}")
+    print(f"\nQuiz: {topic}\n{'─'*40}")
 
     score = 0
     for i, q in enumerate(quiz_items[:5]):
@@ -144,7 +144,7 @@ D) [option]
         if 'CORRECT' in result.upper():
             score += 1
 
-    print(f"\n📊 Score: {score}/{len(quiz_items[:5])}")
+    print(f"\nScore: {score}/{len(quiz_items[:5])}")
 
 def flashcard_mode(topic):
     prompt = f"""Create 10 flashcards for learning {topic}.
@@ -156,7 +156,7 @@ A: [answer]
 Q: [question]
 A: [answer]"""
 
-    print(f"🃏 Generating flashcards for {topic}...")
+    print(f"Generating flashcards for {topic}...")
     cards_text = query_ollama(prompt)
     cards = []
     for block in cards_text.split('---'):
@@ -178,7 +178,7 @@ A: [answer]"""
     with open(flash_file, 'w') as f:
         json.dump(cards, f, indent=2)
 
-    print(f"\n🃏 {len(cards)} flashcards ready!")
+    print(f"\n{len(cards)} flashcards ready!")
     print(f"Saved: {flash_file}")
 
     # Study mode
@@ -187,18 +187,18 @@ A: [answer]"""
     idx = 0
     while idx < len(cards):
         q, a = cards[idx]
-        print(f"\n📋 Q: {q}")
+        print(f"\nQ: {q}")
         cmd = input("   > ").strip().lower()
         if cmd == 'exit':
             break
         elif cmd in ('flip', 'f', ''):
-            print(f"   ✅ A: {a}")
+            print(f"   [ok] A: {a}")
             idx += 1
         elif cmd == 'next':
             idx += 1
 
 def tutorial_mode(topic):
-    print(f"\n📚 Step-by-Step Tutorial: {topic}")
+    print(f"\nStep-by-Step Tutorial: {topic}")
     print("=" * 50)
 
     prompt = f"""Create a step-by-step hands-on tutorial for learning {topic}.
@@ -229,7 +229,7 @@ def main():
             for f in sorted(os.listdir(LEARN_DIR)):
                 fpath = os.path.join(LEARN_DIR, f)
                 size = os.path.getsize(fpath)
-                print(f"  📄 {f} ({size}B)")
+                print(f"  {f} ({size}B)")
         else:
             print("No saved learning materials.")
         return

@@ -117,7 +117,7 @@ def _quick_hash(path):
 
 
 def watch_sync(src, dst, interval=30):
-    print(f"👁️  Watching for changes every {interval}s...")
+    print(f"Watching for changes every {interval}s...")
     print(f"   Source: {src}")
     print(f"   Dest:   {dst}")
     try:
@@ -126,10 +126,10 @@ def watch_sync(src, dst, interval=30):
             if out.strip():
                 for line in out.splitlines()[:10]:
                     if line.strip():
-                        print(f"  📄 {line.strip()}")
+                        print(f"  {line.strip()}")
             time.sleep(interval)
     except KeyboardInterrupt:
-        print("\n👋 Sync stopped.")
+        print("\nSync stopped.")
 
 
 def main():
@@ -158,9 +158,9 @@ def main():
 
     conflicts = find_conflicts(src, dst)
     if conflicts:
-        print(f"\n⚠  {len(conflicts)} conflict(s) detected:\n")
+        print(f"\n[warn] {len(conflicts)} conflict(s) detected:\n")
         for c in conflicts:
-            print(f"  🔀 {c['file']}")
+            print(f"  {c['file']}")
         if not args.dry_run:
             resp = input("\n  Continue sync? [Y/n]: ").lower()
             if resp == "n":
@@ -170,22 +170,22 @@ def main():
     if args.delete:
         extra += " --delete"
 
-    print(f"\n{'🔍 PREVIEW' if args.dry_run else '🔄 SYNCING'}: {src} -> {dst}\n")
+    print(f"\n{'PREVIEW' if args.dry_run else 'SYNCING'}: {src} -> {dst}\n")
     rc, out, err = rsync(src, dst, extra, args.dry_run)
 
     if out.strip():
         for line in out.splitlines()[:20]:
             if line.strip():
-                print(f"  {'🔍' if args.dry_run else '✅'} {line.strip()}")
+                print(f"  {'' if args.dry_run else '[ok]'} {line.strip()}")
 
     if args.dry_run:
         print(f"\n  Dry run complete. Remove --dry-run to apply.")
     elif rc == 0:
-        print(f"\n  ✅ Sync complete.")
+        print(f"\n  [ok] Sync complete.")
         if conflicts:
-            print(f"  ⚠  {len(conflicts)} conflict(s) may need manual resolution.")
+            print(f"  [warn] {len(conflicts)} conflict(s) may need manual resolution.")
     else:
-        print(f"\n  ❌ Sync failed (exit code {rc})")
+        print(f"\n  [fail] Sync failed (exit code {rc})")
         if err:
             print(f"  {err[:500]}")
 

@@ -73,12 +73,12 @@ def save_workflow(name, workflow):
         json.dump(workflow, f, indent=2)
 
 def list_workflows():
-    print("\n📋 Available Workflows\n" + "=" * 50)
+    print("\nAvailable Workflows\n" + "=" * 50)
     
     # Built-in
     print("\nBuilt-in:")
     for name, wf in DEFAULT_WORKFLOWS.items():
-        print(f"  📦 {name:<20} {wf['name']} ({len(wf['steps'])} steps)")
+        print(f"  {name:<20} {wf['name']} ({len(wf['steps'])} steps)")
     
     # User
     user_wfs = []
@@ -92,7 +92,7 @@ def list_workflows():
         for name in user_wfs:
             wf = load_workflow(name)
             if wf:
-                print(f"  ⚡ {name:<20} {wf['name']} ({len(wf['steps'])} steps)")
+                print(f"  {name:<20} {wf['name']} ({len(wf['steps'])} steps)")
 
 def show_workflow(name):
     wf = load_workflow(name)
@@ -100,9 +100,9 @@ def show_workflow(name):
         print(f"Workflow '{name}' not found.")
         return
     
-    print(f"\n📋 {wf['name']}\n{'='*50}")
+    print(f"\n{wf['name']}\n{'='*50}")
     for i, step in enumerate(wf['steps'], 1):
-        icon = {"command": "💻", "ai": "🤖", "save": "💾", "ask": "❓", "pause": "⏸️"}
+        icon = {"command": "", "ai": "", "save": "", "ask": "?", "pause": ""}
         print(f"  {i}. {icon.get(step['type'], '•')} {step.get('label', step['type'])}")
         if step['type'] == 'command':
             print(f"     cmd: {step['cmd']}")
@@ -113,7 +113,7 @@ def run_workflow(name, extra_vars=None):
         print(f"Workflow '{name}' not found.")
         return
 
-    print(f"\n⚡ Running: {wf['name']}\n{'='*50}")
+    print(f"\nRunning: {wf['name']}\n{'='*50}")
     
     context = {}
     outputs = []
@@ -152,16 +152,16 @@ def run_workflow(name, extra_vars=None):
             os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
             with open(path, 'w') as f:
                 f.write(content)
-            print(f"  ✅ Saved: {path}")
+            print(f"  [ok] Saved: {path}")
 
         elif step['type'] == 'ask':
             question = step.get('question', 'Continue?')
             answer = input(f"  {question} [Y/n]: ")
             if answer.lower() == 'n':
-                print("  ⏹️  Workflow stopped.")
+                print("  [stop] Workflow stopped.")
                 return
 
-    print(f"\n✅ Workflow '{wf['name']}' complete!")
+    print(f"\n[ok] Workflow '{wf['name']}' complete!")
 
 def main():
     parser = argparse.ArgumentParser(description="NeurOS Workflow Automation")
@@ -190,7 +190,7 @@ def main():
         wf_path = os.path.join(WORKFLOW_DIR, f"{args.name}.json")
         if os.path.exists(wf_path):
             os.remove(wf_path)
-            print(f"✅ Deleted: {args.name}")
+            print(f"[ok] Deleted: {args.name}")
         else:
             print("Cannot delete built-in workflows.")
     else:

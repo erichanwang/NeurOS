@@ -183,15 +183,15 @@ def collect_metrics():
 
 def status_icon(value, warn=80, crit=90):
     if value >= crit:
-        return "🔴"
+        return "[red]"
     elif value >= warn:
-        return "🟡"
-    return "🟢"
+        return "[yellow]"
+    return "[green]"
 
 
 def display_health(metrics, ai_analysis=None):
     print("╔══════════════════════════════════════════╗")
-    print("║       🧠 NeurOS Health Dashboard        ║")
+    print("║         NeurOS Health Dashboard          ║")
     print("╠══════════════════════════════════════════╣")
     cpu = metrics["cpu_percent"]
     mem = metrics["memory_percent"]

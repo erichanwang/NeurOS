@@ -254,7 +254,7 @@ def render_dashboard(snap, prev_snap=None):
     # Header
     cols = shutil.get_terminal_size().columns
     print("╔" + "═" * (cols - 2) + "╗")
-    print(f"║  🧠 NeurOS Monitor{' ' * (cols - 20)}║")
+    print(f"║  NeurOS Monitor{' ' * (cols - 18)}║")
     print(f"║  {snap['timestamp'][:19]}  |  Uptime: {snap['uptime']}{' ' * (cols - 48)}║")
     print("╠" + "═" * (cols - 2) + "╣")
 
@@ -283,7 +283,7 @@ def render_dashboard(snap, prev_snap=None):
     print("╟" + "─" * (cols - 2) + "╢")
 
     # Network
-    print(f"║ Net: ↓{format_bytes(rx_rate)}/s  ↑{format_bytes(tx_rate)}/s{' ' * (cols - 40)}║")
+    print(f"║ Net: down{format_bytes(rx_rate)}/s  up{format_bytes(tx_rate)}/s{' ' * (cols - 44)}║")
     print("╟" + "─" * (cols - 2) + "╢")
 
     # GPU
@@ -297,7 +297,7 @@ def render_dashboard(snap, prev_snap=None):
     # Services
     svc_line = "║ Services: "
     for svc, status in snap["services"].items():
-        icon = "✅" if status == "active" else "❌" if status in ("inactive", "failed") else "❓"
+        icon = "[ok]" if status == "active" else "[fail]" if status in ("inactive", "failed") else "?"
         svc_line += f"{icon}{svc}  "
     print(f"{svc_line}{' ' * max(cols - len(svc_line) - 1, 0)}║")
     print("╟" + "─" * (cols - 2) + "╢")

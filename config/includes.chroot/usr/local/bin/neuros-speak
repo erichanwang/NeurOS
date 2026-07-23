@@ -113,7 +113,7 @@ def list_voices():
         print("Piper voices:")
         for f in os.listdir(piper_dir):
             if f.endswith(".onnx"):
-                print(f"  🎵 {f.replace('.onnx', '')}")
+                print(f"  {f.replace('.onnx', '')}")
     else:
         print("Piper voices: (none installed)")
         print("  Download: https://github.com/rhasspy/piper/blob/master/VOICES.md")
@@ -124,7 +124,7 @@ def list_voices():
         print(f"\nespeak-ng voices: {len(result.stdout.splitlines())} available")
         for line in result.stdout.splitlines()[:10]:
             if line.strip():
-                print(f"  🎵 {line.strip()}")
+                print(f"  {line.strip()}")
         print(f"  ... and more")
     except Exception:
         pass
@@ -168,7 +168,7 @@ def main():
         print("No text to speak.")
         return
 
-    print(f"🔊 Speaking ({len(text)} chars)...")
+    print(f"Speaking ({len(text)} chars)...")
     success = speak(text, engine=args.engine, voice=args.voice, speed=args.speed)
 
     if not success:

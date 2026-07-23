@@ -70,7 +70,7 @@ def network_status():
     except:
         info["internet"] = "Not connected"
 
-    print("🌐 Network Status\n" + "=" * 40)
+    print("Network Status\n" + "=" * 40)
     for k, v in info.items():
         if isinstance(v, list):
             print(f"  {k}:")
@@ -80,7 +80,7 @@ def network_status():
             print(f"  {k}: {v}")
 
 def network_diagnose():
-    print("🔍 Running network diagnostics...\n")
+    print("Running network diagnostics...\n")
     issues = []
 
     # Check connectivity
@@ -96,11 +96,11 @@ def network_diagnose():
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
             success = result.returncode == 0
-            results.append(f"{'✅' if success else '❌'} {name}: {'OK' if success else result.stderr[:100]}")
+            results.append(f"{'[ok]' if success else '[fail]'} {name}: {'OK' if success else result.stderr[:100]}")
             if not success:
                 issues.append(name)
         except:
-            results.append(f"❌ {name}: test failed")
+            results.append(f"[fail] {name}: test failed")
             issues.append(name)
 
     for r in results:
@@ -120,18 +120,18 @@ Provide:
 3. Prevention tips"""
         insight = query_ollama(prompt)
         if insight:
-            print(f"\n🤖 AI Diagnosis\n{'─'*40}")
+            print(f"\nAI Diagnosis\n{'─'*40}")
             print(insight)
 
 def check_ports():
-    print("🔌 Open Ports\n" + "=" * 40)
+    print("Open Ports\n" + "=" * 40)
     try:
         result = subprocess.run(["ss", "-tlnp4"], capture_output=True, text=True, timeout=5)
         print(result.stdout)
     except: pass
 
 def dns_lookup(domain):
-    print(f"🔍 DNS Lookup: {domain}\n" + "=" * 40)
+    print(f"DNS Lookup: {domain}\n" + "=" * 40)
     try:
         result = subprocess.run(["dig", "+short", domain], capture_output=True, text=True, timeout=5)
         print(f"  A records:\n    {result.stdout.strip()}")
@@ -148,7 +148,7 @@ def dns_lookup(domain):
         print(f"  Could not resolve {domain}")
 
 def basic_scan(network):
-    print(f"🔍 Scanning {network} (basic)...\n")
+    print(f"Scanning {network} (basic)...\n")
     try:
         result = subprocess.run(
             ["nmap", "-sn", "-T4", network],
@@ -167,7 +167,7 @@ def basic_scan(network):
                 socket.create_connection((ip, 80), timeout=0.3)
                 try: host = socket.gethostbyaddr(ip)[0]
                 except: host = "unknown"
-                print(f"  🟢 {ip} ({host})")
+                print(f"  [green] {ip} ({host})")
             except: pass
 
 def main():

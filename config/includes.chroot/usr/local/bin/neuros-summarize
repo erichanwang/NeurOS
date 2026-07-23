@@ -137,7 +137,7 @@ Provide:
 ## Changes (bullet list)
 ## Impact (what this affects)"""
         
-        print("🤖 Summarizing git changes...\n")
+        print("Summarizing git changes...\n")
         print(query_ollama(prompt))
         return
     except Exception as e:
@@ -174,7 +174,7 @@ def main():
     elif args.executive: style = "executive"
     elif args.code: style = "code"
 
-    print(f"📄 Summarizing: {title}\n")
+    print(f"Summarizing: {title}\n")
     result = summarize(content, title, style)
     print(result)
 

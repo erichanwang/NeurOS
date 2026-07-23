@@ -33,7 +33,7 @@ def process_file(filepath, instruction, output_dir=None, dry_run=False):
         with open(filepath, 'r', errors='replace') as f:
             content = f.read()[:5000]
     except Exception as e:
-        print(f"❌ Read error: {e}")
+        print(f"[fail] Read error: {e}")
         return {"file": filepath, "status": "error", "error": str(e)}
 
     prompt = f"""Process this file according to the instruction.
@@ -49,7 +49,7 @@ Return ONLY the processed result."""
     try:
         result = query_ollama(prompt)
         if result.startswith("Error:"):
-            print("❌ LLM error")
+            print("[fail] LLM error")
             return {"file": filepath, "status": "error", "error": result}
 
         if output_dir and not dry_run:
@@ -60,13 +60,13 @@ Return ONLY the processed result."""
             clean = result
             if clean.startswith("```"): clean = '\n'.join(l for l in clean.split('\n') if not l.startswith("```"))
             with open(outpath, 'w') as f: f.write(clean)
-            print(f"✅ → {outname}")
+            print(f"[ok] -> {outname}")
             return {"file": filepath, "status": "done", "output": outpath}
         else:
-            print("✅")
+            print("[ok]")
             return {"file": filepath, "status": "done", "result": result[:200]}
     except Exception as e:
-        print(f"❌ {e}")
+        print(f"[fail] {e}")
         return {"file": filepath, "status": "error", "error": str(e)}
 
 def main():
@@ -99,7 +99,7 @@ def main():
         print("No files found matching the pattern(s).")
         return
 
-    print(f"\n📦 Batch Processing: {len(all_files)} files")
+    print(f"\nBatch Processing: {len(all_files)} files")
     print(f"   Instruction: {args.instruction}")
     if args.output:
         print(f"   Output: {args.output}/")
@@ -125,7 +125,7 @@ def main():
     errors = sum(1 for r in results if r['status'] == 'error')
 
     print(f"\n{'─'*50}")
-    print(f"✅ {done} processed | ❌ {errors} errors | ⏱️ {elapsed:.1f}s")
+    print(f"[ok] {done} processed | [fail] {errors} errors | {elapsed:.1f}s")
 
 if __name__ == "__main__":
     main()

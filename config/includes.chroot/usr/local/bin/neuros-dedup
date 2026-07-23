@@ -134,11 +134,11 @@ def main():
     args = parser.parse_args()
     directory = os.path.abspath(args.directory)
 
-    print(f"🔍 Scanning for duplicates in: {directory}\n")
+    print(f"Scanning for duplicates in: {directory}\n")
     duplicates = find_duplicates(directory, args.min_size)
 
     if not duplicates:
-        print("✅ No duplicate files found.")
+        print("[ok] No duplicate files found.")
         return
 
     total_saved = 0
@@ -149,17 +149,17 @@ def main():
         size = os.path.getsize(paths[0])
         total_saved += size * (len(paths) - 1)
 
-        print(f"\n  🔄 {len(paths)} copies ({_format_size(size)} each):")
+        print(f"\n  {len(paths)} copies ({_format_size(size)} each):")
         for p in paths:
-            print(f"    📄 {p}")
+            print(f"    {p}")
 
         if args.delete:
             for p in paths[1:]:
                 try:
                     os.remove(p)
-                    print(f"    🗑️  Deleted: {p}")
+                    print(f"    Deleted: {p}")
                 except Exception as e:
-                    print(f"    ❌ {e}")
+                    print(f"    [fail] {e}")
         elif args.interactive:
             for i, p in enumerate(paths):
                 print(f"    [{i+1}] {p}")
@@ -170,12 +170,12 @@ def main():
                     if i != keep_idx:
                         try:
                             os.remove(p)
-                            print(f"    🗑️  Deleted: {p}")
+                            print(f"    Deleted: {p}")
                         except Exception as e:
-                            print(f"    ❌ {e}")
+                            print(f"    [fail] {e}")
 
-    print(f"\n📊 Summary: {dup_count} duplicates found")
-    print(f"   💾 Space that could be freed: {_format_size(total_saved)}")
+    print(f"\nSummary: {dup_count} duplicates found")
+    print(f"   Space that could be freed: {_format_size(total_saved)}")
 
     if not args.delete and not args.interactive:
         print(f"\n   Run with --delete to auto-remove, or --interactive to review.")

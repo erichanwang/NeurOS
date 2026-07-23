@@ -33,7 +33,7 @@ class WelcomeWindow(Gtk.Window):
 
         # Title
         title = Gtk.Label()
-        title.set_markup('<span size="xx-large" weight="bold">🧠 Welcome to NeurOS</span>')
+        title.set_markup('<span size="xx-large" weight="bold">Welcome to NeurOS</span>')
         title.set_halign(Gtk.Align.CENTER)
         vbox.pack_start(title, False, False, 0)
 
@@ -54,12 +54,12 @@ class WelcomeWindow(Gtk.Window):
         grid.set_halign(Gtk.Align.CENTER)
 
         features = [
-            ("💻", "Terminal Assistant", "Type 'nn \"your question\"'\nin any terminal"),
-            ("🔒", "100% Local AI", "Your data never leaves\nthis machine"),
-            ("📝", "Code Completion", "Continue.dev + Neovim\npre-configured"),
-            ("⚡", "Quick Ask", "Click the brain icon in\nyour system tray"),
-            ("🛡️", "Privacy First", "No telemetry. No cloud.\nFirewall enabled."),
-            ("🎨", "Dev Ready", "Zsh, Neovim, Git, Python\npre-installed"),
+            ("", "Terminal Assistant", "Type 'nn \"your question\"'\nin any terminal"),
+            ("", "100% Local AI", "Your data never leaves\nthis machine"),
+            ("", "Code Completion", "Continue.dev + Neovim\npre-configured"),
+            ("", "Quick Ask", "Click the brain icon in\nyour system tray"),
+            ("", "Privacy First", "No telemetry. No cloud.\nFirewall enabled."),
+            ("", "Dev Ready", "Zsh, Neovim, Git, Python\npre-installed"),
         ]
 
         for i, (emoji, feat_title, feat_desc) in enumerate(features):

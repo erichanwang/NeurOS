@@ -175,14 +175,14 @@ def main():
 
     if args.decompress:
         ok, msg = decompress(args.target)
-        print(f"{'✅' if ok else '❌'} {msg}")
+        print(f"{'[ok]' if ok else '[fail]'} {msg}")
         return
 
     info = analyze_target(args.target)
     fmt = args.format or ai_suggest_format(info)
     orig_size = info["size"]
 
-    print(f"📦 Compressing: {args.target}")
+    print(f"Compressing: {args.target}")
     print(f"   Format: {fmt}, Level: {args.level}")
     print(f"   Original size: {_format_size(orig_size)}")
 
@@ -191,9 +191,9 @@ def main():
     if ok and os.path.exists(output):
         new_size = os.path.getsize(output)
         ratio = (1 - new_size / orig_size) * 100 if orig_size > 0 else 0
-        print(f"   ✅ {output} ({_format_size(new_size)}, {ratio:.1f}% saved)")
+        print(f"   [ok] {output} ({_format_size(new_size)}, {ratio:.1f}% saved)")
     else:
-        print(f"   ❌ Compression failed: {msg}")
+        print(f"   [fail] Compression failed: {msg}")
 
 
 def _format_size(size):

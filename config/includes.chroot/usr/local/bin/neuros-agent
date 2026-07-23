@@ -377,7 +377,7 @@ def system_status():
     info = get_system_info()
     ollama = get_ollama_status()
 
-    print("🧠  NeurOS System Status")
+    print("NeurOS System Status")
     print("=" * 40)
 
     if "uptime" in info:
@@ -393,7 +393,7 @@ def system_status():
     if "local_ip" in info:
         print(f"  Local IP:   {info['local_ip']}")
 
-    print(f"  LLM:        {'🟢 Running' if ollama['running'] else '🔴 Stopped'}")
+    print(f"  LLM:        {'[green] Running' if ollama['running'] else '[red] Stopped'}")
     if ollama.get("models"):
         print(f"  Models:     {', '.join(ollama['models'])}")
 

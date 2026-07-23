@@ -48,6 +48,12 @@ COPY build.sh /opt/neuros/
 COPY Makefile /opt/neuros/
 COPY validate-build.sh /opt/neuros/
 
+# COPY carries the mode from the build context, so this is a no-op on a normal
+# checkout. It is here because the entrypoint is one of these files: if the
+# execute bit is ever lost upstream, the failure is "exec format"/"permission
+# denied" at docker run time rather than anything visible during the build.
+RUN chmod +x /opt/neuros/build.sh /opt/neuros/validate-build.sh
+
 # Install Python dependencies
 RUN pip3 install --break-system-packages requests || true
 

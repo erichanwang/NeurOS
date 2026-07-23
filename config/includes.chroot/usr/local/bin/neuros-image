@@ -97,7 +97,7 @@ def convert_image(filepath, target_format, quality=85):
             "-quality", str(quality),
             outpath
         ], capture_output=True, timeout=30, check=True)
-        print(f"✅ Converted: {outpath}")
+        print(f"[ok] Converted: {outpath}")
     except FileNotFoundError:
         print("ImageMagick not installed. Install: sudo apt install imagemagick")
     except Exception as e:
@@ -117,7 +117,7 @@ def resize_image(filepath, width=None, height=None):
     try:
         subprocess.run(args, capture_output=True, timeout=30, check=True)
         size = os.path.getsize(outpath)
-        print(f"✅ Resized: {outpath} ({size/1024:.1f}KB)")
+        print(f"[ok] Resized: {outpath} ({size/1024:.1f}KB)")
     except FileNotFoundError:
         print("ImageMagick not installed. Install: sudo apt install imagemagick")
 
@@ -132,8 +132,8 @@ def compress_image(filepath, quality=80):
         ], capture_output=True, timeout=30, check=True)
         new_size = os.path.getsize(outpath)
         savings = (1 - new_size / orig_size) * 100
-        print(f"✅ Compressed: {outpath}")
-        print(f"   {orig_size/1024:.1f}KB → {new_size/1024:.1f}KB ({savings:.0f}% savings)")
+        print(f"[ok] Compressed: {outpath}")
+        print(f"   {orig_size/1024:.1f}KB -> {new_size/1024:.1f}KB ({savings:.0f}% savings)")
     except FileNotFoundError:
         print("ImageMagick not installed.")
 
@@ -164,14 +164,14 @@ def main():
     args = parser.parse_args()
 
     if args.command == "describe":
-        print("🖼️ Image Description\n" + "=" * 40)
+        print("Image Description\n" + "=" * 40)
         # Try vision model first, fall back to metadata
         result = describe_with_llava(args.file)
         if "unavailable" in result.lower():
             result = describe_with_metadata(args.file)
         print(result)
     elif args.command == "ocr":
-        print(f"📝 OCR: {args.file}\n{'='*40}")
+        print(f"OCR: {args.file}\n{'='*40}")
         text = ocr_image(args.file)
         print(text or "(no text found)")
     elif args.command == "convert":

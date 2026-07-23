@@ -111,7 +111,7 @@ def ai_patterns(content):
 
 
 def tail_analyze(filepath, interval=5):
-    print(f"📡 Tailing: {filepath}\n")
+    print(f"Tailing: {filepath}\n")
     try:
         proc = subprocess.Popen(
             ["tail", "-f", "-n", "50", filepath],
@@ -129,7 +129,7 @@ def tail_analyze(filepath, interval=5):
             if len(buffer) > 50 and time.time() - last_check > interval:
                 analysis = ai_analyze("".join(buffer[-50:]))
                 if analysis:
-                    print(f"\n🤖 AI Analysis:\n{analysis}\n")
+                    print(f"\nAI Analysis:\n{analysis}\n")
                 buffer = buffer[-20:]
                 last_check = time.time()
     except KeyboardInterrupt:
@@ -155,7 +155,7 @@ def main():
         if not content:
             print(f"No journal entries for: {args.journal}")
             return
-        print(f"📋 Journal: {args.journal} ({len(content.splitlines())} lines)\n")
+        print(f"Journal: {args.journal} ({len(content.splitlines())} lines)\n")
 
         if args.tail:
             print("Analyzing...")
@@ -165,7 +165,7 @@ def main():
         elif args.errors:
             errors = extract_errors(content)
             if errors:
-                print(f"🔴 Errors ({len(errors.splitlines())}):\n")
+                print(f"[red] Errors ({len(errors.splitlines())}):\n")
                 print(errors[:3000])
             else:
                 print("No errors found.")
@@ -189,15 +189,15 @@ def main():
         print(f"Log not found: {args.source}")
         return
 
-    print(f"📋 {args.source} ({len(content.splitlines())} lines)\n")
+    print(f"{args.source} ({len(content.splitlines())} lines)\n")
 
     if args.errors:
         errors = extract_errors(content)
         if errors:
-            print(f"🔴 Errors ({len(errors.splitlines())}):\n{errors[:3000]}")
+            print(f"[red] Errors ({len(errors.splitlines())}):\n{errors[:3000]}")
             analysis = ai_analyze(errors, "errors")
             if analysis:
-                print(f"\n🤖 Analysis:\n{analysis}")
+                print(f"\nAnalysis:\n{analysis}")
         else:
             print("No errors found.")
     elif args.patterns:
