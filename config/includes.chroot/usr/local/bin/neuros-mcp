@@ -36,25 +36,13 @@ class MCPServer(BaseHTTPRequestHandler):
             self.send_error(400, "Invalid JSON")
             return
 
-        method = request.get("method", "")
-        params = request.get("params", {})
-        req_id = request.get("id")
-
-        if method == "initialize":
-            result = self.handle_initialize(params)
-        elif method == "tools/list":
-            result = self.handle_list_tools()
-        elif method == "tools/call":
-            result = self.handle_call_tool(params)
-        elif method == "resources/list":
-            result = self.handle_list_resources()
-        elif method == "resources/read":
-            result = self.handle_read_resource(params)
+        response = dispatch_request(self, request)
+        if response is not None:
+            self.send_json(response)
         else:
-            self.send_json({"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": req_id})
-            return
-
-        self.send_json({"jsonrpc": "2.0", "result": result, "id": req_id})
+            # Notification (no "id") -- MCP expects no response body.
+            self.send_response(204)
+            self.end_headers()
 
     def send_json(self, data):
         self.send_response(200)
@@ -341,6 +329,64 @@ class MCPServer(BaseHTTPRequestHandler):
         pass
 
 
+def dispatch_request(handler, request):
+    """Route one JSON-RPC request to the matching handler method.
+
+    Shared by both the HTTP transport (do_POST) and the stdio transport
+    (run_stdio), so tool/resource logic is only implemented once.
+    Returns None for notifications (no "id"), which must not get a reply.
+    """
+    method = request.get("method", "")
+    params = request.get("params", {})
+    req_id = request.get("id")
+
+    if method == "notifications/initialized":
+        return None
+
+    if method == "initialize":
+        result = handler.handle_initialize(params)
+    elif method == "tools/list":
+        result = handler.handle_list_tools()
+    elif method == "tools/call":
+        result = handler.handle_call_tool(params)
+    elif method == "resources/list":
+        result = handler.handle_list_resources()
+    elif method == "resources/read":
+        result = handler.handle_read_resource(params)
+    else:
+        return {"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": req_id}
+
+    return {"jsonrpc": "2.0", "result": result, "id": req_id}
+
+
+def run_stdio():
+    """MCP stdio transport: newline-delimited JSON-RPC on stdin/stdout.
+
+    Per the MCP spec, the server must write ONLY JSON-RPC messages to
+    stdout (one per line) and may use stderr freely for logging. This is
+    the transport real MCP clients (Claude Code, Claude Desktop, etc.)
+    use to launch a local server as a subprocess.
+    """
+    handler = MCPServer.__new__(MCPServer)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            print(json.dumps({
+                "jsonrpc": "2.0",
+                "error": {"code": -32700, "message": "Parse error"},
+                "id": None
+            }), flush=True)
+            continue
+
+        response = dispatch_request(handler, request)
+        if response is not None:
+            print(json.dumps(response), flush=True)
+
+
 def check_ollama():
     try:
         import urllib.request
@@ -356,7 +402,13 @@ def main():
     parser = argparse.ArgumentParser(description="NeurOS MCP Server")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port (default: {DEFAULT_PORT})")
     parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
+    parser.add_argument("--stdio", action="store_true",
+                         help="Speak MCP over stdio instead of HTTP (for MCP clients that launch the server as a subprocess)")
     args = parser.parse_args()
+
+    if args.stdio:
+        run_stdio()
+        return
 
     server = HTTPServer((args.host, args.port), MCPServer)
 

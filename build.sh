@@ -14,6 +14,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_LOG="$SCRIPT_DIR/build.log"
 ISO_NAME="live-image-amd64.hybrid.iso"
 
+# Ubuntu archive snapshot used to build the chroot, pinned to a fixed date
+# so `apt` resolves the same package versions on every build instead of
+# whatever happens to be current in the live archive that day. See
+# https://snapshot.ubuntu.com/ for details on the service. Bump this
+# deliberately (and re-run validate-build.sh) when the package set needs
+# to move forward; it will not drift on its own.
+SNAPSHOT_TS="20260701T000000Z"
+SNAPSHOT_MIRROR="https://snapshot.ubuntu.com/ubuntu/${SNAPSHOT_TS}"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -85,12 +94,27 @@ configure_live_build() {
 
     # Initialize live-build config if not already done
     if [[ ! -f "auto/config" ]]; then
+        # --mirror-bootstrap/--mirror-chroot(-security) pin the package
+        # versions used to build the chroot to the snapshot above, for
+        # reproducibility. --mirror-binary is intentionally left at the
+        # live-build default (the regular Ubuntu mirrors) so the ISO
+        # ships with normal, current sources.list entries -- installed
+        # systems should get real ongoing updates, not be frozen to a
+        # months-old snapshot forever.
+        # --mode ubuntu is required for live-build to default to Ubuntu's
+        # mirrors/keyring for an Ubuntu suite; without it, lb config
+        # defaults to Debian's own archive, which has no "noble" suite
+        # and would break debootstrap on a truly clean checkout.
         lb config \
+            --mode ubuntu \
             --distribution noble \
             --archive-areas "main restricted universe multiverse" \
             --debian-installer none \
             --memtest none \
-            --binary-images iso-hybrid
+            --binary-images iso-hybrid \
+            --mirror-bootstrap "$SNAPSHOT_MIRROR" \
+            --mirror-chroot "$SNAPSHOT_MIRROR" \
+            --mirror-chroot-security "$SNAPSHOT_MIRROR"
         success "live-build configured."
     else
         warn "live-build config already exists. Using existing configuration."

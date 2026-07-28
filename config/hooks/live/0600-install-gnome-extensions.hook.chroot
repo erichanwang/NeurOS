@@ -40,15 +40,17 @@ if [ ! -d "$EXT_DIR" ]; then
     echo "[NeurOS] Downloading blur-my-shell extension..."
     mkdir -p "$EXT_DIR"
 
-    # Download latest release from GitHub
-    BLUR_VERSION="v60"  # GNOME 46 compatible
-    BLUR_URL="https://github.com/aunetx/blur-my-shell/archive/refs/tags/${BLUR_VERSION}.tar.gz"
+    # Pinned to the commit for the v60 tag (GNOME 46 compatible). A commit
+    # SHA is used instead of the tag name so the archive can't change out
+    # from under us if the tag is ever moved upstream.
+    BLUR_SHA="5ac26249baa9dea04498b86312c52528254971f8"  # v60
+    BLUR_URL="https://github.com/aunetx/blur-my-shell/archive/${BLUR_SHA}.tar.gz"
 
     if wget -q "$BLUR_URL" -O /tmp/blur-my-shell.tar.gz 2>/dev/null; then
         tar -xzf /tmp/blur-my-shell.tar.gz -C /tmp/
-        if [ -d "/tmp/blur-my-shell-${BLUR_VERSION#v}" ]; then
-            cp -r /tmp/blur-my-shell-${BLUR_VERSION#v}/* "$EXT_DIR/" 2>/dev/null || true
-            rm -rf /tmp/blur-my-shell-${BLUR_VERSION#v}
+        if [ -d "/tmp/blur-my-shell-${BLUR_SHA}" ]; then
+            cp -r /tmp/blur-my-shell-${BLUR_SHA}/* "$EXT_DIR/" 2>/dev/null || true
+            rm -rf /tmp/blur-my-shell-${BLUR_SHA}
         fi
         rm -f /tmp/blur-my-shell.tar.gz
         echo "[NeurOS] blur-my-shell installed."
@@ -63,12 +65,14 @@ if [ ! -d "$CAFFEINE_DIR" ]; then
     echo "[NeurOS] Downloading caffeine extension..."
     mkdir -p "$CAFFEINE_DIR"
 
-    CAFFEINE_URL="https://github.com/eonpatapon/gnome-shell-extension-caffeine/archive/refs/tags/v50.tar.gz"
+    # Pinned to the commit for the v50 tag, same rationale as blur-my-shell above.
+    CAFFEINE_SHA="d8dbae0958a13bab9df0479497786066a269b859"  # v50
+    CAFFEINE_URL="https://github.com/eonpatapon/gnome-shell-extension-caffeine/archive/${CAFFEINE_SHA}.tar.gz"
     if wget -q "$CAFFEINE_URL" -O /tmp/caffeine.tar.gz 2>/dev/null; then
         tar -xzf /tmp/caffeine.tar.gz -C /tmp/
-        if [ -d "/tmp/gnome-shell-extension-caffeine-50" ]; then
-            cp -r /tmp/gnome-shell-extension-caffeine-50/* "$CAFFEINE_DIR/" 2>/dev/null || true
-            rm -rf /tmp/gnome-shell-extension-caffeine-50
+        if [ -d "/tmp/gnome-shell-extension-caffeine-${CAFFEINE_SHA}" ]; then
+            cp -r /tmp/gnome-shell-extension-caffeine-${CAFFEINE_SHA}/* "$CAFFEINE_DIR/" 2>/dev/null || true
+            rm -rf /tmp/gnome-shell-extension-caffeine-${CAFFEINE_SHA}
         fi
         rm -f /tmp/caffeine.tar.gz
         echo "[NeurOS] caffeine extension installed."

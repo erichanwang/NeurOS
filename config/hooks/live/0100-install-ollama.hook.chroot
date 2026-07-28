@@ -5,8 +5,14 @@ set -e
 
 echo "[NeurOS] Installing Ollama..."
 
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
+# Install Ollama. The installer is fetched from a pinned commit (the
+# scripts/install.sh at the v0.32.5 release tag) instead of the floating
+# ollama.com/install.sh, and OLLAMA_VERSION pins the binary itself --
+# otherwise both the installer logic and the installed version can drift
+# between builds.
+OLLAMA_INSTALL_SHA="eec8e0b9458b8a01be0c216a9cc53eefde24ef50"  # v0.32.5
+export OLLAMA_VERSION="0.32.5"
+curl -fsSL "https://raw.githubusercontent.com/ollama/ollama/${OLLAMA_INSTALL_SHA}/scripts/install.sh" | sh
 
 # Pre-pull Mistral 7B model (quantized, ~4GB)
 echo "[NeurOS] Pulling Mistral 7B model (this will take a while)..."

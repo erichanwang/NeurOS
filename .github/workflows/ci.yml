@@ -24,7 +24,12 @@ jobs:
         run: bash validate-build.sh
 
       - name: Run unit tests
-        run: python3 tests/test_nn.py -v
+        run: |
+          python3 tests/test_nn.py -v
+          python3 tests/test_mcp.py -v
+
+      - name: Air-gap check (no new outbound network calls)
+        run: bash scripts/check-airgap.sh
 
       - name: Check shell script syntax
         run: |
@@ -72,7 +77,7 @@ jobs:
           done
 
   build-iso:
-    name: Build ISO (Structure Check)
+    name: Build ISO (Structure + lb config + package resolution)
     runs-on: ubuntu-24.04
     needs: validate
     steps:
@@ -91,7 +96,40 @@ jobs:
           test -d config/package-lists && echo "OK: package lists present"
           test -f build.sh && echo "OK: build.sh present"
           test -f validate-build.sh && echo "OK: validate-build.sh present"
-          echo "Structure OK — full ISO build requires 20GB disk (CI runners limited)"
+          echo "Structure OK — a full ISO build (debootstrap + chroot + squashfs)"
+          echo "needs 20GB+ disk and privileged mounts CI runners don't have."
+
+      - name: Run lb config with the pinned snapshot mirror
+        run: |
+          SNAPSHOT_TS=$(grep -oP '(?<=SNAPSHOT_TS=")[^"]+' build.sh)
+          SNAPSHOT_MIRROR="https://snapshot.ubuntu.com/ubuntu/${SNAPSHOT_TS}"
+          echo "Pinned snapshot: $SNAPSHOT_MIRROR"
+          lb config \
+            --mode ubuntu \
+            --distribution noble \
+            --archive-areas "main restricted universe multiverse" \
+            --debian-installer none \
+            --memtest none \
+            --binary-images iso-hybrid \
+            --mirror-bootstrap "$SNAPSHOT_MIRROR" \
+            --mirror-chroot "$SNAPSHOT_MIRROR" \
+            --mirror-chroot-security "$SNAPSHOT_MIRROR"
+          echo "OK: lb config succeeded against the pinned snapshot"
+
+      - name: Resolve neuros.list.chroot against the pinned snapshot
+        run: |
+          SNAPSHOT_TS=$(grep -oP '(?<=SNAPSHOT_TS=")[^"]+' build.sh)
+          SNAPSHOT_MIRROR="https://snapshot.ubuntu.com/ubuntu/${SNAPSHOT_TS}"
+          sudo tee /etc/apt/sources.list.d/neuros-snapshot.list > /dev/null <<SRC
+          deb $SNAPSHOT_MIRROR noble main restricted universe multiverse
+          deb $SNAPSHOT_MIRROR noble-updates main restricted universe multiverse
+          deb $SNAPSHOT_MIRROR noble-backports main restricted universe multiverse
+          deb $SNAPSHOT_MIRROR noble-security main restricted universe multiverse
+          SRC
+          sudo apt-get update
+          PACKAGES=$(grep -vE '^\s*(#|$)' config/package-lists/neuros.list.chroot | tr '\n' ' ')
+          echo "Packages: $PACKAGES"
+          sudo apt-get install --dry-run -y $PACKAGES
 
   docker-build:
     name: Docker Container Build

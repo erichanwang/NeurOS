@@ -69,5 +69,39 @@ class TestMCPTools(unittest.TestCase):
         self.assertIn("error", result)
 
 
+class TestDispatchRequest(unittest.TestCase):
+    """dispatch_request is the shared router behind both the HTTP transport
+    (do_POST) and the stdio transport (run_stdio) -- exercise it directly
+    against real MCP JSON-RPC shapes, since that's what a real client sends."""
+
+    def setUp(self):
+        self.mcp = load_neuros_mcp()
+        self.handler = self.mcp.MCPServer.__new__(self.mcp.MCPServer)
+
+    def test_initialize_returns_protocol_version_and_id(self):
+        response = self.mcp.dispatch_request(self.handler, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "test-client", "version": "0.1"}}
+        })
+        self.assertEqual(response["id"], 1)
+        self.assertEqual(response["result"]["protocolVersion"], "2024-11-05")
+
+    def test_notification_gets_no_response(self):
+        # Per the MCP spec, requests without an "id" are notifications and
+        # must not receive a reply.
+        response = self.mcp.dispatch_request(
+            self.handler, {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        )
+        self.assertIsNone(response)
+
+    def test_unknown_method_returns_json_rpc_error(self):
+        response = self.mcp.dispatch_request(
+            self.handler, {"jsonrpc": "2.0", "id": 5, "method": "no/such/method"}
+        )
+        self.assertEqual(response["error"]["code"], -32601)
+        self.assertEqual(response["id"], 5)
+
+
 if __name__ == "__main__":
     unittest.main()

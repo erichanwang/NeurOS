@@ -18,7 +18,10 @@ chsh -s /usr/bin/zsh root 2>/dev/null || true
 if [ ! -d /etc/skel/.oh-my-zsh ]; then
     echo "[NeurOS] Installing oh-my-zsh..."
     export ZSH=/etc/skel/.oh-my-zsh
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended --keep-zshrc 2>/dev/null || true
+    # Pinned to a specific commit on master rather than the branch tip, so
+    # the installer script can't change out from under the build.
+    OMZ_SHA="7ea697fd8138550ddf7262456d412f0dcd1cbf84"
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/${OMZ_SHA}/tools/install.sh)" "" --unattended --keep-zshrc 2>/dev/null || true
 fi
 
 # Ensure nn CLI is executable

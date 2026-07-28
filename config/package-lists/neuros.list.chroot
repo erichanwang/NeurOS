@@ -29,7 +29,7 @@ gir1.2-gtk-3.0
 gir1.2-appindicator3-0.1
 
 # Audio (for voice/speech)
-also-utils
+alsa-utils
 espeak-ng
 
 # Screenshot & OCR

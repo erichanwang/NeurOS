@@ -10,10 +10,14 @@ wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /u
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list
 
 apt-get update
-apt-get install -y code
+# Pinned to a specific build so the package doesn't drift between builds;
+# the Microsoft repo keeps a long version history, so this doesn't go
+# stale the way a single-version mirror snapshot would. Bump deliberately.
+apt-get install -y code=1.130.0-1784734578
 
-# Install Continue.dev extension (pre-configured for local Ollama)
+# Install Continue.dev extension (pre-configured for local Ollama), pinned
+# to a specific version for the same reason.
 echo "[NeurOS] Installing Continue.dev extension..."
-code --install-extension Continue.continue --user-data-dir /etc/skel/.vscode
+code --install-extension Continue.continue@2.1.0 --user-data-dir /etc/skel/.vscode
 
 echo "[NeurOS] VS Code installation complete."
