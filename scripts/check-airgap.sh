@@ -31,6 +31,26 @@ neuros-speak:github.com
 
 FOUND=0
 
+# Literal-URL scanning (below) misses outbound calls made through a
+# third-party HTTP client whose target URL is built at runtime (env
+# var, f-string, config value) rather than typed as a literal in the
+# file. stdlib urllib is used throughout these tools to talk to the
+# local Ollama endpoint, so importing it is not itself a signal.
+# `requests`/`httpx` are not stdlib, are not used anywhere in this
+# tree today, and exist only to make arbitrary HTTP calls ergonomic -
+# so any import of one is a hard fail here regardless of URL literals.
+while IFS= read -r -d '' f; do
+  name="$(basename "$f")"
+  match="$(grep -nE '^\s*(import|from)\s+(requests|httpx)\b' "$f" 2>/dev/null || true)"
+  if [ -n "$match" ]; then
+    echo "AIR-GAP VIOLATION: $name imports a non-stdlib HTTP client not used " \
+         "anywhere else in this tree (can make outbound calls with a " \
+         "runtime-built URL that the literal-URL scan below can't see):"
+    echo "$match" | sed "s#^#  $name:#"
+    FOUND=1
+  fi
+done < <(find "$BIN_DIR" -maxdepth 1 -type f -not -name '*.pyc' -print0)
+
 while IFS= read -r -d '' f; do
   name="$(basename "$f")"
   while IFS=: read -r line url; do
