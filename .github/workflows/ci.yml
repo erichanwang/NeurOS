@@ -24,9 +24,7 @@ jobs:
         run: bash validate-build.sh
 
       - name: Run unit tests
-        run: |
-          python3 tests/test_nn.py -v
-          python3 tests/test_mcp.py -v
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Air-gap check (no new outbound network calls)
         run: bash scripts/check-airgap.sh

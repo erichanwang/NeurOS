@@ -26,6 +26,7 @@ BIN_DIR="config/includes.chroot/usr/local/bin"
 ALLOWLIST="
 neuros-music:www.youtube.com
 neuros-network:google.com
+neuros-network:1.1.1.1
 neuros-speak:github.com
 "
 
@@ -49,7 +50,37 @@ while IFS= read -r -d '' f; do
     echo "$match" | sed "s#^#  $name:#"
     FOUND=1
   fi
-done < <(find "$BIN_DIR" -maxdepth 1 -type f -not -name '*.pyc' -print0)
+done < <(find "$BIN_DIR" -type f -not -name '*.pyc' -not -path '*/__pycache__/*' -print0)
+
+# Raw-socket / DNS-tool scanning: catches outbound calls that contain no
+# http(s):// literal at all, e.g. socket.create_connection(("1.1.1.1", 53))
+# or shelling out to nslookup/dig/host with a literal target host. The
+# URL scan below can't see either of these.
+while IFS= read -r -d '' f; do
+  name="$(basename "$f")"
+  while IFS=: read -r line host; do
+    [ -z "${host:-}" ] && continue
+    case "$host" in
+      localhost|127.0.0.1|0.0.0.0) continue ;;
+      -*|+*) continue ;;  # a CLI flag (e.g. dig's "+short"), not a hostname
+    esac
+
+    allowed=0
+    while IFS=: read -r al_file al_host; do
+      [ -z "${al_file:-}" ] && continue
+      if [ "$name" = "$al_file" ] && [ "$host" = "$al_host" ]; then
+        allowed=1
+        break
+      fi
+    done <<< "$ALLOWLIST"
+
+    if [ "$allowed" -eq 0 ]; then
+      echo "AIR-GAP VIOLATION: $name:$line makes a raw network call to non-local host '$host'"
+      FOUND=1
+    fi
+  done < <( { grep -noP "socket\.(create_connection|connect)\(\(\s*[\"']\K[^\"']+" "$f" 2>/dev/null || true
+              grep -noP "\[\s*[\"'](nslookup|dig|host)[\"']\s*,\s*[\"']\K[^\"']+" "$f" 2>/dev/null || true; } )
+done < <(find "$BIN_DIR" -type f -not -name '*.pyc' -not -path '*/__pycache__/*' -print0)
 
 while IFS= read -r -d '' f; do
   name="$(basename "$f")"
@@ -84,7 +115,7 @@ while IFS= read -r -d '' f; do
       FOUND=1
     fi
   done < <(grep -noE "https?://[^\"'\` \\)]+" "$f" 2>/dev/null || true)
-done < <(find "$BIN_DIR" -maxdepth 1 -type f -not -name '*.pyc' -print0)
+done < <(find "$BIN_DIR" -type f -not -name '*.pyc' -not -path '*/__pycache__/*' -print0)
 
 if [ "$FOUND" -ne 0 ]; then
   echo ""
