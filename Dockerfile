@@ -8,7 +8,10 @@
 # Or use with docker-compose:
 #   docker compose up
 
-FROM ubuntu:24.04
+# Pinned to a digest instead of the floating 24.04 tag, which Canonical
+# rebuilds in place for security updates -- the digest is immutable, so the
+# build container's starting filesystem can't drift between builds.
+FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
@@ -48,8 +51,9 @@ COPY build.sh /opt/neuros/
 COPY Makefile /opt/neuros/
 COPY validate-build.sh /opt/neuros/
 
-# Install Python dependencies
-RUN pip3 install --break-system-packages requests || true
+# Install Python dependencies (pinned so this doesn't silently pick up a
+# newer requests on rebuild)
+RUN pip3 install --break-system-packages requests==2.34.2 || true
 
 # Set up neuros tools in container
 RUN mkdir -p /usr/local/bin && \

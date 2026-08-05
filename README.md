@@ -526,6 +526,14 @@ What's pinned, and how:
   installer script is fetched from a pinned commit (the `v0.32.5` tag)
   instead of the floating `ollama.com/install.sh`, and `OLLAMA_VERSION`
   pins the installed binary itself.
+- **Docker build container** (`Dockerfile`): `FROM ubuntu:24.04` pinned
+  to that tag's image digest instead of the mutable tag, which Canonical
+  rebuilds in place for security patches; `pip3 install requests` pinned
+  to `==2.34.2`.
+- **CI workflow** (`.github/workflows/ci.yml`): `actions/checkout@v4`
+  and `docker/setup-buildx-action@v3` pinned to the commit SHA each tag
+  currently resolves to, so a maintainer moving the upstream `v4`/`v3`
+  tag to a new patch release can't silently change what CI runs.
 
 While verifying package resolution, `config/package-lists/neuros.list.chroot`
 was also found to list `also-utils`, which isn't a real package (the
@@ -534,11 +542,16 @@ install` regardless of pinning, so it's fixed alongside this work.
 
 **Known gap, not fixed here:** `ollama pull mistral` still pulls
 whatever the `mistral` tag in Ollama's library currently resolves to —
-that tag can move to a different quantization over time. Pinning it to a
-manifest digest (`mistral@sha256:...`) is possible in principle, but
-verifying the digest reference actually works requires an `ollama pull`
-of the full ~4GB model, which this environment intentionally does not
-do. Left as a documented gap rather than shipped unverified.
+that tag can move to a different quantization over time. The manifest
+digest turns out to be cheap to look up (`GET
+https://registry.ollama.ai/v2/library/mistral/manifests/latest` returns
+a <1KB JSON manifest, not the model blob), so that part of the original
+assumption was wrong. What's still blocking a pin: Ollama's `pull` has
+no documented `name@sha256:digest` reference syntax the way `docker
+pull` does, so there's no verified way to make `ollama pull` consume
+that digest without an actual ~4GB pull to confirm the CLI accepts it —
+which this environment intentionally does not do. Left as a documented
+gap rather than shipped unverified.
 
 **What was verified, and how:** `lb config` (with `--mode ubuntu` and the
 pinned snapshot mirrors) was run in a clean `ubuntu:24.04` Docker
@@ -546,7 +559,12 @@ container and exits 0. `apt-get install --dry-run` against the pinned
 snapshot for every package in `neuros.list.chroot` was run in the same
 container and resolves cleanly (exit 0, no dry-run conflicts). All
 pinned commit SHAs/tags/versions above were confirmed to resolve via the
-GitHub API and package repositories at the time of pinning. What was
+GitHub API and package repositories at the time of pinning, including
+the Docker base image digest (`docker buildx imagetools inspect
+ubuntu:24.04`), the `requests` version (PyPI), and the two GitHub
+Actions SHAs (`actions/checkout`, `docker/setup-buildx-action`, both
+confirmed against the GitHub API to match the `v4`/`v3` tags' current
+resolution). What was
 **not** verified: an actual `lb build` (needs 20GB+ disk and privileged
 chroot/mount this environment doesn't have), and the `ollama pull` /
 GNOME extension downloads were not executed end-to-end inside a real

@@ -14,7 +14,16 @@ OLLAMA_INSTALL_SHA="eec8e0b9458b8a01be0c216a9cc53eefde24ef50"  # v0.32.5
 export OLLAMA_VERSION="0.32.5"
 curl -fsSL "https://raw.githubusercontent.com/ollama/ollama/${OLLAMA_INSTALL_SHA}/scripts/install.sh" | sh
 
-# Pre-pull Mistral 7B model (quantized, ~4GB)
+# Pre-pull Mistral 7B model (quantized, ~4GB). This still floats: "mistral"
+# resolves to whatever the Ollama library's latest tag points to. Unlike
+# assumed, the manifest digest IS cheaply queryable without pulling the
+# full model -- GET https://registry.ollama.ai/v2/library/mistral/manifests/latest
+# returns a small (<1KB) JSON manifest, not the model blob. But Ollama's
+# own pull path has no documented `name@sha256:digest` pin syntax (unlike
+# `docker pull`/`ollama.com`'s per-tag digest display), so committing a
+# digest here is unverified without an actual `ollama pull` of the ~4GB
+# model against that reference, which this environment intentionally does
+# not do. Left floating; see README's Reproducibility section.
 echo "[NeurOS] Pulling Mistral 7B model (this will take a while)..."
 ollama pull mistral
 
