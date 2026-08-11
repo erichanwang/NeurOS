@@ -8,52 +8,42 @@ Usage:
 """
 
 import sys, os, subprocess, json
-try:
-    import requests
-except ImportError:
-    print("requests not installed. Run: pip3 install requests")
-    sys.exit(1)
+import urllib.request
+import urllib.error
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-CONFIG_PATH = os.path.expanduser("~/.config/neuros/llm.conf")
-DEFAULT_MODEL = "mistral"
+# Shared library lives next to this script in /usr/local/bin; importing
+# it by path keeps ``nn`` robust to whatever the on-disk PYTHONPATH is
+# (the build installs them side by side).
+import importlib.util
+_LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neuroslib.py")
+_spec = importlib.util.spec_from_file_location("neuroslib", _LIB_PATH)
+neuroslib = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(neuroslib)
+
+OLLAMA_URL = f"http://{neuroslib.DEFAULT_HOST}:{neuroslib.DEFAULT_PORT}/api/generate"
+CONFIG_PATH = neuroslib.LLM_CONF
+DEFAULT_MODEL = "mistral"  # mirrors neuroslib.DEFAULT_MODEL; kept as a literal so static assertions can grep for it.
+# Fails loudly if the canonical value ever drifts away from this
+# mirror, instead of silently producing stale container images.
+assert DEFAULT_MODEL == neuroslib.DEFAULT_MODEL, (
+    f"nn.DEFAULT_MODEL {DEFAULT_MODEL!r} drifted from "
+    f"neuroslib.DEFAULT_MODEL {neuroslib.DEFAULT_MODEL!r} — keep them in sync."
+)
+
 
 def get_model():
-    try:
-        with open(CONFIG_PATH) as f:
-            for line in f:
-                line = line.strip()
-                # Parse both flat key=value and TOML-style key = "value"
-                if '=' in line and not line.startswith('['):
-                    key, val = line.split('=', 1)
-                    if key.strip() == "model":
-                        return val.strip().strip('"').strip("'")
-    except:
-        pass
-    return DEFAULT_MODEL
+    """Return the configured default model. Reads llm.conf at
+    CONFIG_PATH; falls back to ``neuroslib.DEFAULT_MODEL`` if unset or
+    unreadable. ``CONFIG_PATH`` is kept as a module-level redirect so
+    existing callers (and the test suite's patches) still bind here."""
+    return neuroslib.get_default_model(CONFIG_PATH)
+
 
 def get_context_config():
     """Read opt-in system-context settings from the [context] section of
     llm.conf. Every source defaults to False (off) unless the config
     explicitly turns it on, including when the section is missing entirely."""
-    settings = {"window_title": False, "clipboard": False, "recent_files": False}
-    section = None
-    try:
-        with open(CONFIG_PATH) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('['):
-                    section = line.strip('[]').strip()
-                    continue
-                if section == "context" and '=' in line:
-                    key, val = line.split('=', 1)
-                    key = key.strip()
-                    val = val.strip().strip('"').strip("'").lower()
-                    if key in settings:
-                        settings[key] = val in ("true", "1", "yes", "on")
-    except:
-        pass
-    return settings
+    return neuroslib.get_context_config(CONFIG_PATH)
 
 def get_active_window_title():
     """Return the title of the focused window via xdotool, if installed.
@@ -152,23 +142,34 @@ def read_file_safe(path):
         return f"(Could not read file: {e})"
 
 def stream_response(prompt, model):
+    """Stream a single prompt to Ollama. Uses urllib so nn needs no
+    third-party deps (the live-build target pulls only stdlib). The
+    previous implementation required the ``requests`` package and
+    crashed hard if it wasn't installed."""
+    body = json.dumps({"model": model, "prompt": prompt, "stream": True}).encode()
+    req = urllib.request.Request(
+        OLLAMA_URL, data=body,
+        headers={"Content-Type": "application/json"},
+    )
     try:
-        resp = requests.post(OLLAMA_URL, json={
-            "model": model,
-            "prompt": prompt,
-            "stream": True
-        }, stream=True, timeout=120)
-        resp.raise_for_status()
-        for line in resp.iter_lines():
-            if line:
-                data = json.loads(line)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            for line in resp:
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 print(data.get("response", ""), end="", flush=True)
                 if data.get("done"):
                     print()
-                    break
-    except requests.exceptions.ConnectionError:
-        print("Error: NeurOS LLM daemon is not running.")
-        print("Start it with: sudo systemctl start neuros-llm")
+                    return
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ConnectionRefusedError):
+            print("Error: NeurOS LLM daemon is not running.")
+            print("Start it with: sudo systemctl start neuros-llm")
+        else:
+            print(f"Error: {e}")
     except Exception as e:
         print(f"Error: {e}")
 

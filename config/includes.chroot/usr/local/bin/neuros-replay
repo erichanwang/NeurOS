@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""neuros-replay: offline diagnostics over neuros-sandbox envelopes.
+
+The `neuros-sandbox` wrapper emits a single-line JSON envelope per
+run (`exit_code`, `wall_clock_ms`, `peak_mem_estimate`, `timeout_hit`,
+`stdout`, `stderr`). When a run looks wrong, the question is usually
+"how wrong?". The bench harness compares batch aggregates but won't
+help on a single observation. `neuros-replay` is the offline-matching
+tool: it takes one or two envelopes and emits diagnostics without
+re-executing the workload.
+
+Subcommands:
+
+    neuros-replay diff <a> <b>
+        Compare two envelopes, emit a verdict envelope. Tolerances
+        default to 10% wall, 20% peak-mem (tighter than bench's
+        15%/25% because diff operates on single observations, not
+        aggregates). Override with --tolerance-wall-pct and
+        --tolerance-mem-pct. Exit 0 on conformant, 1 on any rule
+        violation, 2 on bad input.
+
+    neuros-replay explain <envelope>
+        Emit a single sinkable line onto stdout (the "CI diaper")::
+
+            exit=0 wall=1542ms peak=14.2MiB timeout=false
+            stdout_bytes=0 stderr_bytes=132
+
+        Use `--json` for a structured equivalent.
+
+    neuros-replay extract <envelope> [--stream stdout|stderr|both]
+        Dump the embedded `stdout` and/or `stderr` payloads to stdout
+        so standard host tools (`grep`, `jq`, `less`) can read them
+        without escaping JSON strings. With both streams selected
+        the output gets a one-line ``===STDERR===`` separator so a
+        human or downstream tool can tell them apart.
+
+    Common flags:
+        --json                  emit a single-line JSON envelope
+                                on stdout (machines, not the diaper)
+"""
+import argparse
+import json
+import os
+import sys
+
+# --- Constants ----------------------------------------------------------
+
+#: Default tolerance (percent) on wall_clock_ms in `diff`. Single
+#: observations on a shared kernel are noisier than bench's batch
+#: aggregates, so 10% is the floor; users can tighten via
+#: --tolerance-wall-pct.
+DEFAULT_TOLERANCE_WALL_PCT = 10.0
+
+#: Default tolerance for peak_mem_estimate in `diff`. Memory pressure
+#: jitter on Linux is much higher than CPU jitter, hence 20%.
+DEFAULT_TOLERANCE_MEM_PCT = 20.0
+
+#: Tool version baked into emitted envelopes.
+NEUROS_REPLAY_VERSION = "0.1"
+
+
+# --- Exceptions --------------------------------------------------------
+
+
+class ReplayError(Exception):
+    """Raised on user-fixable misconfiguration (bad envelope, missing
+    field, ambiguous stream selector). Surfaced as exit code 2."""
+
+
+# --- Helpers ------------------------------------------------------------
+
+
+def _die(msg, code=2):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def _load_envelope(path):
+    """Read one JSON envelope from ``path`` ('-' for stdin). The
+    loader enforces 'object' at the top level so we can fail loudly
+    on user error instead of AttributeError-ing into TypeError.
+    """
+    if path == "-":
+        try:
+            text = sys.stdin.read()
+        except OSError as e:
+            raise ReplayError(f"cannot read stdin: {e}")
+    else:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError as e:
+            raise ReplayError(f"cannot read envelope {path!r}: {e}")
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ReplayError(f"envelope {path!r} is not valid JSON: {e}")
+    if not isinstance(obj, dict):
+        raise ReplayError(
+            f"envelope must be a JSON object (got {type(obj).__name__})")
+    return obj
+
+
+def _emit_json(payload):
+    print(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+
+
+def _pct_delta(a, b):
+    """Return ``(b - a) / a * 100`` rounded to 2 dp, or ``None`` when
+    either operand is missing/zero (zero is a real workload
+    observation but divides to infinity; we surface it as None rather
+    than blowing up the diff with inf).
+    """
+    if a is None or b is None:
+        return None
+    try:
+        a_f = float(a)
+        b_f = float(b)
+    except (TypeError, ValueError):
+        return None
+    if a_f == 0:
+        return None
+    return round((b_f - a_f) / a_f * 100.0, 2)
+
+
+# --- diff --------------------------------------------------------------
+
+
+def _envelope_for_diff(env):
+    """Trim a sandbox envelope to the fields we score on. Anything
+    else (stdout/stderr) is irrelevant to a regression verdict and
+    would just bloat the output envelope.
+    "
+    """
+    return {
+        "exit_code": env.get("exit_code"),
+        "wall_clock_ms": env.get("wall_clock_ms"),
+        "peak_mem_estimate": env.get("peak_mem_estimate"),
+        "timeout_hit": env.get("timeout_hit"),
+    }
+
+
+def diff_envelopes(a, b, tol_wall_pct, tol_mem_pct):
+    """Compare two envelopes. Returns a dict ready for --json
+    output. Rule violations list human-readable strings so the
+    diaper (text mode) is informative without --json.
+    """
+    violations = []
+    aa, bb = _envelope_for_diff(a), _envelope_for_diff(b)
+
+    # Exit code must match.
+    if aa.get("exit_code") != bb.get("exit_code"):
+        violations.append(
+            f"exit_code differs ({aa.get('exit_code')} vs "
+            f"{bb.get('exit_code')})")
+
+    # Wall clock pct delta within --tolerance-wall-pct.
+    wall_pct = _pct_delta(aa.get("wall_clock_ms"),
+                          bb.get("wall_clock_ms"))
+    if wall_pct is not None and abs(wall_pct) > tol_wall_pct:
+        violations.append(
+            f"wall_clock_pct_delta ({wall_pct}%) exceeds tolerance "
+            f"({tol_wall_pct}%)")
+
+    # Peak memory pct delta within --tolerance-mem-pct. Skip when
+    # either side is None (the field was absent, common on hosts
+    # without cgroup delegation).
+    mem_pct = _pct_delta(aa.get("peak_mem_estimate"),
+                         bb.get("peak_mem_estimate"))
+    if (mem_pct is not None
+            and aa.get("peak_mem_estimate") is not None
+            and bb.get("peak_mem_estimate") is not None
+            and abs(mem_pct) > tol_mem_pct):
+        violations.append(
+            f"peak_mem_pct_delta ({mem_pct}%) exceeds tolerance "
+            f"({tol_mem_pct}%)")
+
+    # timeout_hit must match.
+    if aa.get("timeout_hit") != bb.get("timeout_hit"):
+        violations.append(
+            f"timeout_hit differs ({aa.get('timeout_hit')} vs "
+            f"{bb.get('timeout_hit')})")
+
+    return {
+        "ok": not violations,
+        "exit_code_a": aa.get("exit_code"),
+        "exit_code_b": bb.get("exit_code"),
+        "wall_clock_pct_delta": wall_pct,
+        "peak_mem_pct_delta": mem_pct,
+        "rule_violations": violations,
+        "tolerance_wall_pct": tol_wall_pct,
+        "tolerance_mem_pct": tol_mem_pct,
+        "neuros_replay_version": NEUROS_REPLAY_VERSION,
+    }
+
+
+def cmd_diff(args):
+    try:
+        a = _load_envelope(args.a)
+        b = _load_envelope(args.b)
+    except ReplayError as e:
+        print(f"neuros-replay: {e}", file=sys.stderr)
+        return 2
+    verdict = diff_envelopes(a, b, args.tolerance_wall_pct,
+                             args.tolerance_mem_pct)
+    if args.json:
+        _emit_json(verdict)
+    else:
+        if verdict["ok"]:
+            print(f"neuros-replay: diff OK "
+                  f"(wall_delta={verdict['wall_clock_pct_delta']}%, "
+                  f"mem_delta={verdict['peak_mem_pct_delta']}%)")
+        else:
+            print(f"neuros-replay: {len(verdict['rule_violations'])} "
+                  f"violation(s):", file=sys.stderr)
+            for v in verdict["rule_violations"]:
+                print(f"  - {v}", file=sys.stderr)
+    return 0 if verdict["ok"] else 1
+
+
+# --- explain ------------------------------------------------------------
+
+
+def _format_bytes(n):
+    """Humanize a byte count into 'MiB' style. None → 'n/a'.
+    """
+    if n is None:
+        return "n/a"
+    try:
+        v = float(n)
+    except (TypeError, ValueError):
+        return "n/a"
+    if v >= 1024 * 1024:
+        return f"{v / 1024 / 1024:.1f}MiB"
+    if v >= 1024:
+        return f"{v / 1024:.1f}KiB"
+    return f"{int(v)}B"
+
+
+def explain_envelope(env):
+    """Build the single-line explanation. The shape is grep-friendly:
+    cx field names without separators so it's easy to pipe through
+    awk/sed downstream.
+    """
+    return {
+        "exit_code": env.get("exit_code", "n/a"),
+        "wall_clock_ms": env.get("wall_clock_ms", "n/a"),
+        "peak_mem_estimate": env.get("peak_mem_estimate", "n/a"),
+        "timeout_hit": env.get("timeout_hit", False),
+        "stdout_bytes": len(env.get("stdout", "") or ""),
+        "stderr_bytes": len(env.get("stderr", "") or ""),
+    }
+
+
+def _explain_line(info):
+    return (f"exit={info['exit_code']} "
+            f"wall={info['wall_clock_ms']}ms "
+            f"peak={_format_bytes(info['peak_mem_estimate'])} "
+            f"timeout={info['timeout_hit']} "
+            f"stdout_bytes={info['stdout_bytes']} "
+            f"stderr_bytes={info['stderr_bytes']}")
+
+
+def cmd_explain(args):
+    try:
+        env = _load_envelope(args.envelope)
+    except ReplayError as e:
+        print(f"neuros-replay: {e}", file=sys.stderr)
+        return 2
+    info = explain_envelope(env)
+    if args.json:
+        info["neuros_replay_version"] = NEUROS_REPLAY_VERSION
+        _emit_json(info)
+    else:
+        print(_explain_line(info))
+    return 0
+
+
+# --- extract ------------------------------------------------------------
+
+
+_STREAMS = ("stdout", "stderr", "both")
+
+
+def cmd_extract(args):
+    try:
+        env = _load_envelope(args.envelope)
+    except ReplayError as e:
+        print(f"neuros-replay: {e}", file=sys.stderr)
+        return 2
+    if args.stream not in _STREAMS:
+        print(f"neuros-replay: --stream must be one of {_STREAMS} "
+              f"(got {args.stream!r})", file=sys.stderr)
+        return 2
+    out = env.get("stdout", "") or ""
+    err = env.get("stderr", "") or ""
+    if args.stream == "stdout":
+        sys.stdout.write(out)
+    elif args.stream == "stderr":
+        sys.stdout.write(err)
+    else:
+        sys.stdout.write(out)
+        if out and not out.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.write("===STDERR===\n")
+        sys.stdout.write(err)
+        if err and not err.endswith("\n"):
+            sys.stdout.write("\n")
+    return 0
+
+
+# --- Argparse -----------------------------------------------------------
+
+
+def _build_parser():
+    p = argparse.ArgumentParser(
+        prog="neuros-replay",
+        description=(
+            "Offline diagnostics over neuros-sandbox JSON envelopes. "
+            "Diff two envelopes, humanize one, or extract embedded "
+            "stdout/stderr."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  neuros-replay diff ./baseline.json ./candidate.json\n"
+            "  neuros-replay explain ./envelope.json\n"
+            "  neuros-replay extract ./envelope.json --stream stderr"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    diff_p = sub.add_parser("diff",
+                            help="Compare two envelopes with a "
+                                 "regression verdict")
+    diff_p.add_argument("a", help="Path to baseline envelope "
+                                   "JSON ('-' for stdin)")
+    diff_p.add_argument("b", help="Path to candidate envelope "
+                                   "JSON ('-' for stdin)")
+    diff_p.add_argument("--tolerance-wall-pct", type=float,
+                        default=DEFAULT_TOLERANCE_WALL_PCT,
+                        help=f"Tolerance on wall-clock pct delta "
+                             f"(default: {DEFAULT_TOLERANCE_WALL_PCT})")
+    diff_p.add_argument("--tolerance-mem-pct", type=float,
+                        default=DEFAULT_TOLERANCE_MEM_PCT,
+                        help=f"Tolerance on peak-mem pct delta "
+                             f"(default: {DEFAULT_TOLERANCE_MEM_PCT})")
+    diff_p.add_argument("--json", action="store_true",
+                        help="Emit a one-line JSON envelope instead "
+                             "of text")
+
+    expl_p = sub.add_parser("explain",
+                            help="Humanize one envelope to a "
+                                 "grep-friendly summary line")
+    expl_p.add_argument("envelope",
+                        help="Path to envelope JSON ('-' for stdin)")
+    expl_p.add_argument("--json", action="store_true",
+                        help="Emit a one-line JSON envelope instead "
+                             "of text")
+
+    ext_p = sub.add_parser("extract",
+                           help="Dump embedded stdout/stderr from "
+                                "an envelope")
+    ext_p.add_argument("envelope",
+                       help="Path to envelope JSON ('-' for stdin)")
+    ext_p.add_argument("--stream", choices=_STREAMS, default="stdout",
+                       help="Which stream to emit "
+                            "(default: stdout)")
+    return p
+
+
+def main(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd == "diff":
+        return cmd_diff(args)
+    if args.cmd == "explain":
+        return cmd_explain(args)
+    if args.cmd == "extract":
+        return cmd_extract(args)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

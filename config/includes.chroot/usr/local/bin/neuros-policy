@@ -1,0 +1,577 @@
+#!/usr/bin/env python3
+"""neuros-policy: declarative security policy for neuros-sandbox.
+
+The wrapper `neuros-sandbox` is hardened by default, but it accepts
+every limit and the cap-drop regex as a CLI flag. That makes a flat
+safety posture hard to express as code, hard to version, and easy
+to drift: a script that hard-coded --mem 256M in May has no way to
+say "I really meant the team's 2024-Q4 policy, whatever it was
+called then".
+
+`neuros-policy` is the place that manifest lives:
+
+    {
+      "name": "neuros-default",
+      "version": "1.0.0",
+      "defaults": {
+        "mem":       "256M",
+        "pids":      64,
+        "cpu_quota": 50000,
+        "timeout":   30
+      },
+      "profiles": {
+        "strict":     ["CAP_NET_RAW", "CAP_SYS_ADMIN", "CAP_SYS_PTRACE"],
+        "moderate":   ["CAP_NET_RAW", "CAP_SYS_ADMIN"],
+        "permissive": []
+      },
+      "net":            "private",
+      "readonly":        true,
+      "env_allowlist":   ["PATH", "LANG", "LC_ALL"],
+      "syscalls":       null
+    }
+
+Subcommands:
+
+    neuros-policy validate <path>
+        Schema + bounds + regex-shape check. Exit 0 on OK, 1 on
+        any violation (each violation is reported on stderr), 2 on
+        bad input (missing file, malformed JSON, wrong root type).
+
+    neuros-policy check <path> --envelope <envelope.json>
+        Parse a neuros-sandbox JSON envelope and reconcile its
+        wall_clock_ms / peak_mem_estimate / exit_code against the
+        policy. Exit 0 if the run conformed, 1 on a violation, 2
+        on bad input.
+
+    neuros-policy transpile <path> [--profile NAME]
+        Emit a copy-pastable argv slice suitable for
+        `neuros-sandbox --unsafe ...`:
+
+            --mem 256M --pids 64 --cpu-quota 50000 \
+            --timeout 30 --cap-drop CAP_(NET_RAW|SYS_ADMIN)
+
+        The wrapper appends ``--`` followed by its own entry
+        (``python3 -u -``) once it parses the user argv, so the
+        transpile output is intentionally flag-only. An empty
+        profile (permissive) transpiles to
+        ``--cap-drop '^_NEVER_MATCH_$'`` so nothing is dropped.
+
+    --json makes validate / check emit a one-line JSON envelope
+    on stdout (for piping into verify-style tooling). transpile
+    always prints text because its output IS the command line.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+# --- Constants ----------------------------------------------------------
+
+#: Lower bound on memory defaults (bytes). 16 KiB is what a busy
+#: interpreter imports plus a small buffer.
+MEM_MIN_BYTES = 16 * 1024
+
+#: Upper bound on memory defaults (bytes). 1 GiB matches what the
+#: bench + runbook paths already exercise; bigger requests should
+#: be split into multiple containers.
+MEM_MAX_BYTES = 1024 * 1024 * 1024
+
+#: cgroup v2's pids.max is "max" for unbounded, but in policy we
+#: cap it because the default policy is what kills an LLM agent
+#: fork-bomb, not the host kernel.
+PIDS_MIN, PIDS_MAX = 1, 4096
+
+#: cpu-quota is microseconds / 100 ms CFS period. 1000 = 1% of one
+#: CPU. 1_000_000 = 10× one CPU (would saturate any single workload).
+CPU_QUOTA_MIN, CPU_QUOTA_MAX = 1000, 1_000_000
+
+#: Wall-clock cap. The bench harness times out at 60s; we leave
+#: 60× headroom so a 1-hour benchmark is still expressible.
+TIMEOUT_MIN, TIMEOUT_MAX = 1, 3600
+
+#: Sentinel regex emitted when the caller picked a profile with an
+#: EMPTY cap list (i.e. "drop nothing"). Matches no CAP_* name in
+#: the kernel's table, since caps start at ``CAP_CHOWN``.
+NEVER_MATCH_CAP_REGEX = r"^_NEVER_MATCH_$"
+
+#: Regexes used during validate.
+_CAP_NAME_RE = re.compile(r"^CAP_[A-Z_]+$")
+_PROFILE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+_NET_VALUES = ("private", "host", "isolated")
+
+#: Tool version baked into emitted envelopes. Bump on a non-additive
+#: schema change.
+NEUROS_POLICY_VERSION = "0.1"
+
+
+# --- Exceptions --------------------------------------------------------
+
+
+class PolicyError(Exception):
+    """Raised on any user-fixable misconfiguration (bad field, bad
+    regex, out-of-range bound, malformed manifest). Surfaced as exit
+    1 by `validate` / `check`, and 2 by `transpile` if the profile
+    itself is malformed."""
+
+
+# --- Helpers ------------------------------------------------------------
+
+
+def _die(msg, code=2):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def _parse_size_bytes(text):
+    """Parse ``'128M'``, ``'1G'``, ``'512K'``, a plain byte count,
+    or ``'max'`` into an int (or None when ``text == 'max'``).
+
+    Raises ``PolicyError`` on bad input.
+    """
+    if text is None:
+        return None
+    text = text.strip()
+    if not text:
+        raise PolicyError("size is empty")
+    if text.lower() == "max":
+        return None
+    m = re.fullmatch(r"(\d+)([KMG]?)", text, re.IGNORECASE)
+    if not m:
+        raise PolicyError(
+            f"invalid size {text!r} (expected e.g. 256M, 1G, or a byte count)")
+    n = int(m.group(1))
+    mult = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}[m.group(2).upper()]
+    if n <= 0:
+        raise PolicyError(f"size {text!r} must be > 0 bytes")
+    return n * mult
+
+
+def _is_int(text):
+    """True if ``text`` is a positive integer in canonical string form."""
+    return isinstance(text, int) and not isinstance(text, bool) and text >= 0
+
+
+def _load_policy(path):
+    """Read JSON from ``path`` (or '-' for stdin). Raises ``PolicyError``
+    on missing file or malformed JSON. The returned object is the
+    raw dict; the caller is expected to run ``validate_policy`` on it.
+    """
+    if path == "-":
+        try:
+            text = sys.stdin.read()
+        except OSError as e:
+            raise PolicyError(f"cannot read stdin: {e}")
+    else:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError as e:
+            raise PolicyError(f"cannot read policy file {path!r}: {e}")
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise PolicyError(f"policy file {path!r} is not valid JSON: {e}")
+    if not isinstance(obj, dict):
+        raise PolicyError(
+            f"policy root must be a JSON object (got {type(obj).__name__})")
+    return obj
+
+
+def _emit_json_envelope(payload):
+    """Single-line JSON record, mirrors the shape of the sandbox
+    envelope so downstream tooling can ingest both interchangeably.
+    """
+    print(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+
+
+# --- Validation ---------------------------------------------------------
+
+
+def validate_policy(policy):
+    """Validate an already-parsed policy dict. Returns a list of
+    :class:`PolicyError` instances (empty list on success); never
+    raises. Errors are meant to be printed by the CLI layer so the
+    user sees ALL of them, not just the first one.
+    """
+    errors = []
+    if not isinstance(policy, dict):
+        # The loader already guarantees this; defense in depth.
+        return [PolicyError(f"policy root must be a JSON object "
+                            f"(got {type(policy).__name__})")]
+
+    name = policy.get("name")
+    if not isinstance(name, str) or not name.strip():
+        errors.append(PolicyError(
+            f"field 'name' must be a non-empty string (got {name!r})"))
+
+    version = policy.get("version", "")
+    if not isinstance(version, str) or not _VERSION_RE.fullmatch(version or ""):
+        errors.append(PolicyError(
+            f"field 'version' must match MAJOR.MINOR.PATCH (got {version!r})"))
+
+    # defaults block --------------------------------------------------
+    defaults = policy.get("defaults", {})
+    if not isinstance(defaults, dict):
+        errors.append(PolicyError(
+            f"field 'defaults' must be a JSON object (got "
+            f"{type(defaults).__name__})"))
+        defaults = {}
+
+    mem = defaults.get("mem")
+    if mem is not None:
+        try:
+            n = _parse_size_bytes(mem)
+            if n is not None and not (MEM_MIN_BYTES <= n <= MEM_MAX_BYTES):
+                errors.append(PolicyError(
+                    f"defaults.mem {mem!r} parses to {n} bytes; "
+                    f"must be in [{MEM_MIN_BYTES}, {MEM_MAX_BYTES}]"))
+        except PolicyError as e:
+            errors.append(PolicyError(f"defaults.mem: {e}"))
+
+    pids = defaults.get("pids")
+    if pids is not None and (not _is_int(pids) or
+                             not (PIDS_MIN <= pids <= PIDS_MAX)):
+        errors.append(PolicyError(
+            f"defaults.pids {pids!r} must be an integer in "
+            f"[{PIDS_MIN}, {PIDS_MAX}]"))
+
+    cpu_quota = defaults.get("cpu_quota")
+    if cpu_quota is not None and (not _is_int(cpu_quota) or
+                                  not (CPU_QUOTA_MIN <= cpu_quota <= CPU_QUOTA_MAX)):
+        errors.append(PolicyError(
+            f"defaults.cpu_quota {cpu_quota!r} must be an integer in "
+            f"[{CPU_QUOTA_MIN}, {CPU_QUOTA_MAX}]"))
+
+    timeout = defaults.get("timeout")
+    if timeout is not None and (not _is_int(timeout) or
+                                not (TIMEOUT_MIN <= timeout <= TIMEOUT_MAX)):
+        errors.append(PolicyError(
+            f"defaults.timeout {timeout!r} must be an integer in "
+            f"[{TIMEOUT_MIN}, {TIMEOUT_MAX}]"))
+
+    # profiles block --------------------------------------------------
+    profiles = policy.get("profiles", {})
+    if not isinstance(profiles, dict):
+        errors.append(PolicyError(
+            f"field 'profiles' must be a JSON object (got "
+            f"{type(profiles).__name__})"))
+        profiles = {}
+
+    seen_caps_per_profile = {}
+    for pname, caps in profiles.items():
+        if not _PROFILE_NAME_RE.fullmatch(pname or ""):
+            errors.append(PolicyError(
+                f"profile name {pname!r} must match "
+                f"{_PROFILE_NAME_RE.pattern!r}"))
+        if not isinstance(caps, list) or not all(isinstance(c, str) for c in caps):
+            errors.append(PolicyError(
+                f"profile {pname!r}.caps must be a list of strings"))
+            continue
+        # A profile may be empty (drops nothing on purpose).
+        cleaned = []
+        for c in caps:
+            if not _CAP_NAME_RE.fullmatch(c):
+                errors.append(PolicyError(
+                    f"profile {pname!r} contains non-cap name {c!r}; "
+                    f"must match {_CAP_NAME_RE.pattern!r}"))
+            else:
+                cleaned.append(c)
+        # De-dup + sort so transpile produces a canonical regex.
+        seen_caps_per_profile[pname] = sorted(set(cleaned))
+
+    # net -------------------------------------------------------------
+    net = policy.get("net")
+    if net is not None and net not in _NET_VALUES:
+        errors.append(PolicyError(
+            f"field 'net' {net!r} must be one of {_NET_VALUES}"))
+
+    # readonly --------------------------------------------------------
+    ro = policy.get("readonly")
+    if ro is not None and not isinstance(ro, bool):
+        errors.append(PolicyError(
+            f"field 'readonly' must be a boolean (got {type(ro).__name__})"))
+
+    # env_allowlist ---------------------------------------------------
+    env = policy.get("env_allowlist", [])
+    if not isinstance(env, list):
+        errors.append(PolicyError(
+            f"field 'env_allowlist' must be a list (got {type(env).__name__})"))
+    else:
+        for v in env:
+            if not isinstance(v, str) or not _ENV_NAME_RE.fullmatch(v):
+                errors.append(PolicyError(
+                    f"env_allowlist entry {v!r} must match "
+                    f"{_ENV_NAME_RE.pattern!r}"))
+
+    # syscalls (optional) --------------------------------------------
+    syscalls = policy.get("syscalls")
+    if syscalls is not None and not isinstance(syscalls, dict):
+        errors.append(PolicyError(
+            f"field 'syscalls' must be a JSON object or null "
+            f"(got {type(syscalls).__name__})"))
+
+    # Attach the deduped caps back so the caller can build a
+    # canonical transpile without re-running the regex match.
+    return errors, seen_caps_per_profile
+
+
+# --- Transpile ----------------------------------------------------------
+
+
+def transpile_argv(policy, profile_name, cleaned_caps):
+    """Build the argv slice that, when pasted after
+    ``neuros-sandbox --unsafe``, realises the policy + chosen
+    profile. The profile's caps are converted into a single
+    ``--cap-drop`` regex: ``CAP_(X|Y|Z)`` with sorted-unique
+    entries, or the never-match sentinel when empty.
+    """
+    args = []
+    defaults = policy.get("defaults", {})
+    if "mem" in defaults and defaults["mem"] is not None:
+        args += ["--mem", defaults["mem"]]
+    if "pids" in defaults and defaults["pids"] is not None:
+        args += ["--pids", str(defaults["pids"])]
+    if "cpu_quota" in defaults and defaults["cpu_quota"] is not None:
+        args += ["--cpu-quota", str(defaults["cpu_quota"])]
+    if "timeout" in defaults and defaults["timeout"] is not None:
+        args += ["--timeout", str(defaults["timeout"])]
+
+    if profile_name is not None:
+        if profile_name not in policy.get("profiles", {}):
+            raise PolicyError(
+                f"profile {profile_name!r} is not declared in policy "
+                f"(known: {sorted(policy.get('profiles', {}).keys())})")
+        caps = cleaned_caps.get(profile_name, [])
+        if caps:
+            args += ["--cap-drop", "CAP_(" + "|".join(caps) + ")"]
+        else:
+            args += ["--cap-drop", NEVER_MATCH_CAP_REGEX]
+    return args
+
+
+# --- Check (envelope compliance) ----------------------------------------
+
+
+def check_envelope_against_policy(policy, envelope, cleaned_caps):
+    """Reconcile a neuros-sandbox JSON envelope against the policy.
+    Returns a list of violations (empty == conformant). Each violation
+    is a (rule, observed, expected, severity) tuple so the JSON
+    envelope has the same shape as the bench + runbook outputs.
+    """
+    violations = []
+    if not isinstance(envelope, dict):
+        return [("malformed", type(envelope).__name__,
+                 "object", "error")]
+    defaults = policy.get("defaults", {})
+
+    # wall_clock is the most common regression vector: a workload
+    # that used to finish in 200 ms now takes 30 s is rare but real.
+    wall = envelope.get("wall_clock_ms")
+    timeout = defaults.get("timeout")
+    if wall is not None and timeout is not None:
+        wall_s = wall / 1000.0
+        if wall_s > timeout:
+            violations.append(
+                ("wall_clock", round(wall_s, 3), timeout, "error"))
+
+    # peak memory: only check when the primitive actually filled in
+    # the field (it can be None on hosts without cgroup delegation).
+    peak = envelope.get("peak_mem_estimate")
+    mem = defaults.get("mem")
+    if peak is not None and mem is not None:
+        try:
+            mem_bytes = _parse_size_bytes(mem)
+            if mem_bytes is not None and peak > mem_bytes:
+                violations.append(
+                    ("peak_mem", peak, mem_bytes, "error"))
+        except PolicyError:
+            # mem field already validated upstream; skip quietly.
+            pass
+
+    # timeout_hit bool: a `true` here means the wrapper had to SIGKILL
+    # the workload, which is a policy violation regardless of bounds.
+    if envelope.get("timeout_hit"):
+        violations.append(
+            ("timeout_hit", True, False, "error"))
+
+    return violations
+
+
+# --- Subcommand dispatch ------------------------------------------------
+
+
+def cmd_validate(args):
+    try:
+        policy = _load_policy(args.policy)
+    except PolicyError as e:
+        if args.json:
+            _emit_json_envelope({
+                "ok": False, "errors": [str(e)],
+                "neuros_policy_version": NEUROS_POLICY_VERSION})
+        else:
+            print(f"neuros-policy: {e}", file=sys.stderr)
+        return 2
+
+    errs, _cleaned = validate_policy(policy)
+    if args.json:
+        _emit_json_envelope({
+            "ok": not errs,
+            "errors": [str(e) for e in errs],
+            "name": policy.get("name"),
+            "version": policy.get("version"),
+            "neuros_policy_version": NEUROS_POLICY_VERSION,
+        })
+    else:
+        if errs:
+            print(f"neuros-policy: {len(errs)} violation(s):",
+                  file=sys.stderr)
+            for e in errs:
+                print(f"  - {e}", file=sys.stderr)
+        else:
+            print(f"neuros-policy: ok ({policy.get('name')!r} "
+                  f"v{policy.get('version')})")
+    return 1 if errs else 0
+
+
+def cmd_check(args):
+    try:
+        policy = _load_policy(args.policy)
+    except PolicyError as e:
+        print(f"neuros-policy: {e}", file=sys.stderr)
+        return 2
+    errs, cleaned = validate_policy(policy)
+    if errs:
+        # We refuse to check against a policy that itself is invalid.
+        if args.json:
+            _emit_json_envelope({
+                "ok": False,
+                "policy_errors": [str(e) for e in errs],
+                "neuros_policy_version": NEUROS_POLICY_VERSION,
+            })
+        else:
+            print(f"neuros-policy: policy has {len(errs)} violation(s); "
+                  f"refusing to check envelope", file=sys.stderr)
+            for e in errs:
+                print(f"  - {e}", file=sys.stderr)
+        return 2
+
+    try:
+        envelope = _load_policy(args.envelope)
+    except PolicyError as e:
+        print(f"neuros-policy: {e}", file=sys.stderr)
+        return 2
+
+    violations = check_envelope_against_policy(policy, envelope, cleaned)
+    if args.json:
+        _emit_json_envelope({
+            "ok": not violations,
+            "violations": [
+                {"rule": r, "observed": o, "expected": x, "severity": s}
+                for (r, o, x, s) in violations
+            ],
+            "policy_name": policy.get("name"),
+            "policy_version": policy.get("version"),
+            "neuros_policy_version": NEUROS_POLICY_VERSION,
+        })
+    else:
+        if violations:
+            print(f"neuros-policy: {len(violations)} violation(s):",
+                  file=sys.stderr)
+            for r, o, x, s in violations:
+                print(f"  - [{s}] {r}: observed {o!r}, "
+                      f"expected {x!r}", file=sys.stderr)
+        else:
+            exit_code = envelope.get("exit_code")
+            print(f"neuros-policy: ok "
+                  f"(exit_code={exit_code}, wall_clock_ms="
+                  f"{envelope.get('wall_clock_ms')}, "
+                  f"peak_mem={envelope.get('peak_mem_estimate')})")
+    return 1 if violations else 0
+
+
+def cmd_transpile(args):
+    try:
+        policy = _load_policy(args.policy)
+    except PolicyError as e:
+        print(f"neuros-policy: {e}", file=sys.stderr)
+        return 2
+    errs, cleaned = validate_policy(policy)
+    if errs:
+        print(f"neuros-policy: policy has {len(errs)} violation(s); "
+              f"refusing to transpile", file=sys.stderr)
+        for e in errs:
+            print(f"  - {e}", file=sys.stderr)
+        return 1
+    try:
+        argv = transpile_argv(policy, args.profile, cleaned)
+    except PolicyError as e:
+        print(f"neuros-policy: {e}", file=sys.stderr)
+        return 1
+    print(" ".join(argv))
+    return 0
+
+
+# --- Argparse ------------------------------------------------------------
+
+
+def _build_parser():
+    p = argparse.ArgumentParser(
+        prog="neuros-policy",
+        description=(
+            "Declarative security policy for neuros-sandbox. Validate, "
+            "check envelope compliance, or transpile to a sandbox argv "
+            "fragment."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  neuros-policy validate ./policy.json\n"
+            "  neuros-policy check ./policy.json --envelope ./envelope.json\n"
+            "  neuros-policy transpile ./policy.json --profile strict\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    val = sub.add_parser("validate",
+                         help="schema + bounds check on a policy file")
+    val.add_argument("policy",
+                     help="Path to a JSON policy file ('-' for stdin)")
+    val.add_argument("--json", action="store_true",
+                     help="Emit a one-line JSON envelope instead of text")
+
+    chk = sub.add_parser("check",
+                         help="Check a neuros-sandbox JSON envelope "
+                              "against a policy")
+    chk.add_argument("policy", help="Path to a JSON policy file")
+    chk.add_argument("--envelope", required=True,
+                     help="Path to a JSON envelope file ('-' for stdin)")
+    chk.add_argument("--json", action="store_true",
+                     help="Emit a one-line JSON envelope instead of text")
+
+    tr = sub.add_parser("transpile",
+                        help="Emit the neuros-sandbox argv fragment "
+                             "realising this policy")
+    tr.add_argument("policy", help="Path to a JSON policy file")
+    tr.add_argument("--profile", default=None,
+                    help="Profile name to enable (default: none)")
+    return p
+
+
+def main(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd == "validate":
+        return cmd_validate(args)
+    if args.cmd == "check":
+        return cmd_check(args)
+    if args.cmd == "transpile":
+        return cmd_transpile(args)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

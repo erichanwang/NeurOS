@@ -35,31 +35,33 @@ def load_nn():
     return module
 
 class TestNNCore(unittest.TestCase):
-    """Test core nn CLI functionality."""
+    """Test core nn CLI functionality. The previous implementation
+    hard-coded ``localhost:11434`` and ``~/.config/neuros/llm.conf`` as
+    source-level literals; the new nn derives them from the shared
+    neuroslib constants, so these tests assert that the resolved
+    values at runtime still point at the expected host/path."""
 
-    def test_config_path_in_source(self):
-        """Test that nn source contains CONFIG_PATH with correct path."""
+    def test_resolved_config_path_points_at_neuros_llm_conf(self):
         nn_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), '..',
             'config', 'includes.chroot', 'usr', 'local', 'bin', 'nn'
         )
-        with open(nn_path) as f:
-            content = f.read()
-        self.assertIn(".config/neuros/llm.conf", content)
-        self.assertIn("CONFIG_PATH", content)
+        loader = SourceFileLoader("nn_module", nn_path)
+        spec = importlib.util.spec_from_loader("nn_module", loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        self.assertTrue(module.CONFIG_PATH.endswith(".config/neuros/llm.conf"))
 
-    def test_ollama_url_correct(self):
-        """Test that OLLAMA_URL points to correct localhost port."""
-        # Read the nn file and find OLLAMA_URL
+    def test_resolved_ollama_url_points_at_localhost_11434(self):
         nn_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), '..',
             'config', 'includes.chroot', 'usr', 'local', 'bin', 'nn'
         )
-        with open(nn_path) as f:
-            content = f.read()
-
-        self.assertIn("localhost:11434", content)
-        self.assertIn("OLLAMA_URL", content)
+        loader = SourceFileLoader("nn_module", nn_path)
+        spec = importlib.util.spec_from_loader("nn_module", loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        self.assertIn("localhost:11434", module.OLLAMA_URL)
 
     def test_default_model_is_mistral(self):
         """Test that default model is mistral."""

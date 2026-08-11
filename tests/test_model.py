@@ -48,9 +48,8 @@ class TestConfigRoundTrip(unittest.TestCase):
         with patch.object(self.m, "CONFIG_PATH", self.config_path), \
              patch.object(self.m, "api_request", return_value=None):
             self.m.switch_model("llama3")
-        with open(self.config_path) as f:
-            content = f.read()
-        self.assertIn('model = "llama3"', content)
+        with patch.object(self.m, "CONFIG_PATH", self.config_path):
+            self.assertEqual(self.m.get_current_model(), "llama3")
 
     def test_switch_replaces_existing_model_line(self):
         with open(self.config_path, "w") as f:
@@ -58,9 +57,10 @@ class TestConfigRoundTrip(unittest.TestCase):
         with patch.object(self.m, "CONFIG_PATH", self.config_path), \
              patch.object(self.m, "api_request", return_value=None):
             self.m.switch_model("codellama")
+        with patch.object(self.m, "CONFIG_PATH", self.config_path):
+            self.assertEqual(self.m.get_current_model(), "codellama")
         with open(self.config_path) as f:
             content = f.read()
-        self.assertIn('model = "codellama"', content)
         self.assertNotIn("mistral", content)
         self.assertIn("context_window = 4096", content)
 

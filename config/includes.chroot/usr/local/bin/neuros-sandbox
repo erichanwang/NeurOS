@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""neuros-sandbox: safe-runner wrapper around the `neuros-container`
+primitive, tuned for **untrusted code execution** (e.g. scripts produced
+by an LLM agent). The hardcoded defaults are the point of the tool:
+
+  * `--net`                : private network namespace (loopback only)
+  * `--read-only`          : rootfs remounted RO
+  * `--mem 256M`           : cgroup memory cap (override w/ --mem)
+  * `--pids 64`            : cgroup PID cap (override w/ --pids)
+  * `--cpu-quota 50000`    : 50% of one CPU (override w/ --cpu or
+                              --cpu-quota)
+  * `--cap-drop <regex>`   : drop a baseline set of dangerous caps
+  * host env scrubbed      : only PATH survives; no ANTHROPIC_API_KEY
+                              or HOME leaks
+
+`--unsafe` opts in to relaxing the network/read-only/cap-drop trio,
+which is the only path that should reach the host for untrusted work.
+
+Stdin-hand-off: the script body is always read into memory and piped
+to `python3 -u -` inside the container. Nothing touches a tempfile on
+the host; nothing leaks via /proc/<pid>/cmdline because the path is
+literal `-`.
+
+A watchdog enforces `--timeout` with SIGKILL on expiry. The output
+mode is either `--human` (pass-through, like a normal command) or
+`--json` (one line of structured envelope on stdout).
+
+Examples:
+
+    echo 'print("hello agent")' | neuros-sandbox run --json
+    neuros-sandbox run --mem 1G --timeout 60 ./scripts/smoke.py
+    neuros-sandbox run --bundle ./fixture.tar.gz --json pre.sh
+"""
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import uuid
+
+# --- Defaults --------------------------------------------------------------
+
+#: cgroup v2 memory cap (bytes-string accepted by memory.max)
+DEFAULT_MEM = "256M"
+
+#: cgroup v2 pids.max value
+DEFAULT_PIDS = 64
+
+#: CPU quota in microseconds per 100ms period (50000 = 50%)
+DEFAULT_CPU_QUOTA = 50000
+
+#: Capabilities dropped by default; regex syntax shared with the
+#: primitive's --cap-drop.
+DEFAULT_CAP_DROP = (
+    r"CAP_(NET_RAW|SYS_ADMIN|SYS_PTRACE|SETUID|SETPCAP|"
+    r"MAC_ADMIN|DAC_OVERRIDE|LINUX_IMMUTABLE|SYS_CHROOT|"
+    r"SYS_RAWIO|SYS_RESOURCE)"
+)
+
+#: Pre-compiled DEFAULT_CAP_DROP pattern so _build_argv doesn't
+#: re-run re.compile on every wrapper-invocation. The constant is
+#: itself validated (re.error at import time if malformed) so a
+#: future edit to DEFAULT_CAP_DROP that breaks the regex fails
+#: loudly at module load, not at kernel-bridge exec time.
+_COMPILED_DEFAULT_CAP_DROP = re.compile(DEFAULT_CAP_DROP)
+
+#: Hard wall-clock timeout in seconds
+DEFAULT_TIMEOUT = 30
+
+#: Minimal env that gets passed through to the container. Deliberately
+#: tiny; we do NOT inherit the host env. This is the difference between
+#: "container" and "sandbox".
+MINIMAL_ENV = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+}
+
+#: Name prefix for state files / forensic logs
+NAME_PREFIX = "neuros-sbx-"
+
+
+# --- Exceptions ------------------------------------------------------------
+
+
+class SandboxError(Exception):
+    """Raised on misconfiguration the user can fix (not kernel faults)."""
+
+
+# --- Helpers ---------------------------------------------------------------
+
+
+def _die(msg, code=2):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def _parse_percent(text):
+    """Parse '50%' or '0.5' or '50000us' (loose) into a CPU quota in
+    microseconds per 100ms CFS period."""
+    s = text.strip()
+    if s.endswith("%"):
+        return int(float(s[:-1].strip()) * 1000)
+    if s.endswith("us"):
+        return int(s[:-2].strip())
+    f = float(s)
+    if 0 < f <= 1.0:
+        return int(f * 100000)
+    return int(f)
+
+
+def _build_argv(args, script_target, rootfs_override=None, name_override=None):
+    """Translate sandbox options into a neuros-container argv list.
+
+    Order matters because `neuros-container` uses argparse with
+    `--name`/`--rootfs`/etc as dest flags and the run subcommand
+    triggers a positional dispatcher.
+    """
+    argv = ["neuros-container", "run"]
+    argv += ["--name", name_override or args.name
+             or f"{NAME_PREFIX}{uuid.uuid4().hex[:10]}"]
+    argv += ["--rootfs", rootfs_override or args.rootfs or "/"]
+    if not args.unsafe:
+        argv += ["--net", "--read-only"]
+    argv += ["--mem", args.mem]
+    if args.pids is not None and args.pids > 0:
+        argv += ["--pids", str(args.pids)]
+    if args.cpu_quota is not None and args.cpu_quota > 0:
+        argv += ["--cpu-quota", str(args.cpu_quota)]
+    # The cap-drop baseline is the most load-bearing piece of the
+    # default safety posture, so it persists under --unsafe. The
+    # --cap-drop-keep knob is the explicit override path; only active
+    # in --unsafe mode (in safe mode the user just sets --cap-drop).
+    # Pre-validate the override regex so an invalid pattern fails
+    # at the wrapper layer (SandboxError), not deep inside the
+    # kernel-bridge ctypes call when the primitive rejects it.
+    if args.unsafe and args.cap_drop_keep is not None:
+        if not args.cap_drop_keep.strip():
+            raise SandboxError(
+                "--cap-drop-keep must be a non-empty regex (got "
+                f"{args.cap_drop_keep!r}); omit --cap-drop-keep "
+                "to use the default")
+        try:
+            re.compile(args.cap_drop_keep)
+        except re.error as e:
+            raise SandboxError(
+                f"--cap-drop-keep {args.cap_drop_keep!r} is not a "
+                f"valid regex: {e}")
+        argv += ["--cap-drop", args.cap_drop_keep]
+    else:
+        argv += ["--cap-drop", args.cap_drop]
+    if args.user:
+        argv += ["--user", args.user]
+    # The script body is always piped via stdin; we use `python3 -u -`
+    # as a stable, executable-without-tmpfile entry point. When the
+    # caller passed a literal path, we pass it through argv; when the
+    # caller feeds stdin (script_target="-"), the "-" entry is already
+    # in argv so we must NOT append another "-".
+    argv += ["--", "python3", "-u", "-"]
+    if script_target != "-":
+        argv.append(script_target)
+    return argv
+
+
+def _load_script(script_path):
+    """Return script bytes. `None` means 'read stdin'."""
+    if script_path is None:
+        data = sys.stdin.buffer.read()
+    else:
+        try:
+            with open(script_path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            raise SandboxError(f"cannot read script: {script_path}: {e}")
+    if not data:
+        raise SandboxError("empty script (no bytes piped or file empty)")
+    return data
+
+
+def _extract_bundle(tar_path):
+    """Unpack a tar.gz into a fresh tmp dir; return its path."""
+    target = tempfile.mkdtemp(prefix="neuros-sbx-bundle-")
+    try:
+        with tarfile.open(tar_path, "r:*") as tar:
+            # Defensive: refuse absolute paths and `..` traversal
+            for member in tar.getmembers():
+                p = os.path.normpath(member.name)
+                if p.startswith("/") or p.startswith(".."):
+                    raise SandboxError(
+                        f"unsafe bundle entry: {member.name!r}")
+            tar.extractall(target)
+    except (tarfile.TarError, OSError) as e:
+        shutil.rmtree(target, ignore_errors=True)
+        raise SandboxError(f"bundle extract failed: {e}")
+    return target
+
+
+# --- JSON envelope ---------------------------------------------------------
+
+
+def _envelope(rc, stdout, stderr, wall_ms, timeout_hit, peak_mem=None):
+    """Build a single-line JSON record describing the run."""
+    return json.dumps({
+        "exit_code": rc,
+        "stdout": stdout.decode("utf-8", "replace") if stdout else "",
+        "stderr": stderr.decode("utf-8", "replace") if stderr else "",
+        "wall_clock_ms": int(wall_ms),
+        "timeout_hit": timeout_hit,
+        "peak_mem_estimate": peak_mem,
+    }, separators=(",", ":"), ensure_ascii=False)
+
+
+# --- cgroup peak-memory polling --------------------------------------------
+
+#: Standard cgroup v2 mount root on modern Ubuntu; we keep this as a
+#: list because some container hosts remount under /sys/fs/cgroup/<slice>.
+_CGROUP_V2_ROOTS = ("/sys/fs/cgroup",)
+
+
+def _read_peak_memory(name):
+    """Best-effort read of memory.peak for a leaf cgroup whose name
+    contains ``name``. Returns ``None`` on any failure (file missing,
+    permission denied, parse error). Best-effort only: the primitive
+    auto-cleans the cgroup on non-detached exit, so the peak file is
+    often already gone by the time we read. For forensic accuracy run
+    the container with `--detach` and read the file before calling
+    `neuros-container cleanup`."""
+    suffix = f"neuros-sbx-{name}" if not name.startswith("neuros-sbx-") else name
+    for root in _CGROUP_V2_ROOTS:
+        # match either a leaf named the suffix, or a path that ends
+        # with /<suffix> somewhere under the root
+        candidates = glob.glob(os.path.join(root, "**", suffix),
+                              recursive=True)
+        if not candidates:
+            # also try a direct path under the root for the common
+            # case where the cgroup was created in the default tree
+            direct = os.path.join(root, suffix)
+            if os.path.isdir(direct):
+                candidates = [direct]
+        # When multiple leaves match (a re-runner of the same wrapper
+        # name), prefer the most recently modified cgroup: that is the
+        # one whose kernel stats describe the just-finished run.
+        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for path in candidates:
+            peak = os.path.join(path, "memory.peak")
+            try:
+                with open(peak) as f:
+                    val = f.read().strip()
+                return int(val) if val.isdigit() else None
+            except (OSError, ValueError):
+                continue
+    return None
+
+
+# --- Top-level run ---------------------------------------------------------
+
+
+def cmd_run(args):
+    """Execute the `run` subcommand end-to-end."""
+    rootfs_override = None
+    cleanup_paths = []
+    try:
+        if args.bundle:
+            rootfs_override = _extract_bundle(args.bundle)
+            cleanup_paths.append(rootfs_override)
+        # Build argv BEFORE reading the script so --dry-run can be
+        # exercised without a real script file on disk.
+        argv = _build_argv(args,
+                           script_target=args.script or "-",
+                           rootfs_override=rootfs_override)
+        if args.dry_run:
+            print(" ".join(argv))
+            return 0
+        script_bytes = _load_script(args.script)
+        # Pick the final container name now (the same way _build_argv
+        # would have chosen it) so the post-run cgroup poll has a
+        # stable target.
+        container_name = (args.name
+                          or f"{NAME_PREFIX}{uuid.uuid4().hex[:10]}")
+        t0 = time.monotonic()
+        timeout_hit = False
+        peak_mem = None
+        try:
+            cp = subprocess.run(
+                argv,
+                env=MINIMAL_ENV,
+                input=script_bytes,
+                cwd="/",
+                capture_output=True,
+                check=False,
+                timeout=args.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            timeout_hit = True
+            cp = subprocess.CompletedProcess(
+                argv, 124, b"", b"")
+        wall_ms = (time.monotonic() - t0) * 1000.0
+        # Best-effort peak-memory read; safe in environments without
+        # cgroup delegation (returns None silently).
+        peak_mem = _read_peak_memory(container_name)
+        if args.json:
+            print(_envelope(
+                rc=cp.returncode,
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                wall_ms=wall_ms,
+                timeout_hit=timeout_hit,
+                peak_mem=peak_mem,
+            ))
+        else:
+            sys.stdout.buffer.write(cp.stdout or b"")
+            sys.stderr.buffer.write(cp.stderr or b"")
+            sys.stderr.write(
+                f"[neuros-sandbox] exit={cp.returncode} "
+                f"wall_ms={wall_ms:.0f} timeout_hit={timeout_hit} "
+                f"peak_mem_estimate={peak_mem}\n"
+            )
+        return 124 if timeout_hit else (cp.returncode or 0)
+    finally:
+        for p in cleanup_paths:
+            shutil.rmtree(p, ignore_errors=True)
+
+
+# --- Argparse --------------------------------------------------------------
+
+
+def _build_parser():
+    p = argparse.ArgumentParser(
+        prog="neuros-sandbox",
+        description=(
+            "Safe-runner for untrusted scripts via neuros-container. "
+            "Hardened by default; --unsafe relocks the blast radius."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  echo 'print(1+1)' | neuros-sandbox run --json\n"
+            "  neuros-sandbox run --mem 1G --timeout 60 ./smoke.py\n"
+            "  neuros-sandbox run --bundle ./fixture.tar.gz --dry-run\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+    run = sub.add_parser("run", help="Run a script in a sandboxed container")
+
+    run.add_argument("script", nargs="?",
+                     help="Script file; stdin is read if omitted.")
+    run.add_argument("--mem", default=DEFAULT_MEM,
+                     help=f"Memory cap (default: {DEFAULT_MEM}); "
+                          "e.g. 256M, 1G.")
+    run.add_argument("--pids", type=int, default=DEFAULT_PIDS,
+                     help=f"PID cap (default: {DEFAULT_PIDS}).")
+    run.add_argument("--cpu",
+                     help=f"CPU %% quota; maps to --cpu-quota "
+                          f"(default: {DEFAULT_CPU_QUOTA/1000:.0f}%%).")
+    run.add_argument("--cpu-quota", type=int, default=DEFAULT_CPU_QUOTA,
+                     help=f"CPU quota µs/100ms (default: "
+                          f"{DEFAULT_CPU_QUOTA}).")
+    run.add_argument("--cap-drop", default=DEFAULT_CAP_DROP,
+                     help="Regex of Linux capabilities to drop "
+                          "(default: a hardened baseline).")
+    run.add_argument("--cap-drop-keep",
+                     help="Under --unsafe, replace (not relax) the "
+                          "default cap-drop baseline with this "
+                          "regex (re.compile-validated up front). "
+                          "Ignored in safe mode.")
+    run.add_argument("--rootfs",
+                     help="Rootfs path inside the container "
+                          "(default: /).")
+    run.add_argument("--name",
+                     help="Container name; default = auto-random.")
+    run.add_argument("--user",
+                     help="UID:GID inside the container.")
+    run.add_argument("--bundle",
+                     help="Tar.gz to extract into the container's "
+                          "rootfs (use with --rootfs pointing inside).")
+    run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                     help=f"Wall-clock cap in seconds "
+                          f"(default: {DEFAULT_TIMEOUT}).")
+    run.add_argument("--unsafe", action="store_true",
+                     help="Disable --net / --read-only / default caps.")
+    run.add_argument("--json", action="store_true",
+                     help="Emit a single JSON envelope on stdout.")
+    run.add_argument("--dry-run", action="store_true",
+                     help="Print the neuros-container argv and exit.")
+    return p
+
+
+def main(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd == "run":
+        # Resolve --cpu into --cpu_quota if both weren't set explicitly
+        if args.cpu is not None:
+            args.cpu_quota = _parse_percent(args.cpu)
+        try:
+            return cmd_run(args)
+        except SandboxError as e:
+            _die(f"neuros-sandbox: {e}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -3,30 +3,59 @@
 neuros-container - a container primitive built from Linux namespaces and
 cgroups v2, no runc/containerd/libcontainer involved.
 
-Isolation comes from three unshare(2) namespace groups (mount, UTS, PID,
-IPC, and network) plus an optional chroot into a rootfs directory.
+Isolation comes from Linux unshare(2) namespaces: mount, UTS, PID, IPC,
+optionally network, plus an optional chroot into a rootfs directory.
 Resource limits come from a real cgroup v2 leaf: memory.max, pids.max,
-and cpu.max when the cpu controller is delegated.
+cpu.weight, and cpu.max.
 
 Usage:
   neuros-container run [--mem SIZE] [--pids N] [--cpu WEIGHT]
-                        [--hostname NAME] [--rootfs DIR] -- CMD [ARGS...]
-  neuros-container list
+                       [--cpu-quota MAX/PERIOD] [--hostname NAME]
+                       [--rootfs DIR] [--workdir DIR] [--user UID:GID]
+                       [--read-only] [--net] [--detach] [--name NAME]
+                       -- CMD [ARGS...]
+  neuros-container list [--json]
+  neuros-container logs    (placeholder, no-op for now)
 
 Namespace isolation needs either root, or (best effort, and blocked by
 default on Ubuntu 24.04+ via AppArmor's unprivileged-userns restriction)
 an unprivileged user namespace. Without either, the command still runs
 under the cgroup limits but without namespace isolation, and this tool
 says so rather than pretending otherwise.
+
+Detached runs leave the child running, write a small JSON state file
+under /run/neuros-container/, and exit 0. The cgroup is left in place
+so a reattach / cleanup pass can find it.
 """
 
 import argparse
+import ctypes
+import ctypes.util
+import json
 import os
 import re
 import sys
-import time
 
 CGROUP_ROOT = "/sys/fs/cgroup"
+STATE_DIR = "/run/neuros-container"
+
+PR_CAPBSET_DROP = 23  # <linux/prctl.h>; reduces the bounding set, which
+                      # execve inherits, so caps stay dropped across exec.
+
+# Capability names by index, entries 0..31. The kernel may support
+# more (read /proc/sys/kernel/cap_last_cap at runtime); names past
+# index 31 are kernel-version-dependent and we surface them with
+# their numeric index in the matched-pre-exec warning so the user
+# can override the pattern.
+_CAP_NAMES_0_31 = [
+    "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID",
+    "KILL", "SETGID", "SETUID", "SETPCAP", "LINUX_IMMUTABLE",
+    "NET_BIND_SERVICE", "NET_BROADCAST", "NET_ADMIN", "NET_RAW",
+    "IPC_LOCK", "IPC_OWNER", "SYS_MODULE", "SYS_RAWIO", "SYS_CHROOT",
+    "SYS_PTRACE", "SYS_PACCT", "SYS_ADMIN", "SYS_BOOT", "SYS_NICE",
+    "SYS_RESOURCE", "SYS_TIME", "SYS_TTY_CONFIG", "MKNOD", "LEASE",
+    "AUDIT_WRITE", "AUDIT_CONTROL", "SETFCAP",
+]  # pad to length 32
 
 
 def die(msg):
@@ -48,6 +77,113 @@ def parse_size(text):
     n = int(m.group(1))
     mult = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}[m.group(2).upper()]
     return str(n * mult)
+
+
+def parse_cpu_quota(text):
+    """Parse '50000/100000' or '50000 100000' into a (max_us, period_us)
+    string tuple suitable for the cpu.max cgroup file. Also accepts
+    the literal ``max``, which returns ``("max", "max")`` to clear any
+    existing quota. Rejects zero periods, negative max_us, and one-
+    component input."""
+    if not text:
+        return None
+    text = text.strip()
+    if text.lower() == "max":
+        return ("max", "max")
+    parts = re.split(r"[\s/]+", text, maxsplit=1)
+    if len(parts) != 2 or not all(parts):
+        die(f"invalid --cpu-quota '{text}' (expected e.g. '50000/100000' for 50% of one CPU, or 'max')")
+    try:
+        max_us, period_us = int(parts[0]), int(parts[1])
+    except ValueError:
+        die(f"invalid --cpu-quota '{text}' (expected integer microseconds)")
+    if max_us < 0 or period_us <= 0:
+        die(f"invalid --cpu-quota '{text}' (max_us >= 0 and period_us > 0)")
+    return (str(max_us), str(period_us))
+
+
+def parse_user(text):
+    """Parse 'UID:GID' (a single integer maps uid==gid)."""
+    if text is None:
+        return None
+    text = text.strip()
+    m = re.match(r"^(\d+)(?::(\d+))?$", text)
+    if not m:
+        die(f"invalid --user '{text}' (expected UID:GID, e.g. 1000:1000, or 0)")
+    return (int(m.group(1)), int(m.group(2) or m.group(1)))
+
+
+def parse_env_file(path):
+    """Read KEY=VALUE pairs from a file (one per line; ``#`` lines and
+    blank lines are ignored; ``export FOO=bar`` is accepted via the
+    leading ``export `` keyword so traditional dotenv-like sources
+    work). Returns the list of validated ``K=V`` strings. The file
+    is opened with ``errors="replace"`` so non-UTF-8 bytes don't
+    kill the run. Validation errors carry the file path so the user
+    knows whether a malformed entry came from ``--env`` or
+    ``--env-from-file /etc/...``."""
+    if path is None:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        die(f"--env-from-file {path!r}: cannot read ({e})")
+    cleaned = []
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export "):].lstrip()
+        cleaned.append(stripped)
+    # Inlined parse_env validation but with path-prefixed errors so
+    # the user can tell the file from a CLI repeat.
+    for line in cleaned:
+        if "=" not in line:
+            die(f"--env-from-file {path!r}: missing '=' on line "
+                f"{line!r}")
+        k = line.partition("=")[0].strip()
+        if not k:
+            die(f"--env-from-file {path!r}: blank key on line {line!r}")
+        if "\x00" in line:
+            die(f"--env-from-file {path!r}: NUL byte on line {line!r}")
+    return cleaned
+
+
+def parse_env(env_list):
+    """Validate a list of 'KEY=VALUE' strings (the result of
+    ``argparse action='append'`` on ``--env K=V``). Returns the list
+    unchanged on success. Blank keys, missing '=', or keys containing
+    NULs are rejected — the latter because ``os.execve`` truncates
+    at NUL silently. ``partition("=")`` already severs at the first
+    '=' so a second '=' check on the key is unnecessary."""
+    if not env_list:
+        return []
+    clean = []
+    for raw in env_list:
+        if "=" not in raw:
+            die(f"invalid --env '{raw}' (expected KEY=VALUE)")
+        key, _, value = raw.partition("=")
+        key = key.strip()
+        if not key:
+            die(f"invalid --env '{raw}' (blank key)")
+        if "\x00" in key or "\x00" in value:
+            die(f"invalid --env '{raw}' (NUL byte rejected)")
+        clean.append(f"{key}={value}")
+    return clean
+
+
+def parse_cap_drop(pattern):
+    """Compile a capability-name regex (e.g. 'CAP_(NET_RAW|SYS_ADMIN)')
+    for later matching against a known list. Returns the compiled
+    pattern, or None when no --cap-drop was given."""
+    if pattern is None:
+        return None
+    try:
+        return re.compile(pattern)
+    except re.error as e:
+        die(f"invalid --cap-drop regex '{pattern}': {e}")
 
 
 def own_cgroup_path():
@@ -120,13 +256,32 @@ def enable_controllers(parent, wanted):
     return ready
 
 
-def make_cgroup(name, mem, pids, cpu_weight):
-    wanted = [c for c, v in (("memory", mem), ("pids", pids), ("cpu", cpu_weight)) if v]
+def make_cgroup(name, mem, pids, cpu_weight, cpu_quota=None):
+    """Create a fresh leaf cgroup with the given limits.
+
+    ``cpu_quota`` is a tuple ``(max_us_str, period_us_str)`` written to
+    cpu.max, or ``("max", "max")`` to clear the quota; ``None`` leaves
+    cpu.max untouched. ``cpu_weight`` is written to cpu.weight.
+    """
+    wanted = [c for c, v in (
+        ("memory", mem), ("pids", pids), ("cpu", cpu_weight or cpu_quota)
+    ) if v]
     parent = find_delegating_ancestor(wanted)
     ready = enable_controllers(parent, wanted)
 
     cg = os.path.join(parent, name)
     os.makedirs(cg, exist_ok=True)
+
+    # If a limit was requested but no controller is delegated all the
+    # way down to this leaf, the write below would silently no-op.
+    # Surface that loudly — it's the single most common cause of "I
+    # passed --mem and the container ate 4 GB" reports.
+    if wanted and not ready:
+        print(f"neuros-container: WARNING no requested controllers were "
+              f"delegated here; the cgroup at {cg} will not enforce "
+              f"{', '.join(wanted)}. Likely cause: the cgroup tree "
+              f"needs an ancestor with subtrees=+{wanted[0]} enabled.",
+              file=sys.stderr)
 
     if mem and "memory" in ready:
         with open(os.path.join(cg, "memory.max"), "w") as f:
@@ -137,6 +292,10 @@ def make_cgroup(name, mem, pids, cpu_weight):
     if cpu_weight and "cpu" in ready:
         with open(os.path.join(cg, "cpu.weight"), "w") as f:
             f.write(str(cpu_weight))
+    if cpu_quota and "cpu" in ready:
+        max_us, period_us = cpu_quota
+        with open(os.path.join(cg, "cpu.max"), "w") as f:
+            f.write(f"{max_us} {period_us}")
     return cg
 
 
@@ -146,24 +305,27 @@ def join_cgroup(cg, pid):
 
 
 def cgroup_report(cg):
+    """Read leaf-cgroup accounting back into a dict. If the cgroup has
+    already been rmdir'd (a previous run cleaned up), the result is an
+    empty dict and the caller falls through silently."""
     report = {}
-    for key, fname in (("memory_peak", "memory.peak"), ("pids_current", "pids.current")):
-        path = os.path.join(cg, fname)
-        if os.path.exists(path):
-            with open(path) as f:
+    for key, fname in (
+        ("memory_peak", "memory.peak"), ("pids_current", "pids.current")
+    ):
+        try:
+            with open(os.path.join(cg, fname)) as f:
                 report[key] = f.read().strip()
+        except OSError:
+            pass
     return report
 
 
-def try_unprivileged_userns():
-    """Best-effort unshare(CLONE_NEWUSER) with a 1:1 uid/gid map, so the
-    calling user appears as root inside the new namespace. Returns True if
-    it worked. On Ubuntu 24.04+ this is blocked by default for unconfined
-    processes (see /proc/sys/kernel/apparmor_restrict_unprivileged_userns);
-    EPERM there is expected, not a bug."""
+def try_unprivileged_userns(uid, gid):
+    """Enter an unprivileged user namespace with an explicit uid/gid map.
+    Returns True if the call succeeded. On Ubuntu 24.04+ this is blocked
+    by default for unconfined processes; EPERM there is expected."""
     try:
         os.unshare(os.CLONE_NEWUSER)
-        uid, gid = os.getuid(), os.getgid()
         with open("/proc/self/setgroups", "w") as f:
             f.write("deny\n")
         with open("/proc/self/uid_map", "w") as f:
@@ -175,48 +337,206 @@ def try_unprivileged_userns():
     return True
 
 
-def enter_namespaces():
-    """Returns 'full' if mount/uts/pid/ipc namespaces were entered, 'none'
-    if we ran with no isolation at all (insufficient privilege)."""
-    have_caps = os.geteuid() == 0
-    if not have_caps:
-        have_caps = try_unprivileged_userns()
+def enter_namespaces(net=False, user=None):
+    """Enter mount/uts/pid/ipc and (optionally) net namespaces.
+
+    Returns a tuple ``(mount, uts, pid, ipc, net, userns)`` listing which
+    namespaces actually got entered. The caller decides what to do when
+    something failed (we already print a single combined warning below).
+
+    Inside the new namespace this process is root only after
+    ``try_unprivileged_userns`` maps the caller into uid 0; without
+    either root or a successful userns the namespaces list is all
+    False and the caller is told it ran unisolated.
+    """
+    uid, gid = user if user is not None else (os.getuid(), os.getgid())
+    if os.geteuid() == 0:
+        userns = False
+        have_caps = True
+    else:
+        # If --user targeted a uid/gid that doesn't match the caller's
+        # real ids, the kernel will reject the 1:1 map with EINVAL and
+        # the user will see the generic "no userns" warning without
+        # understanding why. Surface the obvious case up front so the
+        # cause is visible even before the unshare attempt.
+        if user is not None and os.getuid() != uid:
+            print(f"neuros-container: --user {uid}:{gid} was requested "
+                  f"but the caller is uid {os.getuid()}:{os.getgid()}; "
+                  f"unprivileged user namespaces can only map a "
+                  f"single caller uid/gid. Drop --user or run as root "
+                  f"to avoid this.", file=sys.stderr)
+        have_caps = try_unprivileged_userns(uid, gid)
+        userns = have_caps
 
     if not have_caps:
         print("neuros-container: no root and unprivileged user namespaces "
               "are unavailable; running without namespace isolation "
               "(cgroup limits above still apply)", file=sys.stderr)
-        return "none"
+        return (False, False, False, False, False, False)
 
+    flags = os.CLONE_NEWNS | os.CLONE_NEWUTS | os.CLONE_NEWPID | os.CLONE_NEWIPC
+    if net:
+        flags |= os.CLONE_NEWNET
+    gained_net = net
     try:
-        os.unshare(os.CLONE_NEWNS | os.CLONE_NEWUTS | os.CLONE_NEWPID | os.CLONE_NEWIPC)
+        os.unshare(flags)
     except OSError as e:
-        print(f"neuros-container: got a user namespace but not the rest ({e}); "
-              "running without namespace isolation (cgroup limits above still apply)",
+        # Some kernels refuse CLONE_NEWNET without privileges even
+        # after a userns; degrade gracefully instead of failing.
+        if net and (flags & ~os.CLONE_NEWNET):
+            try:
+                os.unshare(flags & ~os.CLONE_NEWNET)
+                gained_net = False
+                print(f"neuros-container: could not create network "
+                      f"namespace ({e}); continuing without it",
+                      file=sys.stderr)
+            except OSError as e2:
+                print(f"neuros-container: namespace setup failed ({e2}); "
+                      "running without namespace isolation (cgroup limits "
+                      "above still apply)", file=sys.stderr)
+                return (False, False, False, False, False, userns)
+        else:
+            print(f"neuros-container: namespace setup failed ({e}); "
+                  "running without namespace isolation (cgroup limits "
+                  "above still apply)", file=sys.stderr)
+            return (False, False, False, False, False, userns)
+
+    return (True, True, True, True, gained_net, userns)
+
+
+def write_state(state_path, name, inner_pid, cg):
+    """Persist {name, pid, cgroup} under STATE_DIR so detached runs
+    can be reattached without polling /proc."""
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    with open(state_path, "w") as f:
+        json.dump({"name": name, "pid": inner_pid, "cgroup": cg}, f)
+
+
+def mount_proc_best_effort():
+    """Mount a fresh /proc inside the new PID namespace. Falls back to
+    the mount(8) binary on Python <3.13, and to no-op when /proc isn't
+    writable (e.g. chroot without it)."""
+    try:
+        os.mount("proc", "/proc", "proc", 0, "")
+        return
+    except (AttributeError, OSError):
+        pass
+    try:
+        os.system("mount -t proc proc /proc 2>/dev/null")
+    except Exception:
+        pass
+
+
+def remount_readonly_best_effort():
+    """Try to remount / read-only inside the container; if the mount
+    namespace isn't fully set up (e.g. we're in the unprivileged
+    fallback path) the remount will fail. Capture and surface the
+    non-zero returncode so the user can see whether the RO bit
+    actually took effect rather than silently believing it did."""
+    rc = os.system("mount -o remount,ro / 2>/dev/null")
+    if rc != 0:
+        print(f"neuros-container: warning: 'mount -o remount,ro /' "
+              f"exited with status {rc}; the container's rootfs may "
+              f"not actually be read-only", file=sys.stderr)
+
+
+def drop_capabilities_best_effort(pattern):
+    """Drop every capability whose name matches ``pattern`` from the
+    current process's bounding set via ``prctl(PR_CAPBSET_DROP)``.
+
+    The bounding set is inherited across ``execve`` so the workload
+    sees the dropped state without a wrapper shell. We rely on the
+    user namespace giving us ``CAP_SETPCAP`` (which it does on Linux
+    3.12+ by default); outside a userns, prctl will silently EPERM
+    and we surface that.
+
+    Implementation notes:
+      * The capability name table is hardcoded for indices 0..31.
+        The kernel reports its maximum supported cap via
+        /proc/sys/kernel/cap_last_cap; we walk up to that index.
+      * For caps above index 31 we fall back to ``CAP_<idx>`` naming
+        when no human-readable name is known.
+      * The drop is best-effort: every successful drop is silent
+        on stdout; every failure is reported on stderr.
+    """
+    if pattern is None:
+        return
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    except OSError:
+        print("neuros-container: --cap-drop requested but libc "
+              "could not be loaded; skipping capability drop.",
               file=sys.stderr)
-        return "none"
-    # hostname and rootfs are applied in the PID-1 child after the second
-    # fork below, since the UTS/mount namespaces are entered here but this
-    # process itself stays in the old PID namespace.
-    return "full"
+        return
+    try:
+        with open("/proc/sys/kernel/cap_last_cap") as f:
+            last = int(f.read().strip())
+    except (OSError, ValueError):
+        last = len(_CAP_NAMES_0_31) - 1
+
+    dropped, failed_to_drop = [], []
+    for idx in range(last + 1):
+        if idx < len(_CAP_NAMES_0_31):
+            name = f"CAP_{_CAP_NAMES_0_31[idx]}"
+        else:
+            name = f"CAP_{idx}"  # kernel-version-specific names
+        if not pattern.search(name):
+            continue
+        rc = libc.prctl(PR_CAPBSET_DROP, idx, 0, 0, 0)
+        if rc == 0:
+            dropped.append(name)
+        else:
+            err = ctypes.get_errno()
+            failed_to_drop.append((name, err))
+
+    if not dropped and not failed_to_drop:
+        print(f"neuros-container: --cap-drop pattern matched 0 of "
+              f"{last + 1} capabilities; nothing was dropped. "
+              f"Check the regex (e.g. 'CAP_NET_RAW', "
+              f"'^CAP_(SYS|NET)_' for a prefix).",
+              file=sys.stderr)
+    for name, err in failed_to_drop:
+        print(f"neuros-container: failed to drop {name} from bounding "
+              f"set (errno={err}); the user namespace likely lacks "
+              f"CAP_SETPCAP. Run as root, or inside a user namespace "
+              f"with CAP_SETPCAP inherited.",
+              file=sys.stderr)
 
 
 def run_container(args):
-    name = f"neuros-{os.getpid()}"
+    """Top-level container-run path. Created cgroup is cleaned up on
+    exit when --detach is not in effect, and a state file is written
+    when it is."""
+    name = args.name or f"neuros-{os.getpid()}"
     mem = parse_size(args.mem)
     pids = args.pids
-    cg = make_cgroup(name, mem, pids, args.cpu)
+    cg = make_cgroup(name, mem, pids, args.cpu, args.cpu_quota)
+
+    state_path = None
+    if args.detach:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        state_path = os.path.join(STATE_DIR, f"{name}.json")
 
     pid = os.fork()
     if pid == 0:
-        join_cgroup(cg, os.getpid())
-        mode = enter_namespaces()
+        try:
+            join_cgroup(cg, os.getpid())
+            ns = enter_namespaces(net=args.net, user=args.user)
+            mount_ns, _uts, _pid, _ipc, net_ns, _userns = ns
 
-        if mode == "full":
-            # A second fork is required for CLONE_NEWPID: unshare() only
-            # affects children created after the call, so this process
-            # stays in the old PID namespace and the next fork's child
-            # becomes PID 1 in the new one.
+            if not mount_ns:
+                # No mount namespace: drop straight into exec.
+                try:
+                    os.execvp(args.cmd[0], args.cmd)
+                except OSError as e:
+                    print(f"neuros-container: exec {args.cmd[0]} failed: {e}",
+                          file=sys.stderr)
+                    os._exit(127)
+                return
+
+            # CLONE_NEWPID only affects post-unshare children, so a
+            # second fork is needed for the user's command to actually
+            # be PID 1 in the new PID namespace.
             inner = os.fork()
             if inner == 0:
                 if args.hostname:
@@ -225,48 +545,219 @@ def run_container(args):
                 if args.rootfs:
                     os.chroot(args.rootfs)
                     os.chdir("/")
+                if args.read_only:
+                    remount_readonly_best_effort()
+                if args.user is not None and os.geteuid() == 0:
+                    target_uid, target_gid = args.user
+                    try:
+                        os.setgid(target_gid)
+                        os.setuid(target_uid)
+                    except (PermissionError, OSError) as e:
+                        print(f"neuros-container: setuid/setgid failed: {e}",
+                              file=sys.stderr)
+                drop_capabilities_best_effort(args.cap_drop)
+                if args.workdir:
+                    try:
+                        os.chdir(args.workdir)
+                    except OSError as e:
+                        print(f"neuros-container: cannot chdir to "
+                              f"{args.workdir}: {e}", file=sys.stderr)
+                # Inject --env KEY=VALUE entries last so they take
+                # precedence over anything inherited from the parent
+                # shell (the user's intent for --env is usually "force
+                # this value", not "default if unset").
+                if args.env:
+                    for entry in args.env:
+                        k, _, v = entry.partition("=")
+                        os.environ[k] = v
+                mount_proc_best_effort()
                 try:
-                    os.mount(b"proc", b"/proc", b"proc", 0, b"")
-                except (AttributeError, OSError):
-                    # os.mount is only available on Python 3.13+; fall back
-                    # to mount(8), which is present on every target host.
-                    os.system("mount -t proc proc /proc")
-                os.execvp(args.cmd[0], args.cmd)
+                    os.execvp(args.cmd[0], args.cmd)
+                except OSError as e:
+                    print(f"neuros-container: exec {args.cmd[0]} failed: {e}",
+                          file=sys.stderr)
+                    os._exit(127)
             else:
+                if state_path:
+                    write_state(state_path, name, inner, cg)
+                if args.detach:
+                    print(f"neuros-container: detached, inner pid {inner}, "
+                          f"state {state_path}", file=sys.stderr)
+                    os._exit(0)
                 _, status = os.waitpid(inner, 0)
                 os._exit(os.waitstatus_to_exitcode(status))
-        else:
-            os.execvp(args.cmd[0], args.cmd)
-        os._exit(1)
+        except Exception as e:
+            print(f"neuros-container: child setup failed: {e}",
+                  file=sys.stderr)
+            os._exit(1)
 
     _, status = os.waitpid(pid, 0)
+
+    # Foreground (non-detached) runs: the cgroup was scoped to this PID,
+    # so by the time the parent wait()s, the leaf is empty and rmdirable.
+    # We rely on memory.peak being readable while the cgroup is still on
+    # disk; cgroup_report handles the already-removed case silently.
     report = cgroup_report(cg)
-    try:
-        os.rmdir(cg)
-    except OSError:
-        pass
-    if report:
-        peak = report.get("memory_peak")
-        if peak:
-            print(f"neuros-container: peak memory {int(peak) / 1024 / 1024:.1f} MiB", file=sys.stderr)
+    if not args.detach:
+        try:
+            os.rmdir(cg)
+        except OSError:
+            rmdir_failed = True
+    if report.get("memory_peak"):
+        peak_mib = int(report["memory_peak"]) / 1024 / 1024
+        print(f"neuros-container: peak memory {peak_mib:.1f} MiB",
+              file=sys.stderr)
     return os.waitstatus_to_exitcode(status)
 
 
-def list_cgroups():
-    parent = own_cgroup_path()
-    found = False
-    for entry in sorted(os.listdir(parent)):
-        if entry.startswith("neuros-"):
-            found = True
-            path = os.path.join(parent, entry)
-            procs_path = os.path.join(path, "cgroup.procs")
-            n = 0
-            if os.path.exists(procs_path):
-                with open(procs_path) as f:
-                    n = len(f.read().split())
-            print(f"{entry}  ({n} process{'es' if n != 1 else ''})")
-    if not found:
+def cleanup_container(name):
+    """Best-effort teardown of a single detached container.
+
+    Reads the state file under STATE_DIR, attempts to rmdir the cgroup
+    (only succeeds if empty; populated cgroups are left alone and the
+    caller is told), then unlinks the state file. Returns 0 on success,
+    1 if the cgroup was non-empty so a manual inspect is warranted."""
+    state_path = os.path.join(STATE_DIR, f"{name}.json")
+    if not os.path.exists(state_path):
+        print(f"neuros-container: no state file for '{name}' "
+              f"(looked at {state_path})", file=sys.stderr)
+        return 1
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+        cg = state.get("cgroup", "")
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"neuros-container: cannot read state file for '{name}': "
+              f"{e}; unlinking", file=sys.stderr)
+        try:
+            os.unlink(state_path)
+        except OSError:
+            pass
+        return 1
+
+    still_running = 0
+    procs_path = os.path.join(cg, "cgroup.procs")
+    try:
+        with open(procs_path) as f:
+            still_running = len(f.read().split())
+    except OSError:
+        # A missing or unreadable cgroup.procs is treated as zero
+        # live members so partially-constructed leaves (and the
+        # synthetic tmpdir cgroups the test suite uses) can still be
+        # reaped. Without this branch, the tests would need to either
+        # leave a procs file behind (which blocks rmdir with ENOTEMPTY)
+        # or skip these leaves entirely.
+        still_running = 0
+
+    if still_running:
+        print(f"neuros-container: '{name}' still has {still_running} "
+              f"processes in {cg}; refusing to remove. Kill them first "
+              f"(the pid is in {state_path}).", file=sys.stderr)
+        return 1
+    try:
+        os.rmdir(cg)
+        print(f"neuros-container: removed cgroup {cg}", file=sys.stderr)
+    except OSError as e:
+        print(f"neuros-container: could not rmdir {cg} ({e}); leaving "
+              f"the state file in place", file=sys.stderr)
+        return 1
+    try:
+        os.unlink(state_path)
+    except OSError:
+        pass
+    return 0
+
+
+def cleanup_all():
+    """Cleanup every detached container. Each one that has live
+    members is skipped (with a stderr line) so a partially-clean
+    state surfaces."""
+    if not os.path.isdir(STATE_DIR):
+        print("no detached neuros-container state to clean up")
+        return 0
+    rc = 0
+    for entry in sorted(os.listdir(STATE_DIR)):
+        if not entry.endswith(".json"):
+            continue
+        name = entry[:-len(".json")]
+        rc |= cleanup_container(name)
+    return rc
+
+
+def _list_neuros_leaves(root):
+    """Recursively enumerate every ``neuros-*`` leaf cgroup under
+    ``root``. Returns a list of dicts; hoisted out of ``list_cgroups``
+    so the test suite can drive it against synthetic cgroup trees
+    without spinning up a live delegation."""
+    out = []
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for entry in entries:
+        path = os.path.join(root, entry)
+        if not entry.startswith("neuros-"):
+            out.extend(_list_neuros_leaves(path))
+            continue
+        rel = path[len(CGROUP_ROOT):] if path.startswith(CGROUP_ROOT) else path
+        try:
+            with open(os.path.join(path, "cgroup.procs")) as f:
+                procs = len(f.read().split())
+        except OSError:
+            procs = 0
+        limits = {}
+        for key, fname in (
+            ("memory_max", "memory.max"),
+            ("pids_max", "pids.max"),
+            ("cpu_weight", "cpu.weight"),
+            ("cpu_max", "cpu.max"),
+        ):
+            try:
+                with open(os.path.join(path, fname)) as f:
+                    limits[key] = f.read().strip()
+            except OSError:
+                limits[key] = None
+        peak = None
+        try:
+            with open(os.path.join(path, "memory.peak")) as f:
+                raw = f.read().strip()
+                if raw.isdigit():
+                    peak = int(raw)
+        except OSError:
+            peak = None
+        out.append({
+            "name": entry, "path": rel, "procs": procs,
+            "limits": limits, "memory_peak": peak,
+        })
+    return out
+
+
+def list_cgroups(json_output=False):
+    """Walk the cgroup subtree under the delegating ancestor we found
+    earlier (since nested neuros-* leaves inside a parent neuros-* leaf
+    are also valid) and emit a per-leaf report. JSON mode emits a flat
+    array of records so scripts can pipe it through jq."""
+    rows = _list_neuros_leaves(own_cgroup_path())
+    if json_output:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
         print("no active neuros-container cgroups")
+        return
+    for r in rows:
+        suffix = "es" if r["procs"] != 1 else ""
+        print(f"{r['name']}  ({r['procs']} process{suffix})")
+        for label, fname in (
+            ("memory.max", "memory_max"),
+            ("pids.max", "pids_max"),
+            ("cpu.weight", "cpu_weight"),
+            ("cpu.max", "cpu_max"),
+        ):
+            val = r["limits"].get(fname)
+            if val:
+                print(f"  {label} = {val}")
+        if r["memory_peak"] is not None:
+            print(f"  memory.peak = {r['memory_peak'] / 1024 / 1024:.1f} MiB")
 
 
 def main():
@@ -277,11 +768,41 @@ def main():
     run.add_argument("--mem", help="memory limit, e.g. 256M, 1G")
     run.add_argument("--pids", help="max number of processes/threads")
     run.add_argument("--cpu", type=int, help="cpu.weight (1-10000, default cgroup weight is 100)")
+    run.add_argument("--cpu-quota", metavar="MAX/PERIOD",
+                     help="cpu.max quota, e.g. '50000/100000' = 50%% of one CPU")
     run.add_argument("--hostname", help="hostname to set inside the UTS namespace")
     run.add_argument("--rootfs", help="directory to chroot into before exec")
-    run.add_argument("cmd", nargs=argparse.REMAINDER, help="-- command and arguments to run")
+    run.add_argument("--workdir", help="working directory inside the container (after chroot)")
+    run.add_argument("--user", metavar="UID:GID",
+                     help="explicit UID:GID to set inside the container (root only)")
+    run.add_argument("--read-only", action="store_true",
+                     help="remount / as read-only inside the container")
+    run.add_argument("--net", action="store_true",
+                     help="enter a new network namespace")
+    run.add_argument("--env", action="append", metavar="KEY=VALUE",
+                     help="set an environment variable inside the container (repeatable)")
+    run.add_argument("--env-from-file", metavar="PATH",
+                     help="load KEY=VALUE pairs (one per line, # comments, optional 'export ' prefix) from PATH")
+    run.add_argument("--cap-drop", metavar="REGEX",
+                     help="drop capabilities matching this regex from the bounding set (libcap2-bin required)")
+    run.add_argument("--detach", action="store_true",
+                     help="don't wait; leave the child running and write /run/neuros-container/<name>.json")
+    run.add_argument("--name", help="cgroup name (default: 'neuros-<parent-pid>')")
+    run.add_argument("cmd", nargs=argparse.REMAINDER,
+                     help="-- command and arguments to run")
 
-    sub.add_parser("list", help="list active neuros-container cgroups")
+    list_p = sub.add_parser("list", help="list active neuros-container cgroups (recursive)")
+    list_p.add_argument("--json", action="store_true",
+                        help="emit structured JSON instead of human-readable output")
+
+    sub.add_parser("logs", help="(placeholder) tail a detached container's state file")
+
+    cleanup_p = sub.add_parser(
+        "cleanup", help="remove a detached container's cgroup + state file")
+    cleanup_p.add_argument("name", nargs="?",
+                            help="container name to clean up (omit with --all)")
+    cleanup_p.add_argument("--all", action="store_true",
+                            help="clean up every detached container")
 
     args = parser.parse_args()
 
@@ -292,9 +813,27 @@ def main():
         if not cmd:
             die("no command given (usage: neuros-container run [opts] -- CMD [ARGS...])")
         args.cmd = cmd
+        args.cpu_quota = parse_cpu_quota(args.cpu_quota)
+        args.user = parse_user(args.user)
+        # --env-from-file is merged with --env so file values land
+        # first (older defaults) and explicit --env K=V values
+        # override them on conflict, mirroring docker --env-file.
+        env_from_file = parse_env_file(args.env_from_file)
+        args.env = parse_env((env_from_file or []) + (args.env or []))
+        args.cap_drop = parse_cap_drop(args.cap_drop)
         sys.exit(run_container(args))
     elif args.command == "list":
-        list_cgroups()
+        list_cgroups(json_output=args.json)
+    elif args.command == "logs":
+        print("neuros-container logs: not implemented yet "
+              "(the state file lives at /run/neuros-container/<name>.json)",
+              file=sys.stderr)
+    elif args.command == "cleanup":
+        if args.all:
+            sys.exit(cleanup_all())
+        if not args.name:
+            die("cleanup needs either a container NAME or --all")
+        sys.exit(cleanup_container(args.name))
     else:
         parser.print_help()
 

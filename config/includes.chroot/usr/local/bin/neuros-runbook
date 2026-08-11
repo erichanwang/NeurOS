@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""neuros-runbook: assertion-bearing runner for neuros-sandbox.
+
+The runbook format is JSON (one array of steps). Each step has:
+
+    {
+      "name": "<human-readable>",
+      "script": "<Python source piped to neuros-sandbox run --json>",
+      "limits": {"mem": "...", "pids": N, "timeout": N, "cpu_quota": N},
+      "expect": {
+        "exit_code": N,
+        "stdout_matches": "<regex>",
+        "stderr_matches": "<regex>",
+        "timeout_forbidden": bool
+      }
+    }
+
+Output: per-step verdict on stdout (human-readable table) plus a
+JSON envelope when --json is set (one record per step). Exit 0 if
+every step passes, exit 1 otherwise.
+
+With --rest=violations-only, the human table only shows failed
+steps; --rest=all shows every step. Default = all.
+
+The wrapper shells out to neuros-sandbox exactly like the bench
+does, so they share the same envelope schema. That means runbook
+verdicts can be diffed against production captures to detect when an
+OS upgrade silently changes what a step's stdout looks like.
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import uuid
+
+# --- Defaults ----------------------------------------------------------
+
+DEFAULT_TIMEOUT = 30
+DEFAULT_MEM = "256M"
+DEFAULT_PIDS = 64
+DEFAULT_CPU_QUOTA = 50000  # 50% of one CPU
+NEUROS_RUNBOOK_VERSION = "0.1"
+
+
+# --- Runbook loading ----------------------------------------------------
+
+class RunbookError(Exception):
+    """Raised on a malformed runbook the user can fix (not a kernel fault)."""
+
+
+def load_runbook(path):
+    """Read and validate a JSON runbook file.
+
+    Returns a list of step dicts. Each step has:
+      - name (str, required)
+      - script (str, required, non-empty)
+      - limits (dict, optional): per-step incisor for mem/pids/timeout/cpu_quota
+      - expect (dict, optional): exit_code (int or "any"), stdout_matches,
+                                  stderr_matches (regex str), timeout_forbidden
+
+    Raises RunbookError on any structural problem with a message
+    that's safe to surface on stderr.
+    """
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RunbookError(f"cannot read runbook {path!r}: {e}")
+    if not isinstance(raw, list):
+        raise RunbookError(
+            f"runbook {path!r} must be a JSON array of step objects")
+    seen_names = set()
+    for i, step in enumerate(raw):
+        if not isinstance(step, dict):
+            raise RunbookError(f"step {i}: must be an object")
+        name = step.get("name")
+        if not isinstance(name, str) or not name:
+            raise RunbookError(f"step {i}: 'name' must be a non-empty string")
+        if name in seen_names:
+            raise RunbookError(
+                f"step {i}: duplicate name {name!r}")
+        seen_names.add(name)
+        script = step.get("script")
+        if not isinstance(script, str) or not script:
+            raise RunbookError(
+                f"step {name!r}: 'script' must be a non-empty string")
+        limits = step.get("limits", {})
+        if not isinstance(limits, dict):
+            raise RunbookError(
+                f"step {name!r}: 'limits' must be an object")
+        expect = step.get("expect", {})
+        if not isinstance(expect, dict):
+            raise RunbookError(
+                f"step {name!r}: 'expect' must be an object")
+        # Pre-compile regexes so a malformed pattern fails the parser
+        # rather than the runtime assertion. Failures here are
+        # reported as RunbookError with the step name for grep-ability.
+        for key in ("stdout_matches", "stderr_matches"):
+            pat = expect.get(key)
+            if pat is not None:
+                if not isinstance(pat, str):
+                    raise RunbookError(
+                        f"step {name!r}: expect.{key} must be a string regex")
+                try:
+                    re.compile(pat)
+                except re.error as e:
+                    raise RunbookError(
+                        f"step {name!r}: expect.{key} regex invalid: {e}")
+        if "exit_code" in expect:
+            ec = expect["exit_code"]
+            if ec != "any" and not isinstance(ec, int):
+                raise RunbookError(
+                    f"step {name!r}: expect.exit_code must be an int or 'any'")
+    return raw
+
+
+# --- Single-step execution ----------------------------------------------
+
+def _run_step(step, env):
+    """Shell out to neuros-sandbox and return the parsed envelope plus
+    per-step assertion results."""
+    name = step["name"]
+    script = step["script"]
+    limits = step.get("limits", {})
+    argv = ["neuros-sandbox", "run",
+            "--timeout", str(limits.get("timeout", DEFAULT_TIMEOUT)),
+            "--mem", limits.get("mem", DEFAULT_MEM),
+            "--pids", str(limits.get("pids", DEFAULT_PIDS)),
+            "--name", f"neuros-runbook-{uuid.uuid4().hex[:8]}",
+            "--json", "--"]
+    cp = subprocess.run(
+        argv,
+        input=script.encode(),
+        env=env,
+        capture_output=True,
+        check=False,
+        timeout=limits.get("timeout", DEFAULT_TIMEOUT) + 10,
+    )
+    stdout_text = cp.stdout.decode("utf-8", "replace").strip()
+    env_obj = {"exit_code": cp.returncode}
+    if stdout_text:
+        try:
+            env_obj = json.loads(stdout_text.splitlines()[-1])
+        except json.JSONDecodeError:
+            env_obj.setdefault("stdout", stdout_text)
+    env_obj.setdefault("stdout", "")
+    env_obj.setdefault("stderr",
+                       cp.stderr.decode("utf-8", "replace"))
+    env_obj.setdefault("wall_clock_ms", 0)
+    env_obj.setdefault("timeout_hit", False)
+    env_obj.setdefault("peak_mem_estimate", None)
+
+    # Apply assertions.
+    expect = step.get("expect", {})
+    failures = []
+    if "exit_code" in expect:
+        ec = expect["exit_code"]
+        if ec != "any" and env_obj["exit_code"] != ec:
+            failures.append(
+                f"exit_code was {env_obj['exit_code']}, expected {ec}")
+    for key, text in (("stdout_matches", env_obj["stdout"]),
+                     ("stderr_matches", env_obj["stderr"])):
+        pat = expect.get(key)
+        if pat is None:
+            continue
+        if not re.search(pat, text):
+            failures.append(f"{key} did not match /{pat}/")
+    if expect.get("timeout_forbidden") and env_obj["timeout_hit"]:
+        failures.append("timeout_hit=true but timeout_forbidden=true")
+
+    return env_obj, failures
+
+
+# --- Aggregation --------------------------------------------------------
+
+def _run_runbook(path, env, only_violations=False):
+    steps = load_runbook(path)
+    record = {"version": NEUROS_RUNBOOK_VERSION,
+              "runbook_path": path,
+              "steps": []}
+    any_fail = False
+    for step in steps:
+        env_obj, failures = _run_step(step, env)
+        passed = not failures
+        if not passed:
+            any_fail = True
+        record["steps"].append({
+            "name": step["name"],
+            "passed": passed,
+            "exit_code": env_obj["exit_code"],
+            "wall_clock_ms": env_obj["wall_clock_ms"],
+            "timeout_hit": env_obj["timeout_hit"],
+            "peak_mem_estimate": env_obj["peak_mem_estimate"],
+            "failures": failures,
+        })
+    if only_violations:
+        visible = [s for s in record["steps"] if not s["passed"]]
+    else:
+        visible = record["steps"]
+    return record, visible, any_fail
+
+
+# --- Output formatting --------------------------------------------------
+
+def _print_table(records):
+    name_w = max(12, max((len(r["name"]) for r in records), default=12))
+    print(f"{'name'.ljust(name_w)}  {'status':<11} "
+          f"{'exit':>5} {'wall_ms':>9} {'peak_mem':>11}  failures")
+    for r in records:
+        status = "PASS" if r["passed"] else "FAIL"
+        peak = "-" if r["peak_mem_estimate"] is None else str(r["peak_mem_estimate"])
+        fail_summary = ""
+        if r["failures"]:
+            fail_summary = "; ".join(r["failures"])
+        print(
+            f"{r['name'].ljust(name_w)}  {status:<11} "
+            f"{r['exit_code']:>5} {r['wall_clock_ms']:>9} {peak:>11}  "
+            f"{fail_summary}"
+        )
+
+
+# --- Subcommand dispatch -----------------------------------------------
+
+def cmd_run(args):
+    env = {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    }
+    try:
+        record, visible, any_fail = _run_runbook(
+            args.runbook, env,
+            only_violations=args.only_violations)
+    except RunbookError as e:
+        _die(str(e))
+    if args.json:
+        print(json.dumps(record, indent=2))
+    else:
+        if not visible:
+            print("(no violations)")
+        else:
+            _print_table(visible)
+    return 1 if any_fail else 0
+
+
+def _die(msg, code=2):
+    print(f"neuros-runbook: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def _build_parser():
+    p = argparse.ArgumentParser(
+        prog="neuros-runbook",
+        description=(
+            "Run a JSON runbook of neuros-sandbox steps with assertion "
+            "checks per step. Exit 0 if all steps pass, 1 on any failure."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+    p_run = sub.add_parser("run", help="run a runbook from a JSON file")
+    p_run.add_argument("runbook", help="path to the runbook JSON file")
+    p_run.add_argument(
+        "--only-violations", action="store_true",
+        help="only print rows that failed (default: all).")
+    p_run.add_argument(
+        "--json", action="store_true",
+        help="emit a JSON envelope instead of a human-readable table")
+    return p
+
+
+def main(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd == "run":
+        rc = cmd_run(args)
+        return rc if rc is not None else 0
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

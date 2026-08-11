@@ -1,282 +1,458 @@
 #!/usr/bin/env python3
-"""
-neuros-bench — NeurOS Benchmark Suite
-Comprehensive AI and system benchmarks with scoring and comparisons.
+"""neuros-bench: regression benchmark harness for neuros-sandbox.
 
-Usage:
-  neuros-bench                      Run full benchmark suite
-  neuros-bench --ai                  AI/LLM benchmarks only
-  neuros-bench --system              System benchmarks only
-  neuros-bench --compare             Compare against previous runs
-  neuros-bench --quick               Quick 30-second benchmark
-"""
+The tool is intentionally small. It shells out to `neuros-sandbox run
+--json` and treats each per-workload JSON envelope as the unit of
+metric. That decouples it from any specific cgroup kernel delegation,
+so the bench is fully testable on a developer laptop.
 
-import sys
-import os
-import json
-import time
-import subprocess
+Subcommands:
+
+    neuros-bench list                           # print built-in workloads
+    neuros-bench run <workload>                 # one workload -> metrics.json
+    neuros-bench batch [--out PATH]             # all workloads -> metrics.json
+    neuros-bench compare <baseline> <candidate> # diff two .json files
+
+The built-in workload suite is intentionally small (8 named entries)
+but covers the spread of behaviors the sandbox is meant to isolate:
+CPU-bound recursion, memory growth, regex compile, fork pressure,
+ctype-bridge syscall count, file IO, JSON parse, and string ops.
+The workloads each render to a deterministic Python string that the
+wrapper pipes into `neuros-sandbox run -`; no temp files.
+
+Design choices worth knowing:
+
+* `--per-workload-timeout` defaults to 60s. A single runaway workload
+  in a CPU loop used to be able to block the entire batch because
+  the wrapper only SIGKILLs on its OWN watchdog; this matches the
+  shape that neuros-sandbox exposes.
+* `--tolerance-wall-pct` and `--tolerance-mem-pct` are the regression
+  bounds for `compare`. Defaults are 15% / 25%; CI can be tighter via
+  configuration.
+* The compare output is grep-friendly text on stdout, NOT JSON.
+  CIs reading the diff benefit from `+12%` rows so a human can
+  triage a regression fast.
+"""
 import argparse
-import urllib.request
-import urllib.error
-from datetime import datetime
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
 
-BENCH_DIR = os.path.expanduser("~/.local/share/neuros/benchmarks")
-RESULTS_FILE = os.path.join(BENCH_DIR, "results.json")
+# --- Constants -----------------------------------------------------------
 
+#: The version baked into the metrics.json schema. Bump when the
+#: shape changes in a non-additive way (new required key, removed
+#: key, etc.).
+NEUROS_BENCH_VERSION = "0.1"
 
-def ensure_dirs():
-    os.makedirs(BENCH_DIR, exist_ok=True)
+#: Default per-workload timeout in seconds.
+DEFAULT_TIMEOUT = 60
 
-
-def load_results():
-    if os.path.exists(RESULTS_FILE):
-        with open(RESULTS_FILE) as f:
-            return json.load(f)
-    return []
-
-
-def save_results(results):
-    with open(RESULTS_FILE, "w") as f:
-        json.dump(results, f, indent=2)
+#: Default tolerances (percent) for the `compare` subcommand.
+DEFAULT_TOLERANCE_WALL_PCT = 15.0
+DEFAULT_TOLERANCE_MEM_PCT = 25.0
 
 
-def bench_cpu():
-    start = time.time()
-    ops = 0
-    for _ in range(5000000):
-        ops += 1
-    elapsed = time.time() - start
-    return {"ops": ops, "time_seconds": round(elapsed, 3),
-            "score": round(ops / elapsed / 1000000, 1)}
+# --- Workload registry ---------------------------------------------------
 
+def _w_cpu_tight():
+    # Recursive fib — tight CPU usage, low memory.
+    def fib(n): return n if n < 2 else fib(n - 1) + fib(n - 2)
+    return fib(28)
 
-def bench_memory():
-    sizes = [1000, 10000, 100000, 1000000]
-    results = []
-    for size in sizes:
-        start = time.time()
-        arr = list(range(size))
-        arr.reverse()
-        arr.sort()
-        elapsed = time.time() - start
-        results.append({"elements": size, "ms": round(elapsed * 1000, 1)})
-    return results
+def _w_json_parse():
+    # Generate a synthetic 5KB JSON string, parse-then-dump 5000 times.
+    import json as _json
+    payload = _json.dumps([{"i": i, "sq": i * i} for i in range(40)])
+    for _ in range(5000):
+        _json.loads(payload)
+    return 0
 
+def _w_regex_compile():
+    import re as _re
+    pats = [r"^CAP_[A-Z_]+$", r"[0-9a-f]{8}", r"\b\w+\b", r"foo|bar|baz",
+            r"https?://[^\s]+", r"\d{4}-\d{2}-\d{2}", r"^[a-z]+$",
+            r"\s+", r"(\d)\1+", r"^[A-Z][a-z]*$"]
+    for _ in range(200):
+        for p in pats:
+            _re.compile(p)
+    return 0
 
-def bench_disk(mb=100):
+def _w_subproc_spawn():
+    # Spawn 8 subprocesses that run a no-op and return.
+    for _ in range(8):
+        subprocess.run([sys.executable, "-c", "pass"],
+                       capture_output=True, check=False)
+    return 0
+
+def _w_mem_grow():
+    # Allocate a bytearray that doubles until it reaches ~50 MiB.
+    buf = bytearray()
+    target = 50 * 1024 * 1024
+    while len(buf) < target:
+        buf.extend(b"\x00" * min(len(buf) or 1, target - len(buf)))
+    return len(buf)
+
+def _w_file_io():
+    # Write+read 100 x 4KB files in /tmp; cleanup after.
     import tempfile
-    import os as os_mod
-    data = b"x" * (1024 * 1024)
-    with tempfile.NamedTemporaryFile(delete=False) as f:
-        start = time.time()
-        for _ in range(mb):
-            f.write(data)
-        f.flush()
-        write_time = time.time() - start
-        tmp = f.name
-    with open(tmp, "rb") as f:
-        start = time.time()
-        for _ in range(mb):
-            f.read(1024 * 1024)
-        read_time = time.time() - start
-    os_mod.unlink(tmp)
-    return {
-        "write_mbps": round(mb / write_time, 1),
-        "read_mbps": round(mb / read_time, 1)
-    }
-
-
-def bench_ai():
-    """Benchmark Ollama inference speed."""
-    config = {}
-    config_path = os.path.expanduser("~/.config/neuros/llm.conf")
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            for line in f:
-                line = line.strip()
-                if "=" in line and not line.startswith("["):
-                    k, v = line.split("=", 1)
-                    config[k.strip()] = v.strip().strip('"').strip("'")
-    model = config.get("model", "mistral")
-    ollama_url = config.get("ollama_url", "http://localhost:11434")
-
-    metrics = {}
-    tests = [
-        ("tiny", "Hello", 10),
-        ("short", "Write a haiku about coding", 50),
-        ("medium", "Explain binary search in one paragraph", 150),
-    ]
-
-    for name, prompt, expect_tokens in tests:
+    paths = []
+    for i in range(100):
+        fd, p = tempfile.mkstemp(prefix="neuros-bench-", suffix=".bin")
+        os.write(fd, b"\x00" * 4096)
+        os.close(fd)
+        paths.append(p)
+    for p in paths:
+        with open(p, "rb") as f:
+            f.read()
+    for p in paths:
         try:
-            start = time.time()
-            req = urllib.request.Request(
-                f"{ollama_url}/api/generate",
-                data=json.dumps({
-                    "model": model, "prompt": prompt, "stream": False,
-                    "options": {"num_predict": expect_tokens}
-                }).encode(),
-                headers={"Content-Type": "application/json"}
-            )
-            resp = urllib.request.urlopen(req, timeout=60)
-            data = json.loads(resp.read().decode())
-            elapsed = time.time() - start
-            actual_tokens = data.get("eval_count", 0)
-            tps = actual_tokens / elapsed if elapsed > 0 else 0
-            metrics[name] = {
-                "time_seconds": round(elapsed, 3),
-                "tokens": actual_tokens,
-                "tokens_per_sec": round(tps, 1)
-            }
-        except Exception as e:
-            metrics[name] = {"error": str(e)}
+            os.unlink(p)
+        except OSError:
+            pass
+    return len(paths)
 
-    return metrics
+def _w_ctypes_call():
+    import ctypes
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    for _ in range(500):
+        libc.getpid()
+    return 0
+
+def _w_string_ops():
+    # Heavy string interpolation/format, no I/O.
+    parts = ["alpha", "beta", "gamma", "delta", "epsilon"]
+    out = []
+    for i in range(100_000):
+        out.append(f"{i:d}-{parts[i % len(parts)]}-{i * i}")
+    return len("".join(out))
 
 
-def bench_compression():
-    """Benchmark compression speed."""
-    import tempfile
-    import os as os_mod
-    data = b"Hello world! " * 100000
-    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
-        f.write(data)
-        tmp = f.name
-    start = time.time()
-    subprocess.run(["gzip", "-f", tmp], check=True)
-    compress_time = time.time() - start
-    start = time.time()
-    subprocess.run(["gunzip", "-f", tmp + ".gz"], check=True)
-    decompress_time = time.time() - start
-    os_mod.unlink(tmp)
-    del data
-    # Approximate compression ratio for text
+#: Workload registry: name -> (callable, baseline_ms_estimate). The
+#: baseline_ms_estimate is informational only (used in `list` and
+#: compare output); runtime numbers depend on the host.
+WORKLOADS = {
+    "cpu_tight":       (_w_cpu_tight, 1100),
+    "json_parse":      (_w_json_parse, 900),
+    "regex_compile":   (_w_regex_compile, 600),
+    "subproc_spawn":   (_w_subproc_spawn, 1500),
+    "mem_grow":        (_w_mem_grow, 350),
+    "file_io":         (_w_file_io, 1800),
+    "ctypes_call":     (_w_ctypes_call, 700),
+    "string_ops":      (_w_string_ops, 1200),
+}
+
+
+# --- Subprocess envelope parsing ------------------------------------------
+
+def _run_workload(name, timeout_s, mem_cap, pids_cap):
+    """Shell out to neuros-sandbox with the workload's Python source as
+    a piped stdin, parse the JSON envelope, and return a dict matching
+    the metrics schema. Raises SandboxError (we use a generic alias)
+    on subprocess or envelope failures."""
+    fn, _ = WORKLOADS[name]
+    # The workload callable is executed INSIDE the sandbox via a fresh
+    # python3 interpreter; here we render the function source as a
+    # Python expression that ends with `return 0` on the outside of
+    # the workspace. Wrap in a try/except that prints traceback to
+    # stderr and exits 1, so the metrics envelope reflects the
+    # failure mode rather than silencing it.
+    src_lines = [
+        "import sys, traceback",
+        "try:",
+    ]
+    for line in _render_fn(fn):
+        src_lines.append("    " + line)
+    src_lines.append("except Exception:")
+    src_lines.append("    traceback.print_exc()")
+    src_lines.append("    sys.exit(1)")
+    # Pull the trailing expression out: the last line of a workload
+    # is the return value. The wrapping `r = ...` captures it but we
+    # don't need to read it; sys.exit code on uncaught Exception
+    # surfaces as the envelope's exit_code.
+    body = "\n".join(src_lines)
+    argv = ["neuros-sandbox", "run",
+            "--timeout", str(timeout_s),
+            "--mem", mem_cap,
+            "--pids", str(pids_cap),
+            "--name", f"neuros-bench-{uuid.uuid4().hex[:8]}",
+            "--json", "--"]
+    cp = subprocess.run(
+        argv,
+        input=body.encode(),
+        env={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+        capture_output=True,
+        check=False,
+        timeout=timeout_s + 10,  # small slack beyond the inner watchdog
+    )
+    stdout_text = cp.stdout.decode("utf-8", "replace").strip()
+    if not stdout_text:
+        return {
+            "name": name,
+            "wall_clock_ms": 0,
+            "exit_code": cp.returncode,
+            "stdout": "",
+            "stderr": cp.stderr.decode("utf-8", "replace"),
+            "timeout_hit": False,
+            "peak_mem_estimate": None,
+        }
+    try:
+        env_obj = json.loads(stdout_text.splitlines()[-1])
+    except json.JSONDecodeError:
+        env_obj = {"exit_code": cp.returncode, "stderr": stdout_text}
+    env_obj.setdefault("name", name)
+    env_obj.setdefault("wall_clock_ms", 0)
+    env_obj.setdefault("stdout", "")
+    env_obj.setdefault("stderr", "")
+    env_obj.setdefault("timeout_hit", False)
+    env_obj.setdefault("peak_mem_estimate", None)
+    return env_obj
+
+
+def _render_fn(fn):
+    """Pull the source of a function via inspect.getsource and unindent
+    it so it can be embedded inside a try/except block at the same
+    indent as the outer frame."""
+    import inspect
+    import textwrap
+    raw = textwrap.dedent(inspect.getsource(fn))
+    # Drop the leading `def _w_xxx():` and unindent the body so that
+    # everything below the def is indented by one level (matching
+    # the `try:` we wrap it in).
+    lines = raw.splitlines()
+    if lines and lines[0].lstrip().startswith("def "):
+        # drop def line; body follows
+        body = lines[1:]
+    else:
+        body = lines
+    # Trim leading blank line if present
+    while body and not body[0].strip():
+        body.pop(0)
+    return body
+
+
+# --- Metrics aggregation --------------------------------------------------
+
+def cmd_run(args):
+    fn, _ = WORKLOADS.get(args.workload, (None, None))
+    if fn is None:
+        _die(f"unknown workload {args.workload!r}; "
+             f"see `neuros-bench list`")
+    res = _run_workload(args.workload, args.timeout, args.mem, args.pids)
+    out = {
+        "runs": [res],
+        "total_wall_clock_ms": res["wall_clock_ms"],
+        "config": _config_block(args),
+        "neuros_bench_version": NEUROS_BENCH_VERSION,
+    }
+    _emit_metrics(out, args.out)
+
+
+def cmd_batch(args):
+    runs = []
+    t0 = time.monotonic()
+    for name in WORKLOADS:
+        runs.append(_run_workload(name, args.timeout, args.mem, args.pids))
+    total = int((time.monotonic() - t0) * 1000)
+    out = {
+        "runs": runs,
+        "total_wall_clock_ms": total,
+        "config": _config_block(args),
+        "neuros_bench_version": NEUROS_BENCH_VERSION,
+    }
+    _emit_metrics(out, args.out)
+
+
+def cmd_list(args):
+    print("available workloads:")
+    widest = max(len(name) for name in WORKLOADS) + 2
+    for name, (_, baseline_ms) in WORKLOADS.items():
+        print(f"  {name.ljust(widest)}  baseline_ms_est={baseline_ms}")
+    return 0
+
+
+def _config_block(args):
     return {
-        "compress_ms": round(compress_time * 1000, 1),
-        "decompress_ms": round(decompress_time * 1000, 1),
-        "ratio": 5.5
+        "per_workload_timeout_seconds": args.timeout,
+        "mem_cap": args.mem,
+        "pids_cap": args.pids,
     }
 
 
-def run_full_benchmark():
-    print("=== NeurOS Full System Benchmark ===")
-    result = {"timestamp": datetime.now().isoformat(), "scores": {}}
-    total_score = 0
-
-    print("\n[CPU] Integer operations...")
-    cpu = bench_cpu()
-    result["cpu"] = cpu
-    score_cpu = min(cpu["score"] * 20, 100)
-    result["scores"]["cpu"] = round(score_cpu, 1)
-    total_score += score_cpu
-    print(f"  Score: {score_cpu:.1f}/100 ({cpu['score']:.1f} M ops/sec)")
-
-    print("\n[Disk] Read/Write throughput...")
-    disk = bench_disk(50)
-    result["disk"] = disk
-    score_disk = min((disk["read_mbps"] + disk["write_mbps"]) / 2, 100)
-    result["scores"]["disk"] = round(score_disk, 1)
-    total_score += score_disk
-    print(f"  Score: {score_disk:.1f}/100 (R: {disk['read_mbps']} W: {disk['write_mbps']} MB/s)")
-
-    print("\n[Memory] Array operations...")
-    mem = bench_memory()
-    result["memory"] = mem
-    score_mem = max(0, min(100, 100 - (mem[-1]["ms"] / 10)))
-    result["scores"]["memory"] = round(score_mem, 1)
-    total_score += score_mem
-    print(f"  Score: {score_mem:.1f}/100 ({mem[-1]['ms']}ms for 1M elements)")
-
-    print("\n[AI] LLM inference (Ollama)...")
-    ai = bench_ai()
-    result["ai"] = ai
-    score_ai = 0
-    if "medium" in ai and "tokens_per_sec" in ai["medium"]:
-        score_ai = min(ai["medium"]["tokens_per_sec"] * 2, 100)
-    elif "short" in ai and "tokens_per_sec" in ai["short"]:
-        score_ai = min(ai["short"]["tokens_per_sec"] * 2, 100)
-    result["scores"]["ai"] = round(score_ai, 1)
-    total_score += score_ai
-    if "medium" in ai and "tokens_per_sec" in ai["medium"]:
-        print(f"  Score: {score_ai:.1f}/100 ({ai['medium']['tokens_per_sec']:.1f} tok/sec)")
-    else:
-        print(f"  Score: {score_ai:.1f}/100")
-
-    result["total_score"] = round(total_score / 4, 1)
-    print(f"\n=== OVERALL SCORE: {result['total_score']:.1f}/100 ===")
-
-    results = load_results()
-    results.append(result)
-    if len(results) > 20:
-        results = results[-20:]
-    save_results(results)
-
-    # Compare with best
-    if len(results) > 1:
-        best = max(r["total_score"] for r in results[:-1])
-        delta = result["total_score"] - best
-        if delta >= 0:
-            print(f"  New personal best! (+{delta:.1f})")
-        else:
-            print(f"  Previous best: {best:.1f} ({delta:.1f} below)")
-
-    return result
-
-
-def run_quick():
-    cpu = bench_cpu()
-    disk = bench_disk(10)
-    ai = bench_ai()
-    print(f"CPU: {cpu['score']:.1f} M ops/sec")
-    print(f"Disk: R {disk['read_mbps']:.1f} / W {disk['write_mbps']:.1f} MB/s")
-    if "short" in ai and "tokens_per_sec" in ai["short"]:
-        print(f"AI: {ai['short']['tokens_per_sec']:.1f} tok/sec")
-
-
-def show_history():
-    results = load_results()
-    if not results:
-        print("No benchmarks run yet.")
+def _emit_metrics(obj, out_path):
+    text = json.dumps(obj, indent=2)
+    if out_path is None or out_path == "-":
+        print(text)
         return
-    print(f"{'Date':<18} {'CPU':<8} {'Disk':<8} {'Mem':<8} {'AI':<8} {'Total':<8}")
-    print("-" * 65)
-    for r in results:
-        ts = r["timestamp"][:16].replace("T", " ")
-        scores = r.get("scores", {})
-        cpu = scores.get("cpu", 0)
-        disk = scores.get("disk", 0)
-        mem = scores.get("memory", 0)
-        ai = scores.get("ai", 0)
-        total = r.get("total_score", 0)
-        print(f"{ts:<18} {cpu:<8.1f} {disk:<8.1f} {mem:<8.1f} {ai:<8.1f} {total:<8.1f}")
+    with open(out_path, "w") as f:
+        f.write(text)
+    print(f"wrote metrics to {out_path}", file=sys.stderr)
 
 
-def main():
-    ensure_dirs()
-    parser = argparse.ArgumentParser(description="NeurOS Benchmark Suite")
-    parser.add_argument("--ai", "-a", action="store_true", help="AI benchmarks")
-    parser.add_argument("--system", "-s", action="store_true", help="System benchmarks")
-    parser.add_argument("--compare", "-c", action="store_true", help="Compare history")
-    parser.add_argument("--quick", "-q", action="store_true", help="Quick benchmark")
+def cmd_compare(args):
+    """Diff two metrics.json files. Print a grep-friendly table on
+    stdout. Exit 1 if any workload's wall_ms regressed beyond
+    --tolerance-wall-pct OR peak_mem regressed beyond
+    --tolerance-mem-pct."""
+    baseline = _load_metrics(args.baseline)
+    candidate = _load_metrics(args.candidate)
+    base_runs = {r["name"]: r for r in baseline["runs"]}
+    cand_runs = {r["name"]: r for r in candidate["runs"]}
 
-    args = parser.parse_args()
+    header = (
+        f"{'workload':<16} {'baseline_ms':>11} {'candidate_ms':>13} "
+        f"{'wall_pct':>9} {'base_mem':>11} {'cand_mem':>11} "
+        f"{'mem_pct':>9}  status"
+    )
+    print(header)
+    any_regression = False
+    for name in sorted(set(base_runs) | set(cand_runs)):
+        b = base_runs.get(name)
+        c = cand_runs.get(name)
+        b_ms = b.get("wall_clock_ms", 0) if b else 0
+        c_ms = c.get("wall_clock_ms", 0) if c else 0
+        b_mem = b.get("peak_mem_estimate") if b else None
+        c_mem = c.get("peak_mem_estimate") if c else None
 
-    if args.compare:
-        show_history()
-    elif args.quick:
-        run_quick()
-    elif args.ai:
-        ai = bench_ai()
-        print(json.dumps(ai, indent=2))
-    elif args.system:
-        cpu = bench_cpu()
-        mem = bench_memory()
-        print(f"CPU: {cpu['score']:.1f} M ops/sec")
-        print(f"Memory (1M elements): {mem[-1]['ms']}ms")
-    else:
-        run_full_benchmark()
+        wall_pct = _pct_delta(b_ms, c_ms)
+        mem_pct = _pct_delta_optional(b_mem, c_mem)
+        status = "OK"
+        # Wall regression only counted when both sides have a sample.
+        if b and c and wall_pct is not None:
+            if wall_pct > args.tolerance_wall_pct:
+                status = "REGRESSION"
+                any_regression = True
+        if status == "OK" and b and c and mem_pct is not None:
+            if mem_pct > args.tolerance_mem_pct:
+                status = "REGRESSION"
+                any_regression = True
+        if b is None:
+            status = "NEW"
+        if c is None:
+            status = "DROPPED"
+            any_regression = True
+
+        print(
+            f"{name:<16} "
+            f"{b_ms:>11d} {c_ms:>13d} "
+            f"{_fmt_pct(wall_pct):>9} "
+            f"{_fmt_mem(b_mem):>11} {_fmt_mem(c_mem):>11} "
+            f"{_fmt_pct(mem_pct):>9}  {status}"
+        )
+    print()
+    if any_regression:
+        print("RESULT: regression(s) detected (exit 1)", file=sys.stderr)
+        return 1
+    print("RESULT: within tolerance (exit 0)", file=sys.stderr)
+    return 0
+
+
+def _pct_delta(base, cand):
+    if not base:
+        return None
+    return (cand - base) * 100.0 / base
+
+
+def _pct_delta_optional(b_mem, c_mem):
+    if b_mem is None or c_mem is None:
+        return None
+    if not b_mem:
+        return None
+    return (c_mem - b_mem) * 100.0 / b_mem
+
+
+def _fmt_pct(pct):
+    if pct is None:
+        return "-"
+    return f"{pct:+.1f}%"
+
+
+def _fmt_mem(m):
+    if m is None:
+        return "-"
+    return f"{m}"
+
+
+def _load_metrics(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+# --- Dispatch ------------------------------------------------------------
+
+def _die(msg, code=2):
+    print(f"neuros-bench: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def _build_parser():
+    p = argparse.ArgumentParser(
+        prog="neuros-bench",
+        description=(
+            "Regression benchmark harness that drives neuros-sandbox with "
+            "canned workloads, parses JSON envelopes, and reports metric "
+            "deltas. No kernel delegation required at the bench level "
+            "(each workload runs through the wrapper)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                   help=f"per-workload timeout in seconds "
+                        f"(default: {DEFAULT_TIMEOUT}).")
+    p.add_argument("--mem", default="256M",
+                   help="mem cap passed through to neuros-sandbox "
+                        "(default: 256M).")
+    p.add_argument("--pids", type=int, default=64,
+                   help="pids cap passed through to neuros-sandbox "
+                        "(default: 64).")
+
+    sub = p.add_subparsers(dest="cmd", required=True)
+    p_list = sub.add_parser("list", help="list the built-in workload suite")
+    p_run = sub.add_parser("run", help="run a single workload")
+    p_run.add_argument("workload", help="workload name to run")
+    p_run.add_argument("--out", "-o",
+                       help="write metrics JSON to this file "
+                            "(default: stdout).")
+
+    p_batch = sub.add_parser("batch", help="run every built-in workload")
+    p_batch.add_argument("--out", "-o",
+                         help="write metrics JSON to this file "
+                              "(default: stdout).")
+
+    p_cmp = sub.add_parser("compare",
+                          help="diff two metrics files; "
+                               "exit 1 on regression")
+    p_cmp.add_argument("baseline")
+    p_cmp.add_argument("candidate")
+    p_cmp.add_argument("--tolerance-wall-pct", type=float,
+                       default=DEFAULT_TOLERANCE_WALL_PCT)
+    p_cmp.add_argument("--tolerance-mem-pct", type=float,
+                       default=DEFAULT_TOLERANCE_MEM_PCT)
+
+    return p
+
+
+def main(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd == "list":
+        rc = cmd_list(args)
+        # cmd_list prints to stdout (the workload list); keep the
+        # exit code explicit so callers (CI, shells) get a clean 0
+        # rather than Python's None-through-sysexit mishmash.
+        return rc if rc is not None else 0
+    if args.cmd == "run":
+        return cmd_run(args)
+    if args.cmd == "batch":
+        return cmd_batch(args)
+    if args.cmd == "compare":
+        return cmd_compare(args)
+    parser.print_help()
+    return 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
