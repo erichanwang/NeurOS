@@ -30,8 +30,8 @@ nn -i                                    # interactive chat mode
 `Ctrl+Space` in a terminal opens `nn` inline. It picks up the current
 directory and git branch, and can read files you point it at.
 
-`nn` can optionally include system-wide context — the active window
-title, clipboard contents, and recently modified files under `$HOME` —
+`nn` can optionally include system-wide context (the active window
+title, clipboard contents, and recently modified files under `$HOME`)
 in the prompt it sends to Ollama. **All three are off by default.** They
 are enabled per-source in `~/.config/neuros/llm.conf` under `[context]`:
 
@@ -54,7 +54,7 @@ A GTK3 + AppIndicator tray icon showing model status and RAM usage,
 with a quick-ask box, a "Switch Model" submenu, and a pause/resume
 control for the LLM daemon. The model submenu lists installed models
 (radio items, current default checked) and switches by shelling out to
-`neuros-model switch <name>` — the tray doesn't reimplement any of
+`neuros-model switch <name>`; the tray doesn't reimplement any of
 `neuros-model`'s logic. The pause/resume action goes through a scoped
 polkit rule (`etc/polkit-1/rules.d/49-neuros-llm.rules`) so it doesn't
 need a password prompt or run the tray process as root.
@@ -112,8 +112,8 @@ Real numbers from `neuros-model benchmark`, run against a live Ollama
 
 | Model          | Size   | Speed (tok/s) | Hardware                          |
 |----------------|--------|---------------|------------------------------------|
-| qwen2.5:0.5b   | 397 MB | 18–19.5       | 16-core x86_64 CPU, no GPU (3 runs) |
-| llama3.2:1b    | 1.3 GB | 7.7–8.2       | 16-core x86_64 CPU, no GPU (3 runs) |
+| qwen2.5:0.5b   | 397 MB | 18-19.5       | 16-core x86_64 CPU, no GPU (3 runs) |
+| llama3.2:1b    | 1.3 GB | 7.7-8.2       | 16-core x86_64 CPU, no GPU (3 runs) |
 
 These were measured in a CPU-only sandboxed VM, which is not the
 hardware NeurOS recommends (see [Hardware Requirements](#hardware-requirements));
@@ -124,7 +124,7 @@ neuros-model pull qwen2.5:0.5b
 neuros-model benchmark qwen2.5:0.5b
 ```
 
-The default model (`mistral`, 7B) was not benchmarked here — pulling it
+The default model (`mistral`, 7B) was not benchmarked here; pulling it
 requires several GB and minutes of download that weren't available in
 this environment. Run the command above with `mistral` on real target
 hardware to get that number.
