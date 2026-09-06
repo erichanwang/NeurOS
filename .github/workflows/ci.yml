@@ -44,8 +44,9 @@ jobs:
         run: |
           echo "Checking Python syntax..."
           FAILED=0
-          for f in $(find config/includes.chroot/usr/local/bin -type f \
-            -exec head -1 {} \; -print | grep -B1 'python3' | grep '^config/' || true); do
+          for f in config/includes.chroot/usr/local/bin/*; do
+            [ -f "$f" ] || continue
+            head -1 "$f" | grep -q python3 || continue
             python3 -c "import ast; ast.parse(open('$f').read())" \
               && echo "OK: ${f##*/}" || { echo "FAIL: ${f##*/}"; FAILED=$((FAILED+1)); }
           done
