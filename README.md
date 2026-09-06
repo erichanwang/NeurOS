@@ -1,5 +1,7 @@
 # NeurOS
 
+[![CI](https://github.com/erichanwang/NeurOS/actions/workflows/ci.yml/badge.svg)](https://github.com/erichanwang/NeurOS/actions/workflows/ci.yml)
+
 A custom Ubuntu 24.04 LTS-based Linux distribution with a local LLM
 (Ollama plus a small Qwen or Mistral model) built into the OS as a first
 class feature: a terminal assistant, a system tray applet, editor
