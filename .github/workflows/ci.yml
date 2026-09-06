@@ -105,16 +105,12 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
-        run: docker build -t neuros-build . 2>&1 || echo "Docker build skipped (non-critical in CI)"
+        run: docker build -t neuros-build .
 
-      - name: Verify Docker image (if built)
+      - name: Verify Docker image
         run: |
-          if docker image inspect neuros-build >/dev/null 2>&1; then
-            docker run --rm neuros-build bash -c "
-              echo 'Container verified:'
-              python3 --version 2>&1 || echo 'Python: not found'
-              echo 'NeurOS tools:' \$(find /usr/local/bin -name 'neuros-*' 2>/dev/null | wc -l)
-            "
-          else
-            echo "Docker image not built — check Dockerfile"
-          fi
+          docker run --rm --entrypoint bash neuros-build -c "
+            echo 'Container verified:'
+            python3 --version
+            echo 'NeurOS tools:' \$(find /usr/local/bin -name 'neuros-*' | wc -l)
+          "
