@@ -23,6 +23,11 @@ ISO_NAME="live-image-amd64.hybrid.iso"
 SNAPSHOT_TS="20260701T000000Z"
 SNAPSHOT_MIRROR="https://snapshot.ubuntu.com/ubuntu/${SNAPSHOT_TS}"
 
+# live-build must run as root. Inside the build container we already are;
+# on a host we are not, so only reach for sudo when needed.
+SUDO=""
+[[ $EUID -ne 0 ]] && SUDO="sudo"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -70,8 +75,8 @@ check_prerequisites() {
     # Check for live-build
     if ! command -v lb &>/dev/null; then
         log "live-build not found. Installing..."
-        sudo apt-get update
-        sudo apt-get install -y live-build
+        $SUDO apt-get update
+        $SUDO apt-get install -y live-build
         success "live-build installed."
     fi
 
@@ -101,6 +106,11 @@ configure_live_build() {
         # ships with normal, current sources.list entries -- installed
         # systems should get real ongoing updates, not be frozen to a
         # months-old snapshot forever.
+        # --syslinux-theme live-build: the ubuntu-oneiric default needs
+        # syslinux-themes-ubuntu-oneiric and gfxboot-theme-ubuntu, neither of
+        # which exists in noble; live-build's own templates need only librsvg2-bin.
+        # --debian-installer false, not none: Ubuntu's live-build (3.0~a57)
+        # accepts none at config time but its binary stage rejects it.
         # --mode ubuntu is required for live-build to default to Ubuntu's
         # mirrors/keyring for an Ubuntu suite; without it, lb config
         # defaults to Debian's own archive, which has no "noble" suite
@@ -109,7 +119,11 @@ configure_live_build() {
             --mode ubuntu \
             --distribution noble \
             --archive-areas "main restricted universe multiverse" \
-            --debian-installer none \
+            --debian-installer false \
+            --syslinux-theme live-build \
+            --iso-volume "NeurOS noble" \
+            --iso-application "NeurOS Live" \
+            --iso-publisher "NeurOS" \
             --memtest none \
             --binary-images iso-hybrid \
             --mirror-bootstrap "$SNAPSHOT_MIRROR" \
@@ -165,7 +179,13 @@ build_iso() {
     START_TIME=$(date +%s)
 
     # Run live-build
-    if sudo lb build 2>&1 | tee "$BUILD_LOG"; then
+    if $SUDO lb build 2>&1 | tee "$BUILD_LOG"; then
+        # live-build 3.x names the image binary.hybrid.iso; 4.x uses the
+        # live-image-* name this script has always advertised. Normalise.
+        if [[ -f binary.hybrid.iso && ! -f "$ISO_NAME" ]]; then
+            $SUDO mv binary.hybrid.iso "$ISO_NAME"
+            $SUDO chown "$(id -u):$(id -g)" "$ISO_NAME" 2>/dev/null || true
+        fi
         END_TIME=$(date +%s)
         DURATION=$((END_TIME - START_TIME))
         MINUTES=$((DURATION / 60))
@@ -223,7 +243,7 @@ clean_build() {
 
     # Clean live-build artifacts
     if [[ -f "Makefile" ]] || [[ -d ".build" ]]; then
-        sudo lb clean 2>/dev/null || true
+        $SUDO lb clean 2>/dev/null || true
     fi
 
     # Remove ISO

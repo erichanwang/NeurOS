@@ -22,3 +22,27 @@ Thumbs.db
 *.md
 !README.md
 
+
+# live-build artifacts
+.build/
+cache/
+chroot/
+binary/
+local/
+config/binary
+config/bootstrap
+config/chroot
+config/common
+config/source
+config/build
+*.packages
+*.contents
+*.hybrid.iso.zsync
+*.list
+
+# live-build lock file, left behind when a build is killed
+.lock
+boot-test/
+*.zsync.xz
+chroot.headers
+chroot.packages.*

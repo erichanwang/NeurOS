@@ -5,27 +5,45 @@ set -e
 
 echo "[NeurOS] Installing Ollama..."
 
-# Install Ollama. The installer is fetched from a pinned commit (the
-# scripts/install.sh at the v0.32.5 release tag) instead of the floating
-# ollama.com/install.sh, and OLLAMA_VERSION pins the binary itself --
-# otherwise both the installer logic and the installed version can drift
-# between builds.
-OLLAMA_INSTALL_SHA="eec8e0b9458b8a01be0c216a9cc53eefde24ef50"  # v0.32.5
-export OLLAMA_VERSION="0.32.5"
-curl -fsSL "https://raw.githubusercontent.com/ollama/ollama/${OLLAMA_INSTALL_SHA}/scripts/install.sh" | sh
+# Install the pinned release tarball directly instead of running the
+# upstream installer: the installer wants a live systemd (it enables and
+# starts ollama.service, which fails inside a chroot), creates an `ollama`
+# user we do not use, and installs a second service that would fight
+# neuros-llm.service for port 11434. The tarball is pinned by version AND
+# sha256 (from the release's sha256sum.txt), so this cannot drift.
+OLLAMA_VERSION="0.32.5"
+OLLAMA_SHA256="f7d6bdbcf71b83aa8670c4e7dc4b6936c0952fcf8b114eaf6a11cbadb9684214"
+OLLAMA_URL="https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst"
+curl -fsSL "$OLLAMA_URL" -o /tmp/ollama.tar.zst
+echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c -
+# Tarball layout is bin/ollama + lib/ollama/*; neuros-llm.service expects
+# /usr/local/bin/ollama, so unpack under /usr/local.
+tar --zstd -xf /tmp/ollama.tar.zst -C /usr/local
+rm -f /tmp/ollama.tar.zst
+ollama --version
 
-# Pre-pull Mistral 7B model (quantized, ~4GB). This still floats: "mistral"
-# resolves to whatever the Ollama library's latest tag points to. Unlike
-# assumed, the manifest digest IS cheaply queryable without pulling the
-# full model -- GET https://registry.ollama.ai/v2/library/mistral/manifests/latest
-# returns a small (<1KB) JSON manifest, not the model blob. But Ollama's
-# own pull path has no documented `name@sha256:digest` pin syntax (unlike
-# `docker pull`/`ollama.com`'s per-tag digest display), so committing a
-# digest here is unverified without an actual `ollama pull` of the ~4GB
-# model against that reference, which this environment intentionally does
-# not do. Left floating; see README's Reproducibility section.
+# Pre-pull Mistral 7B (~4GB). `ollama pull` talks to a running server, and
+# there is no systemd in the chroot, so run one for the duration of the
+# pull with the same model directory neuros-llm.service uses on the booted
+# system. The tag still floats: "mistral" resolves to whatever the Ollama
+# library's latest tag points to, and Ollama's pull has no documented
+# digest-pin syntax. See README's Reproducibility section.
+export OLLAMA_HOST=127.0.0.1:11434
+export OLLAMA_MODELS=/var/lib/ollama/models
+mkdir -p "$OLLAMA_MODELS"
+ollama serve >/tmp/ollama-serve.log 2>&1 &
+OLLAMA_PID=$!
+for i in $(seq 1 60); do
+    curl -fs "http://${OLLAMA_HOST}/api/tags" >/dev/null 2>&1 && break
+    sleep 1
+done
+curl -fs "http://${OLLAMA_HOST}/api/tags" >/dev/null || { cat /tmp/ollama-serve.log; echo "[NeurOS] ollama serve did not come up"; exit 1; }
 echo "[NeurOS] Pulling Mistral 7B model (this will take a while)..."
 ollama pull mistral
+ollama list
+kill "$OLLAMA_PID"
+wait "$OLLAMA_PID" 2>/dev/null || true
+rm -f /tmp/ollama-serve.log
 
 # Enable the systemd service so Ollama starts on boot
 systemctl enable neuros-llm.service

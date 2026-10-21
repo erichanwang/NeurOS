@@ -459,6 +459,59 @@ sudo lb build 2>&1 | tee build.log
 ```
 
 This takes 20 to 40 minutes and produces `live-image-amd64.hybrid.iso`.
+
+The supported way is inside the build container, which pins live-build
+itself and carries the two live-build patches described below:
+
+```sh
+docker build -t neuros-build .
+docker run --rm --privileged -v "$PWD:/workspace" -w /workspace \
+  --entrypoint bash neuros-build -c ./build.sh
+```
+
+Measured on 2026-09-07 on a 16-thread laptop: the chroot and squashfs
+stages take about 18 minutes, the ISO stage under 2 minutes, and the
+result is 8.56 GB (Mistral 7B is 4.1 GB of that). Under QEMU/KVM it
+reaches the GNOME session with the welcome dialog in about 75 seconds.
+
+### live-build 3 on noble
+
+Ubuntu ships live-build 3.0~a57, which predates syslinux 6, zstd
+initramfs compression, and files over 4 GiB. Getting it to produce a
+bootable image on noble needed these, all of which live in this repo:
+
+- `--syslinux-theme live-build` and a repo-owned
+  `config/bootloaders/isolinux/` template with `isolinux.bin` and the
+  `.c32` modules pointed at noble's real paths, `ldlinux.c32`/
+  `libcom32.c32`/`libutil.c32` added (syslinux 6 will not boot without
+  them), a pre-rendered `splash.png`, and stand-ins for the gfxboot files
+  live-build unconditionally unpacks. See `config/bootloaders/README.md`.
+- `isolinux`, `syslinux-utils`, and `xorriso` in the chroot package list,
+  because live-build installs the ISO tooling inside the chroot.
+- `zstd`, `lz4`, `xz-utils` in the build container, so `unmkinitramfs`
+  can read noble's initrd when `binary_disk` extracts the casper UUID.
+- Two one-line patches to live-build applied in the `Dockerfile`: the
+  casper branch of `lb_binary_syslinux` edits `${_SUFFIX}/live.cfg`
+  (undefined) instead of `${_TARGET}/live.cfg`, and `lb_binary_iso` calls
+  `genisoimage`, which cannot store the 8.5 GB squashfs; it now calls
+  `xorriso -as mkisofs -iso-level 3`, as Ubuntu's own ISOs do.
+- A binary hook that renames `binary/casper/vmlinuz-*` to `vmlinuz` and
+  `initrd.img-*` to `initrd.img`, since live-build only does that for
+  the `binary/live` layout.
+
+### Boot checks
+
+Two headless checks, both need `qemu-system-x86_64` and work without KVM
+(slowly):
+
+```sh
+scripts/boot-test.sh    # real isolinux boot path; screenshots every 30 s into boot-test/
+scripts/boot-smoke.sh   # -kernel/-initrd boot with a serial console; waits for graphical.target
+```
+
+Known first-boot issues as of 2026-09-07: `neuros-autofix.service` fails to
+start (visible on the boot console), and the welcome dialog's emoji render
+as missing-glyph boxes because no color emoji font is installed.
 Before building, `validate-build.sh` checks the repo for the kind of
 mistake that's invisible until boot, most notably scripts and hooks
 losing their executable bit in a fresh git clone (git tracks the mode
@@ -469,7 +522,7 @@ though the build itself succeeds).
 ./validate-build.sh
 ```
 
-Test the ISO in a VM before writing it to real hardware:
+To look at it interactively before writing it to real hardware:
 
 ```sh
 qemu-system-x86_64 -m 8192 -smp 4 -cdrom live-image-amd64.hybrid.iso \

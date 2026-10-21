@@ -19,6 +19,9 @@ ENV TZ=UTC
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     live-build \
+    zstd \
+    lz4 \
+    xz-utils \
     debootstrap \
     squashfs-tools \
     xorriso \
@@ -69,4 +72,24 @@ RUN echo "NeurOS Build Container Ready" && \
     echo "Tools: $(ls /usr/local/bin/ | grep neuros | tr '\n' ' ')"
 
 ENTRYPOINT ["/opt/neuros/build.sh"]
+
+# Upstream bug in Ubuntu's live-build 3.0~a57: the casper branch of
+# lb_binary_syslinux rewrites ${_SUFFIX}/live.cfg (undefined) instead of
+# ${_TARGET}/live.cfg, so any build with a plain live.cfg template dies with
+# "sed: can't read /live.cfg". Fix the one variable name.
+RUN sed -i 's|${_SUFFIX}/live.cfg|${_TARGET}/live.cfg|' /usr/lib/live/build/lb_binary_syslinux \
+ && grep -q '${_TARGET}/live.cfg' /usr/lib/live/build/lb_binary_syslinux \
+ && ! grep -q '_SUFFIX' /usr/lib/live/build/lb_binary_syslinux
+
+
+# genisoimage (cdrkit) cannot store a file over 4 GiB; NeurOS's squashfs is
+# ~8.5 GB because Mistral 7B ships inside it. Build the ISO with xorriso's
+# mkisofs emulation at ISO level 3 instead, which is what Ubuntu's own ISOs use.
+RUN sed -i \
+      -e 's|Check_package chroot/usr/bin/genisoimage genisoimage|Check_package chroot/usr/bin/xorriso xorriso|' \
+      -e 's|^genisoimage \${GENISOIMAGE_OPTIONS}|xorriso -as mkisofs -iso-level 3 ${GENISOIMAGE_OPTIONS}|' \
+      /usr/lib/live/build/lb_binary_iso \
+ && grep -q 'xorriso -as mkisofs -iso-level 3' /usr/lib/live/build/lb_binary_iso \
+ && grep -q 'chroot/usr/bin/xorriso xorriso' /usr/lib/live/build/lb_binary_iso
+
 CMD ["--help"]

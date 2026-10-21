@@ -1,0 +1,11 @@
+#!/bin/sh
+# live-build 3.0~a57's isolinux step only renames kernels under binary/live,
+# but Ubuntu mode (casper) puts them under binary/casper, so the template's
+# live.cfg points at /casper/vmlinuz and /casper/initrd.img and this hook
+# gives the files those names. Runs after binary_syslinux, before binary_iso.
+set -e
+# live-build may invoke hooks from the build root or from binary/
+cd binary/casper 2>/dev/null || cd casper
+for f in vmlinuz-*; do [ -e "$f" ] && mv "$f" vmlinuz; done
+for f in initrd.img-*; do [ -e "$f" ] && mv "$f" initrd.img; done
+ls -la vmlinuz initrd.img

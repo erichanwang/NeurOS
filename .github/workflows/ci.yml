@@ -106,7 +106,7 @@ jobs:
             --mode ubuntu \
             --distribution noble \
             --archive-areas "main restricted universe multiverse" \
-            --debian-installer none \
+            --debian-installer false \
             --memtest none \
             --binary-images iso-hybrid \
             --mirror-bootstrap "$SNAPSHOT_MIRROR" \
