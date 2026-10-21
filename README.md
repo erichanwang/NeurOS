@@ -73,8 +73,16 @@ a thin GUI over this CLI (see above).
 Implements the Model Context Protocol over HTTP and JSON-RPC:
 `initialize`, `tools/list`, `tools/call`, and `resources/list`, with
 tools for `read_file`, `list_directory`, `run_command`, `ask_llm`,
-`get_system_info`, and `git_status`. `run_command` is checked against
-shell-metacharacter injection; see `tests/test_mcp.py`.
+`get_system_info`, and `git_status`. `run_command` runs without a shell
+and only allows a fixed read-only allowlist (`ls`, `cat`,
+`git status/log/diff/show/branch`, ...; see `tools/list`), with the
+timeout capped at 60 s. The HTTP transport sends no CORS headers
+(`OPTIONS` gets 403), rejects any `Host` other than
+`127.0.0.1`/`localhost`/`[::1]` on the bound port, rejects requests
+carrying an `Origin` not in `NEUROS_MCP_ALLOWED_ORIGINS` (empty by
+default), and requires `Authorization: Bearer <token>`. The token comes
+from `NEUROS_MCP_TOKEN` or `~/.config/neuros/mcp-token` (created 0600 on
+first start). See `tests/test_mcp.py` and `tests/test_neuros_mcp.py`.
 
 ### Code completion
 
@@ -245,6 +253,7 @@ python3 tests/test_nn.py
 python3 tests/test_autofix.py
 python3 tests/test_model.py
 python3 tests/test_mcp.py
+python3 tests/test_neuros_mcp.py
 ./validate-build.sh
 ```
 

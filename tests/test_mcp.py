@@ -78,6 +78,7 @@ class TestMCPWireProtocol(unittest.TestCase):
     def setUp(self):
         self.mcp = load_neuros_mcp()
         self.server = self.mcp.HTTPServer(("127.0.0.1", 0), self.mcp.MCPServer)
+        self.server.token = "wire-test-token"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.host, self.port = self.server.server_address
@@ -92,7 +93,8 @@ class TestMCPWireProtocol(unittest.TestCase):
         body = json.dumps(message).encode("utf-8") if not isinstance(message, bytes) else message
         connection = http.client.HTTPConnection(self.host, self.port, timeout=2)
         connection.request("POST", "/", body=body,
-                           headers={"Accept": accept, "Content-Type": content_type})
+                           headers={"Accept": accept, "Content-Type": content_type,
+                                    "Authorization": "Bearer wire-test-token"})
         response = connection.getresponse()
         raw_body = response.read()
         connection.close()

@@ -13,7 +13,9 @@ Default port: 11436
 
 import sys
 import os
+import hmac
 import json
+import secrets
 import shlex
 import subprocess
 import argparse
@@ -22,6 +24,53 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 DEFAULT_PORT = 11436
 OLLAMA_URL = "http://localhost:11434/api/generate"
 SUPPORTED_PROTOCOL_VERSION = "2024-11-05"
+TOKEN_FILE = os.path.expanduser("~/.config/neuros/mcp-token")
+
+# Browsers attach Origin; native MCP clients don't. Empty by default.
+ALLOWED_ORIGINS = {o.strip() for o in os.environ.get("NEUROS_MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()}
+
+# run_command only runs these read-only programs (no shells/interpreters).
+ALLOWED_COMMANDS = {"ls", "cat", "head", "tail", "wc", "pwd", "whoami", "uname",
+                    "df", "du", "free", "uptime", "date", "echo", "git"}
+ALLOWED_GIT_SUBCOMMANDS = {"status", "log", "diff", "show", "branch"}
+# `git branch` with arbitrary args can create/delete/rename branches.
+ALLOWED_GIT_BRANCH_ARGS = {"-a", "-r", "-v", "-vv", "--list", "--all", "--remotes", "--show-current"}
+MAX_TIMEOUT = 60
+
+
+def load_token():
+    """Return (token, source). Env NEUROS_MCP_TOKEN wins, else a per-user 0600 file."""
+    token = os.environ.get("NEUROS_MCP_TOKEN")
+    if token:
+        return token, "NEUROS_MCP_TOKEN"
+    os.makedirs(os.path.dirname(TOKEN_FILE), mode=0o700, exist_ok=True)
+    os.chmod(os.path.dirname(TOKEN_FILE), 0o700)
+    try:
+        fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_urlsafe(32) + "\n")
+    except FileExistsError:
+        pass
+    with open(TOKEN_FILE) as f:
+        return f.read().strip(), TOKEN_FILE
+
+
+def check_command(argv):
+    """Return an error string if argv isn't allowlisted, else None."""
+    if not argv:
+        return "Empty command"
+    if "/" in argv[0] or argv[0] not in ALLOWED_COMMANDS:
+        return f"Command not allowed: {argv[0]} (allowed: {', '.join(sorted(ALLOWED_COMMANDS))})"
+    if argv[0] == "git":
+        # Subcommand must come first: rules out -c/-C/--exec-path global options.
+        if len(argv) < 2 or argv[1] not in ALLOWED_GIT_SUBCOMMANDS:
+            return f"git subcommand not allowed (allowed: {', '.join(sorted(ALLOWED_GIT_SUBCOMMANDS))})"
+        if argv[1] == "branch" and not set(argv[2:]) <= ALLOWED_GIT_BRANCH_ARGS:
+            return "git branch: args not allowed (listing flags only)"
+        # ponytail: flag denylist for writes/exec (--output, --ext-diff); repo-local config (diff.external) still applies.
+        if any(a.startswith("--output") or a == "--ext-diff" for a in argv[2:]):
+            return "git: --output/--ext-diff not allowed"
+    return None
 
 
 class MCPServer(BaseHTTPRequestHandler):
@@ -35,11 +84,31 @@ class MCPServer(BaseHTTPRequestHandler):
 
     def _send_no_content(self):
         self.send_response(202)
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def check_request(self):
+        """Host/Origin/token gate for every HTTP request. Sends the error and
+        returns False on rejection."""
+        port = self.server.server_port
+        host = self.headers.get("Host", "").lower()
+        if host not in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}:
+            self._send_error(-32600, "Bad Host header", status=403)
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in ALLOWED_ORIGINS:
+            self._send_error(-32600, "Origin not allowed", status=403)
+            return False
+        auth = self.headers.get("Authorization", "")
+        expected = "Bearer " + self.server.token
+        if not hmac.compare_digest(auth.encode(), expected.encode()):
+            self._send_error(-32600, "Missing or invalid bearer token", status=401)
+            return False
+        return True
+
     def do_POST(self):
+        if not self.check_request():
+            return
         content_type = self.headers.get("Content-Type", "")
         accept = {value.strip().split(";", 1)[0].lower()
                   for value in self.headers.get("Accept", "").split(",")}
@@ -116,12 +185,13 @@ class MCPServer(BaseHTTPRequestHandler):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self.check_request():
+            return
         if self.path == "/health":
             self.send_json({"status": "ok", "version": "1.0.0", "ollama": check_ollama()})
         else:
@@ -132,11 +202,8 @@ class MCPServer(BaseHTTPRequestHandler):
             })
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+        # No CORS: never grant cross-origin access.
+        self._send_error(-32600, "Cross-origin requests not allowed", status=403)
 
     def handle_initialize(self, params):
         if not isinstance(params.get("protocolVersion"), str):
@@ -195,12 +262,14 @@ class MCPServer(BaseHTTPRequestHandler):
                 },
                 {
                     "name": "run_command",
-                    "description": "Run a shell command (no shell metacharacters for safety)",
+                    "description": ("Run an allowlisted read-only command (no shell). Allowed: "
+                                    + ", ".join(sorted(ALLOWED_COMMANDS))
+                                    + "; git only with: " + ", ".join(sorted(ALLOWED_GIT_SUBCOMMANDS))),
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "command": {"type": "string", "description": "Shell command to run"},
-                            "timeout": {"type": "number", "description": "Timeout in seconds"}
+                            "timeout": {"type": "number", "description": f"Timeout in seconds (max {MAX_TIMEOUT})"}
                         },
                         "required": ["command"]
                     }
@@ -292,11 +361,15 @@ class MCPServer(BaseHTTPRequestHandler):
 
     def tool_run_command(self, args):
         cmd = args.get("command", "")
-        timeout = args.get("timeout", 30)
         try:
+            timeout = min(float(args.get("timeout", 30)), MAX_TIMEOUT)
             # Use shlex.split for safe argument parsing - no shell injection
+            argv = shlex.split(cmd)
+            error = check_command(argv)
+            if error:
+                return {"content": [{"type": "text", "text": error}], "isError": True}
             result = subprocess.run(
-                shlex.split(cmd), capture_output=True, text=True, timeout=timeout
+                argv, capture_output=True, text=True, timeout=timeout
             )
             output = result.stdout
             if result.returncode != 0 and result.stderr:
@@ -442,6 +515,7 @@ def main():
     args = parser.parse_args()
 
     server = HTTPServer((args.host, args.port), MCPServer)
+    server.token, token_source = load_token()
 
     print(f"""
 ╔══════════════════════════════════════════╗
@@ -453,6 +527,8 @@ def main():
 ║         ask_llm, sys_info, git_status    ║
 ╚══════════════════════════════════════════╝
 
+Auth:  Authorization: Bearer <token>
+Token: {token_source}
 Press Ctrl+C to stop.
 """)
 
