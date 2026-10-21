@@ -76,7 +76,14 @@ dispatcher (`dispatch_request`) for `initialize`, `notifications/
 initialized`, `tools/list`, `tools/call`, `resources/list`, and
 `resources/read`, with tools for `read_file`, `list_directory`,
 `run_command`, `ask_llm`, `get_system_info`, and `git_status`.
-`run_command` is checked against shell-metacharacter injection. The
+`run_command` runs without a shell and only allows a fixed read-only
+allowlist (`ls`, `cat`, `git status/log/diff/show/branch`, ...; see
+`tools/list`). The HTTP transport sends no CORS headers, rejects any
+`Host` other than `127.0.0.1`/`localhost`/`[::1]` on the bound port,
+rejects requests carrying an `Origin` not in
+`NEUROS_MCP_ALLOWED_ORIGINS` (empty by default), and requires
+`Authorization: Bearer <token>`. The token comes from `NEUROS_MCP_TOKEN`
+or `~/.config/neuros/mcp-token` (created 0600 on first start). The
 stdio transport was verified against the official `mcp` Python SDK
 client (`ClientSession` over `stdio_client`): initialize handshake,
 `tools/list`, and `tools/call` all round-trip correctly. See
